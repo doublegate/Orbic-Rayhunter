@@ -56,3 +56,12 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
   `*.ndjson`, `*.pcap`), Ghidra projects, extracted firmware, `wpa_sta.conf`, `.env` files and
   downloaded papers whose licenses do not permit redistribution.
 - Device identifiers are kept out of the repository; test fixtures use a synthetic USB serial.
+- `upstream-watch.yml` validates upstream tag names against strict SemVer and passes them to
+  the shell through `env` instead of expression interpolation; every `actions/checkout` sets
+  `persist-credentials: false`.
+
+### Fixed
+
+- Scripts are committed with mode `100755`; the first CI run failed with `Permission denied`
+  because the repository uses `core.fileMode=false`. CI now fails early if a script loses its
+  executable bit.

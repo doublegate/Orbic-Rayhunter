@@ -22,6 +22,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -34,7 +36,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: shellcheck --version && shellcheck scripts/*.sh
+      # core.fileMode=false clones (NAS share) can drop the exec bit silently.
+      - name: Scripts are committed executable (mode 100755)
+        run: |
+          bad=$(git ls-files -s scripts/*.sh | awk '$1 != "100755" {print $4}')
+          if [ -n "$bad" ]; then echo "::error::not executable in git: $bad"; exit 1; fi
 
   patched-upstream:
     name: patch series + armv7 daemon build
@@ -43,6 +52,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
+          persist-credentials: false
       - name: Apply patches/series onto pinned upstream
         run: scripts/apply-patches.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

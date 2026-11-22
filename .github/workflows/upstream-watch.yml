@@ -17,19 +17,26 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          persist-credentials: false
       - name: Compare pinned and latest upstream tags
         id: cmp
         run: |
           git -C upstream fetch --tags --quiet origin
           pinned=$(git -C upstream describe --tags --exact-match 2>/dev/null || git -C upstream rev-parse --short HEAD)
           latest=$(git -C upstream tag --list 'v*' --sort=-v:refname | head -n1)
+          # Upstream tag names are third-party input: accept strict SemVer tags only.
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ "$latest" =~ $semver ]] || { echo "::error::unexpected upstream tag name"; exit 1; }
+          [[ "$pinned" =~ $semver || "$pinned" =~ ^[0-9a-f]{7,40}$ ]] || { echo "::error::unexpected pinned ref"; exit 1; }
           echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
       - name: Trial-apply patches on latest tag
         if: steps.cmp.outputs.pinned != steps.cmp.outputs.latest
         id: trial
         continue-on-error: true
-        run: scripts/sync-upstream.sh "${{ steps.cmp.outputs.latest }}"
+        env:
+          LATEST: ${{ steps.cmp.outputs.latest }}
+        run: scripts/sync-upstream.sh "$LATEST"
       - name: Open tracking issue
         if: steps.cmp.outputs.pinned != steps.cmp.outputs.latest
         env:
