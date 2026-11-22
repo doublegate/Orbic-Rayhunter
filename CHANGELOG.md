@@ -65,7 +65,9 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 - CI is path-aware: `ci`, `docs` and `security` each begin with a `detect changes` job
   (`dorny/paths-filter`) and skip jobs whose inputs did not change, using job-level `if:` so
   required checks still report as passing. `gitleaks` always runs; scheduled and manual runs
-  run every job. See `docs/CI.md`.
+  run every job. The detection jobs (`detect changes (ci|docs|security)`) are themselves
+  required checks, so a detection failure blocks the merge instead of silently skipping every
+  gated check (fail closed). See `docs/CI.md`.
 - CI caching: Rust caches saved only from `main` (restored by PRs and releases), patched-upstream
   cache keyed on the patch series, rustup toolchain plus armv7 target, npm, the gitleaks binary
   and lychee link results. Pull-request runs cancel superseded runs; every job has a timeout;

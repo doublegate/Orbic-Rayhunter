@@ -21,7 +21,10 @@ concurrency:
 
 jobs:
   changes:
-    name: detect changes
+    # Unique name, listed as a required check in the `main` ruleset: if change
+    # detection fails, its dependents are skipped (which would otherwise read as
+    # passing), so this check must fail closed and block the merge itself.
+    name: detect changes (docs)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

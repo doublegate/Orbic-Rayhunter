@@ -5,7 +5,7 @@ the `main` repository ruleset.
 
 ## Path-aware jobs
 
-Each of `ci.yml`, `docs.yml` and `security.yml` starts with a `detect changes` job
+Each of `ci.yml`, `docs.yml` and `security.yml` starts with a `detect changes (<workflow>)` job
 (`dorny/paths-filter`, pinned) that classifies the diff of a push or pull request. Every other job
 declares `needs: changes` and an `if:` on the relevant output, so it is **skipped** when its
 inputs did not change.
@@ -57,8 +57,12 @@ replaced the classic branch protection rule on 2026-11-22. Rules:
 - Require a pull request (0 approvals, review threads resolved, squash merge only).
 - Require these status checks, each pinned to the GitHub Actions app (integration 15368) so no
   other app can satisfy a check by posting a status with the same name:
+  `detect changes (ci)`, `detect changes (docs)`, `detect changes (security)`,
   `host crates (fmt, clippy, test)`, `shellcheck`, `patch series + armv7 daemon build`,
   `markdownlint`, `links`, `gitleaks`, `cargo-audit`, `codeql`.
+  The three detection jobs are required so the gating fails closed: if detection errors or times
+  out, its dependents are skipped (which GitHub counts as passing), but the detection check itself
+  fails and blocks the merge.
 - Bypass: the repository admin role, mode "always". This is intentional: the maintainer may push
   directly to `main`, and such pushes are checked by CI after they land rather than before.
   Contributors go through pull requests.
