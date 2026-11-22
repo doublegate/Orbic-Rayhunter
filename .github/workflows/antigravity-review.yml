@@ -108,7 +108,22 @@ jobs:
       # they could never fire again, and their PR-head checkout trips CodeQL's
       # actions/untrusted-checkout (high) on every scan. Re-add them only for a repository that
       # has never had the reviewer on its default branch.
+      #
+      # Without bootstrap, a PR opened while the default branch has no reviewer (the PR that
+      # installs it) cannot be reviewed: the scripts this job runs come from the default branch.
+      # Report that as a visible warning and skip, rather than a red check that only means "not
+      # installed yet". Only the absence of the script is tolerated; any failure inside it is not.
+      - name: Check the reviewer is on the default branch
+        id: reviewer
+        run: |
+          if [ -f scripts/agy-review.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=Antigravity review skipped::scripts/agy-review.sh is not on the default branch yet, so this PR cannot be reviewed. Reviews run once the reviewer is merged."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Run Antigravity review
+        if: steps.reviewer.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # --- optional overrides (uncomment to change) ---

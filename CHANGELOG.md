@@ -122,6 +122,9 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 - The armv7 build installs the upstream toolchain and target before `rust-cache` probes `rustc`;
   `release.yml` restores the rustup cache and no longer restores the dev-profile host cache.
 - The reviewer's first-install bootstrap steps are removed (CodeQL `actions/untrusted-checkout`).
+- The `review` job skips with a visible warning, instead of failing red, while the reviewer
+  scripts are not yet on the default branch (the PR that installs it); any failure inside the
+  reviewer still fails the job.
 - `scripts/apply-patches.sh` canonicalizes the destination and patch directory: git ignores
   relative `GIT_CEILING_DIRECTORIES` entries, so a relative `$1` would again have skipped every
   patch. Tests now cover relative paths and assert that unchanged files keep their mtime.
