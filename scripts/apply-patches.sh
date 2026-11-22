@@ -15,10 +15,29 @@ if [[ ! -e "$root/upstream/.git" ]]; then
     exit 1
 fi
 
+# Build outputs survive re-staging so incremental and CI-cached builds stay
+# warm: cargo's target/ and npm's node_modules/ are moved aside and restored.
+# Everything else in $dest is replaced, so sources always match upstream +
+# patches exactly. Cargo rebuilds whatever the new sources invalidate.
+keep=(target node_modules)
+stash="$(dirname "$dest")/.keep-$(basename "$dest")"
+rm -rf "$stash"
+if [[ -d "$dest" ]]; then
+    mkdir -p "$stash"
+    for d in "${keep[@]}"; do
+        [[ -e "$dest/$d" ]] && mv "$dest/$d" "$stash/$d"
+    done
+fi
 rm -rf "$dest"
-mkdir -p "$(dirname "$dest")"
+mkdir -p "$dest"
 # Export the committed submodule tree (no untracked files, no .git).
-git -C "$root/upstream" archive --format=tar HEAD | { mkdir -p "$dest" && tar -x -C "$dest"; }
+git -C "$root/upstream" archive --format=tar HEAD | tar -x -C "$dest"
+if [[ -d "$stash" ]]; then
+    for d in "${keep[@]}"; do
+        [[ -e "$stash/$d" ]] && mv "$stash/$d" "$dest/$d"
+    done
+    rm -rf "$stash"
+fi
 
 count=0
 while IFS= read -r line || [[ -n "$line" ]]; do

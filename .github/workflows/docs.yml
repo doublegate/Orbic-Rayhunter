@@ -1,17 +1,58 @@
 name: docs
 
+# Path-aware like ci.yml: jobs are skipped (not unscheduled) when no Markdown
+# or lint config changed, so required checks still report. The weekly
+# schedule re-checks external links for rot regardless of changes.
+
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  markdownlint:
+  changes:
+    name: detect changes
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      md: ${{ steps.f.outputs.md }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only push/PR have a meaningful diff; schedule and dispatch run every job
+      # through the event_name clauses in each job's `if:`.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: f
+        with:
+          filters: |
+            md:
+              - '**/*.md'
+              - '.markdownlint.yaml'
+              - '.markdownlint-cli2.yaml'
+              - 'lychee.toml'
+              - '.github/workflows/docs.yml'
+
+  markdownlint:
+    needs: changes
+    # Run on matching changes, and always on schedule / manual dispatch.
+    if: needs.changes.outputs.md == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,12 +67,22 @@ jobs:
             to-dos/**/*.md
 
   links:
+    needs: changes
+    if: needs.changes.outputs.md == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Reuse successful external link results for a day across runs.
+      - name: Restore lychee cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lycheecache
+          key: lychee-${{ github.sha }}
+          restore-keys: lychee-
       - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --no-progress --config lychee.toml './*.md' 'docs/**/*.md' 'to-dos/**/*.md'
+          args: --no-progress --cache --max-cache-age 1d --config lychee.toml './*.md' 'docs/**/*.md' 'to-dos/**/*.md'
           fail: true

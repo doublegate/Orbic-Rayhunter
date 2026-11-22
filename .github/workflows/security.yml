@@ -1,5 +1,10 @@
 name: security
 
+# gitleaks runs on every event (it is fast, and a secret can land in any file).
+# cargo-audit and CodeQL are path-aware: skipped (still reporting as passing
+# for required checks) unless their inputs changed, and always run on the
+# weekly schedule so newly published advisories and queries are picked up.
+
 on:
   push:
     branches: [main]
@@ -11,22 +16,70 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  changes:
+    name: detect changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      deps: ${{ steps.f.outputs.deps }}
+      code: ${{ steps.f.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only push/PR have a meaningful diff; schedule and dispatch run every job
+      # through the event_name clauses in each job's `if:`.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: f
+        with:
+          filters: |
+            deps:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**/Cargo.toml'
+              - '.github/workflows/security.yml'
+            code:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - '.github/**'
+
   gitleaks:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: gitleaks (pinned)
+      - name: Cache gitleaks binary
+        id: gl
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/bin/gitleaks
+          key: gitleaks-8.30.1-linux-x64
+      - name: Download gitleaks (pinned)
+        if: steps.gl.outputs.cache-hit != 'true'
         run: |
+          mkdir -p ~/.local/bin
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
-            | tar -xz gitleaks
-          ./gitleaks git --redact --verbose .
+            | tar -xz -C ~/.local/bin gitleaks
+      - name: gitleaks
+        run: ~/.local/bin/gitleaks git --redact --verbose .
 
   cargo-audit:
+    needs: changes
+    if: needs.changes.outputs.deps == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       checks: write
@@ -40,7 +93,10 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   codeql:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       security-events: write
       contents: read

@@ -15,6 +15,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
@@ -23,11 +24,23 @@ jobs:
           submodules: true
           ref: ${{ env.TAG }}
           persist-credentials: false
+      - name: Stage patched upstream (needed for cache keys)
+        run: scripts/apply-patches.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: build/rayhunter/package-lock.json
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
+      # Restore-only: release builds reuse main's caches but never write them.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            . -> target
+            build/rayhunter -> target
+          key: patches-${{ hashFiles('patches/**') }}
+          save-if: false
       - name: Build orx (host, x86_64 linux)
         run: cargo build --release --locked -p orx-cli
       - name: Build patched daemon + rootshell

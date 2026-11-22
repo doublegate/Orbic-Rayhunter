@@ -60,6 +60,20 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
   the shell through `env` instead of expression interpolation; every `actions/checkout` sets
   `persist-credentials: false`.
 
+### Changed
+
+- CI is path-aware: `ci`, `docs` and `security` each begin with a `detect changes` job
+  (`dorny/paths-filter`) and skip jobs whose inputs did not change, using job-level `if:` so
+  required checks still report as passing. `gitleaks` always runs; scheduled and manual runs
+  run every job. See `docs/CI.md`.
+- CI caching: Rust caches saved only from `main` (restored by PRs and releases), patched-upstream
+  cache keyed on the patch series, rustup toolchain plus armv7 target, npm, the gitleaks binary
+  and lychee link results. Pull-request runs cancel superseded runs; every job has a timeout;
+  build artifacts are retained 14 days.
+- `scripts/apply-patches.sh` keeps `build/rayhunter/target` and `node_modules` when restaging
+  sources, so incremental local builds and restored CI caches survive `scripts/build.sh`.
+- `docs.yml` gains a weekly link-rot run.
+
 ### Fixed
 
 - Scripts are committed with mode `100755`; the first CI run failed with `Permission denied`
