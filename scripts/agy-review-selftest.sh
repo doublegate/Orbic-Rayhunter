@@ -749,6 +749,31 @@ else
   echo "  ok    no \`exec\` redirects to /dev/null"
 fi
 
+# agy runs under --dangerously-skip-permissions and reads an untrusted diff, so the repository
+# checkout must never be in its workspace: a planted .git/hooks or .git/config would execute in a
+# later token-bearing git call. The large-diff handoff once used `--add-dir "$PWD"`.
+check "agy is never given the checkout via --add-dir" "0" \
+  "$(grep -cE -- '--add-dir[[:space:]]+"?\$(PWD|\{PWD\})' "$SCRIPT_DIR/agy-review.sh")"
+check "agy runs from its private sandbox directory (both PTY paths)" "2" \
+  "$(grep -cE 'cd "\$agy_sandbox" && "\$\{agy_env\[@\]\}"' "$SCRIPT_DIR/agy-review.sh")"
+check "post-agy git calls disable hooks and fsmonitor" "2" \
+  "$(grep -cE 'git -c core\.hooksPath=/dev/null -c core\.fsmonitor=false update-ref' "$SCRIPT_DIR/agy-review.sh")"
+
+# The credential scrub: run the real function against a fake job environment.
+scrub_fn="$(sed -n '/^agy_scrubbed_env_args() {/,/^}/p' "$SCRIPT_DIR/agy-review.sh")"
+scrub_out="$(
+  export GH_TOKEN=x GITHUB_TOKEN=x ACTIONS_RUNTIME_TOKEN=x ACTIONS_ID_TOKEN_REQUEST_TOKEN=x \
+         RUNNER_TEMP=/t NPM_TOKEN=x MY_SECRET=x DEPLOY_API_KEY=x XAUTHORITY=/x KEEP_ME=1
+  eval "$scrub_fn"
+  args=( env )
+  while IFS= read -r -d '' a; do args+=( "$a" ); done < <(agy_scrubbed_env_args)
+  "${args[@]}" env
+)"
+check "the agy env scrub removes job tokens and credential-named variables" "0" \
+  "$(grep -cE '^(GH_TOKEN|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN|RUNNER_TEMP|NPM_TOKEN|MY_SECRET|DEPLOY_API_KEY)=' <<<"$scrub_out" || true)"
+check "the agy env scrub keeps session variables agy needs" "2" \
+  "$(grep -cE '^(XAUTHORITY|KEEP_ME)=' <<<"$scrub_out" || true)"
+
 if [ "$fails" -ne 0 ]; then
   echo "$fails check(s) failed" >&2
   exit 1

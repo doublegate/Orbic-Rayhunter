@@ -138,14 +138,7 @@ jobs:
           # timeout-minutes to 80. The runner is self-hosted, so the longer wait
           # bills nothing; the wait is a queue, not a fail-open.
           AGY_LOCK_WAIT: "1860"            # wait for another review's lock (default 600)
-          # LOCAL HARDENING (Orbic-Rayhunter, 2026-11-22): forced inline. In `file` mode the
-          # script passes `--add-dir "$PWD"`, giving agy (which runs with
-          # --dangerously-skip-permissions and reads an untrusted diff) write access to the
-          # checkout including .git/, and the script's later `git update-ref` runs with a token
-          # in its environment, so a prompt-injected hook or config would execute. Inline mode
-          # never adds the checkout. Cost: a diff over MAX_PROMPT_BYTES is truncated (logged).
-          # Revert to `auto` once the template writes the handoff file outside the repository.
-          AGY_DIFF_MODE: inline            # auto|inline|file — how the diff reaches agy. `auto`
+          # AGY_DIFF_MODE: auto            # auto|inline|file — how the diff reaches agy. `auto`
           #                                # (default) inlines a small diff and hands a large one to
           #                                # agy as a file, so PR size never truncates the review.
           # MAX_DIFF_BYTES: "5000000"      # sanity cap on a pathological diff (5 MB). Do NOT lower

@@ -61,8 +61,8 @@ Files in this template:
 > **Copy into a target repo** (what `install-into-repo.sh` does): the workflow, the four
 > scripts `agy-review.sh`, `_agy_print.sh`, `_agy_comment_body.sh` and
 > `agy-review-selftest.sh`, this README as `.github/AGY-REVIEWER.md`,
-> `.github/actionlint.yaml` when the target has none, optionally `.github/agy-review.md`,
-> and one appended `.gitignore` line (`/.agy-review-work/`). Everything else
+> `.github/actionlint.yaml` when the target has none, and optionally `.github/agy-review.md`.
+> The target's `.gitignore` is not touched. Everything else
 > (`systemd/`, the provision/deprovision scripts, this repo's `.gitignore`, `*.example`,
 > `gitignore.snippet`) stays here.
 
@@ -158,26 +158,15 @@ the `git add/commit/push` to finish. Then jump to **Triggering it** below.
 That's it — no repository secrets. The job uses the built-in `GITHUB_TOKEN` to
 post comments and your local `agy` session for the model.
 
-### About `.gitignore` (append, don't overwrite)
+### About `.gitignore`
 
-The reviewer works in temporary directories (`mktemp` / `$RUNNER_TEMP`) for
-everything **except** one case: when a PR's diff is too large to inline in the
-argv prompt, it writes the diff to a gitignored working-tree scratch dir,
-`.agy-review-work/`, so agy can read it in full with its file tools instead of
-the review being truncated to the execve arg-size ceiling. The file and the
-(now-empty) dir are removed by the script's `EXIT` trap. Because that path is in
-the working tree, a target repo **does** need `/.agy-review-work/` in its
-`.gitignore` — otherwise the transient `.patch` shows as untracked pollution on
-large-diff PRs. Still **never** copy this template's own `.gitignore` over a
-project's.
-
-**Append** the ignore entries idempotently:
-
-```fish
-# from the target repo root
-grep -qxF '/.agy-review-work/' .gitignore 2>/dev/null
-  or cat $TPL/gitignore.snippet >> .gitignore   # TPL: your checkout of this template
-```
+The reviewer writes nothing into the working tree. All its files, including the
+large-diff handoff file agy reads when a diff is too large to inline, live in a
+private `mktemp -d` sandbox under `$RUNNER_TEMP` that the `EXIT` trap removes, so a
+target repo needs no ignore entry. (Earlier versions wrote the handoff file to
+`.agy-review-work/` in the checkout and required `/.agy-review-work/` in
+`.gitignore`; that line is now unused and harmless where it already exists.)
+**Never** copy this template's own `.gitignore` over a project's.
 
 ---
 
@@ -258,6 +247,22 @@ yours to accept:
   `actions/untrusted-checkout`).
 - **Least surface in the job:** review-only prompt, `--sandbox`, no repo secrets
   (built-in `GITHUB_TOKEN` only), temp files cleaned via an `EXIT` trap.
+- **agy never sees the checkout:** agy runs with `--dangerously-skip-permissions`
+  and reads an untrusted diff, so a prompt injection could try to write files.
+  It is started from a private, empty `mktemp -d` sandbox under `$RUNNER_TEMP`
+  (the script refuses to run if that path is inside the checkout), the large-diff
+  handoff file is written there, and only that directory is passed to
+  `--add-dir`. A planted `.git/hooks` or `.git/config` in the checkout, which a
+  later token-bearing `git` call would execute, is therefore out of reach; the
+  script's own post-agy `git` calls also run with `core.hooksPath=/dev/null` and
+  `core.fsmonitor=false`.
+- **agy gets no credentials:** every variable whose name marks it as a credential
+  or as runner plumbing (`GH_*`, `GITHUB_*`, `ACTIONS_*` such as
+  `ACTIONS_RUNTIME_TOKEN`, `RUNNER_*`, `INPUT_*`, `*TOKEN*`, `*SECRET*`,
+  `*PASSWORD*`, `*CREDENTIAL*`, `*_KEY`, `*API_KEY*`, ...) is removed from agy's
+  environment. A strict `env -i` allowlist was tried and broke agy's Google session,
+  which needs the desktop session's D-Bus and keyring variables; those are kept.
+  `agy-review-selftest.sh` asserts all of the above.
 
 To reduce the remaining exposure, run each job on a **clean, disposable host** (a VM or
 container image recreated per job). Re-registering a runner on the same host is not enough,

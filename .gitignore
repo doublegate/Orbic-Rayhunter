@@ -46,6 +46,3 @@ CLAUDE.local.md
 *.swp
 *~
 .DS_Store
-
-# Antigravity PR reviewer: large-diff on-disk handoff (transient, removed by the script).
-/.agy-review-work/

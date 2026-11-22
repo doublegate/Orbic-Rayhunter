@@ -37,8 +37,8 @@ jobs:
           cache: npm
           cache-dependency-path: build/rayhunter/package-lock.json
       # Restore-only: release builds reuse main's caches but never write them.
-      # Each restore mirrors its ci.yml producer exactly (shared-key, workspace,
-      # key, and the workflow-level CARGO_* env), or the cache keys never match.
+      # Each restore mirrors its ci.yml producer exactly (shared-key, workspace and
+      # the workflow-level CARGO_* env), or the cache keys never match.
       # The root rust-toolchain.toml pins the same 1.98.0 as upstream, so the
       # upstream install below also serves the orx build. orx-cli has no dependencies and CI's host-crates cache holds only dev/test
       # artifacts, so it is not restored here (a second rust-cache step would also
@@ -59,7 +59,6 @@ jobs:
         with:
           shared-key: patched
           workspaces: build/rayhunter -> target
-          key: patches-${{ hashFiles('patches/**') }}
           save-if: false
       - name: Build orx (host, x86_64 linux)
         run: cargo build --release --locked -p orx-cli

@@ -59,6 +59,11 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 - `upstream-watch.yml` validates upstream tag names against strict SemVer and passes them to
   the shell through `env` instead of expression interpolation; every `actions/checkout` sets
   `persist-credentials: false`.
+- Antigravity reviewer re-synced from the hardened template: agy runs from a private sandbox
+  directory outside the checkout (large-diff handoff included), with credential and runner
+  variables stripped from its environment, and post-agy `git` calls ignore hooks. The interim
+  `AGY_DIFF_MODE: inline` workaround is removed, and with it the unused `/.agy-review-work/`
+  ignore line.
 
 ### Added (CI)
 
@@ -113,6 +118,13 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 - The armv7 build installs the upstream toolchain and target before `rust-cache` probes `rustc`;
   `release.yml` restores the rustup cache and no longer restores the dev-profile host cache.
 - The reviewer's first-install bootstrap steps are removed (CodeQL `actions/untrusted-checkout`).
+- `scripts/apply-patches.sh` canonicalizes the destination and patch directory: git ignores
+  relative `GIT_CEILING_DIRECTORIES` entries, so a relative `$1` would again have skipped every
+  patch. Tests now cover relative paths and assert that unchanged files keep their mtime.
+- The patched-upstream Rust cache is no longer keyed on `patches/**` (rust-cache stores only
+  third-party dependencies, so a patch edit discarded it for nothing); the lychee cache uses a
+  per-run key and the scheduled run re-checks every link; scheduled and manual runs skip the
+  unused full-history checkout; the exec-bit gate covers `tests/*.sh`.
 
 - Scripts are committed with mode `100755`; the first CI run failed with `Permission denied`
   because the repository uses `core.fileMode=false`. CI now fails early if a script loses its

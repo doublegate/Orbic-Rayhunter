@@ -336,7 +336,7 @@ REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY not set}"
 # _perm_err so cleanup() could never see it (agy review, GH-ListRollup PR #6).
 # Remove every temp file on exit. Pre-declared so the trap is safe under `set -u` even if the
 # script exits before a given file is created.
-diff_file= diff_err= meta_file= prompt_file= out_file= raw= body_file= agy_diff_file= agy_work_dir= jq_err= prior_body_file= archived_file= api_err=
+diff_file= diff_err= meta_file= prompt_file= out_file= raw= body_file= agy_diff_file= agy_sandbox= jq_err= prior_body_file= archived_file= api_err=
 # Also created mid-flight (permission lookup, compare-API merge base, archive trimming); a signal
 # or abort while one of those commands runs would otherwise leak the file in /tmp.
 _perm_err='' compare_err='' trimmed=''
@@ -391,13 +391,17 @@ cleanup() {
     done
   fi
   [ ${#doomed[@]} -gt 0 ] && rm -f -- "${doomed[@]}"
-  # Remove the gitignored diff-handoff scratch dir once its file is gone. `rmdir` only unlinks an
-  # empty dir, so a concurrent run's file (a different $$) is never clobbered; a non-empty dir is
-  # gitignored and harmless if left behind.
-  [ -n "${agy_work_dir:-}" ] && [ -z "$keep_set" ] && rmdir "${agy_work_dir}" 2>/dev/null || true
+  # agy's private working directory (see `agy_sandbox` below). It is this run's own `mktemp -d`,
+  # outside the checkout, so removing it whole cannot touch anything else. Kept on dry run (it holds
+  # the handed-off diff that dry run exists to expose).
+  if [ -n "${agy_sandbox:-}" ] && [ -z "$keep_set" ] && [ -d "$agy_sandbox" ]; then
+    rm -rf -- "$agy_sandbox"
+  fi
   if [ -n "${agy_refs_created:-}" ] && [ -n "${PR:-}" ]; then
-    git update-ref -d "refs/agy/pr-${PR}" 2>/dev/null || true
-    git update-ref -d "refs/agy/base-${PR}" 2>/dev/null || true
+    # Hooks and fsmonitor disabled: these git calls run after agy, with the job token in the
+    # environment, so they must not execute anything a compromised checkout could have planted.
+    git -c core.hooksPath=/dev/null -c core.fsmonitor=false update-ref -d "refs/agy/pr-${PR}" 2>/dev/null || true
+    git -c core.hooksPath=/dev/null -c core.fsmonitor=false update-ref -d "refs/agy/base-${PR}" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -852,6 +856,19 @@ head_bytes="$(wc -c < "$prompt_file")"
 diff_bytes="$(wc -c < "$diff_file")"
 inline_budget=$(( MAX_PROMPT_BYTES - head_bytes - 512 ))   # margin covers the diff header + file notice
 [ "$inline_budget" -lt 0 ] && inline_budget=0             # a huge STYLE_GUIDE can exceed it: file the diff
+# agy's private working directory. agy runs under --dangerously-skip-permissions and ingests an
+# untrusted diff (a prompt-injection surface), so it must never have the repository checkout in its
+# workspace: a write to .git/hooks or .git/config there would later execute in a git command that
+# holds the job token. agy is therefore started FROM this empty directory (its workspace root),
+# the large-diff handoff file is written INTO it, and only it is passed to --add-dir. It lives in
+# RUNNER_TEMP (outside the checkout, wiped between jobs) and the EXIT trap removes it.
+agy_sandbox="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/agy-sandbox.XXXXXX")"
+case "$(cd "$agy_sandbox" && pwd -P)/" in
+  "$(pwd -P)"/*)
+    log "agy sandbox ${agy_sandbox} is inside the checkout; refusing to expose the repository to agy"
+    exit 1 ;;
+esac
+
 use_file=0
 case "$AGY_DIFF_MODE" in
   file)   use_file=1 ;;
@@ -860,22 +877,12 @@ case "$AGY_DIFF_MODE" in
 esac
 
 if [ "$use_file" = "1" ]; then
-  # agy's CWD is the repo checkout, so a file written under it is readable by its file tool. Write it
-  # into a dedicated, gitignored scratch dir (`.agy-review-work/`, listed in .gitignore) rather than
-  # `.git/` (a sandbox may deny tool access to the hidden `.git` dir) or the repo root (an untracked
-  # `.patch` there pollutes `git status` if agy inspects repo state). Being gitignored, the dir never
-  # shows as working-tree pollution; the EXIT trap removes the file and the (now-empty) dir.
-  #
-  # The prompt hands agy an ABSOLUTE path, and the run below adds "$PWD" to agy's workspace via
-  # --add-dir. Both are load-bearing and were proven on the live runner: agy's sandboxed file tool
-  # does NOT resolve a relative path against the shell CWD (it uses its own workspace root), so a
-  # relative `.agy-review-work/...` comes back "does not exist on the filesystem" — the exact
-  # large-diff review failure this fixes. An absolute path resolves on its own, and --add-dir makes
-  # the checkout part of the sandbox workspace; using both is belt-and-suspenders.
-  agy_work_dir="$PWD/.agy-review-work"
-  mkdir -p "$agy_work_dir"
-  diff_name=".agy-review-work/agy-review-diff.$$.patch"
-  agy_diff_file="$PWD/$diff_name"
+  # The diff goes into agy's private sandbox directory (see `agy_sandbox` above), never into the
+  # checkout. The prompt hands agy an ABSOLUTE path, and the run below adds the sandbox (only) to
+  # agy's workspace via --add-dir. Both are load-bearing and were proven on the live runner: agy's
+  # sandboxed file tool does NOT resolve a relative path against the shell CWD (it uses its own
+  # workspace root), so a relative path comes back "does not exist on the filesystem".
+  agy_diff_file="$agy_sandbox/agy-review-diff.patch"
   cp "$diff_file" "$agy_diff_file"
   {
     printf '\n--- UNIFIED DIFF (in a file) ---\n'
@@ -1026,17 +1033,30 @@ scale_timeout_for_diff "$diff_bytes"
 #     stdout when stdout is not a TTY, e.g. piped/redirected/subprocess) ---------
 flags=( --print-timeout "$AGY_PRINT_TIMEOUT" --sandbox --dangerously-skip-permissions )
 # In file-handoff mode agy must read the on-disk diff, and --sandbox otherwise confines its file
-# tool to its own workspace root (NOT the shell CWD) — so add the checkout to the workspace. Only in
-# file mode: an inline review reads nothing from disk, so it keeps zero filesystem access (narrower
-# prompt-injection surface for the common path). Proven necessary on the live runner: without this
-# (and the absolute path above) the large-diff handoff file reads back as "does not exist".
-[ "${use_file:-0}" = "1" ] && flags+=( --add-dir "$PWD" )
+# tool to its own workspace root (NOT the shell CWD) — so add the sandbox directory that holds it.
+# Never the checkout (see `agy_sandbox`). Proven necessary on the live runner: without this (and the
+# absolute path above) the large-diff handoff file reads back as "does not exist".
+[ "${use_file:-0}" = "1" ] && flags+=( --add-dir "$agy_sandbox" )
 
-# Strip the repo tokens from agy's own environment. agy runs under
-# --dangerously-skip-permissions and ingests an untrusted diff (prompt-injection
-# surface); `gh` and the large-diff fetch run in THIS script, before and after, and
-# agy has no use for GH_TOKEN / GITHUB_TOKEN — so it should not inherit them.
-agy_env=( env -u GH_TOKEN -u GITHUB_TOKEN )
+# Strip credentials from agy's own environment. agy runs under --dangerously-skip-permissions and
+# ingests an untrusted diff (prompt-injection surface); `gh` and the large-diff fetch run in THIS
+# script, before and after, and agy needs none of the job's tokens. Not just GH_TOKEN/GITHUB_TOKEN:
+# a runner job also carries ACTIONS_RUNTIME_TOKEN (cache and artifact API), ACTIONS_ID_TOKEN_* when
+# OIDC is granted, and whatever a workflow puts in `env:`. A strict allowlist (`env -i`) was tried and
+# broke agy's Google session (it needs the desktop session's D-Bus/keyring environment), so this
+# removes every variable whose NAME marks it as a credential or as runner/job plumbing instead.
+agy_scrubbed_env_args() {
+  local name
+  while IFS= read -r name; do
+    case "$name" in
+      GH_*|GITHUB_*|ACTIONS_*|RUNNER_*|INPUT_*|\
+      *TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*CREDENTIAL*|*_KEY|*_KEY_ID|*APIKEY*|*API_KEY*|*_PAT)
+        printf '%s\0' "-u" "$name" ;;
+    esac
+  done < <(compgen -e)
+}
+agy_env=( env )
+while IFS= read -r -d '' arg; do agy_env+=( "$arg" ); done < <(agy_scrubbed_env_args)
 [ -n "$AGY_MODEL" ]  && flags+=( --model "$AGY_MODEL" )
 [ -n "$AGY_EFFORT" ] && flags+=( --effort "$AGY_EFFORT" )
 
@@ -1080,7 +1100,8 @@ for (( attempt=1; attempt<=AGY_RETRIES; attempt++ )); do
 
   if command -v unbuffer >/dev/null 2>&1; then
     log "running agy via unbuffer (allocates a PTY) [attempt ${attempt}/${AGY_RETRIES}]"
-    "${agy_env[@]}" unbuffer "$AGY_BIN" "${flags[@]}" --print "$(cat "$prompt_file")" > "$out_file" 2>>"$LOG" || true
+    # From the sandbox directory, so agy's workspace root is never the checkout.
+    ( cd "$agy_sandbox" && "${agy_env[@]}" unbuffer "$AGY_BIN" "${flags[@]}" --print "$(cat "$prompt_file")" ) > "$out_file" 2>>"$LOG" || true
   else
     log "unbuffer not found; falling back to script(1) [attempt ${attempt}/${AGY_RETRIES}]"
     raw="$(mktemp)"
@@ -1090,7 +1111,7 @@ for (( attempt=1; attempt<=AGY_RETRIES; attempt++ )); do
     # A raw `${flags[*]}` here would let a shell metacharacter in any of those be evaluated
     # by `sh -c` (command injection); `%q` quotes each token exactly.
     cmd="$(printf '%q ' "$here/_agy_print.sh" "$prompt_file" "${flags[@]}")"
-    "${agy_env[@]}" AGY_BIN="$AGY_BIN" script -qfec "$cmd" "$raw" >/dev/null 2>>"$LOG" || true
+    ( cd "$agy_sandbox" && "${agy_env[@]}" AGY_BIN="$AGY_BIN" script -qfec "$cmd" "$raw" ) >/dev/null 2>>"$LOG" || true
     # Strip script(1)'s own start/done records so they cannot pass as agy output (see
     # agy_strip_script_records).
     col -b < "$raw" | agy_strip_script_records > "$out_file"

@@ -20,8 +20,15 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-dest="${1:-$root/build/rayhunter}"
-patches_dir="${PATCHES_DIR:-$root/patches}"   # override only for tests/apply-patches.sh
+# Both paths are made absolute and symlink-free up front: git ignores RELATIVE
+# GIT_CEILING_DIRECTORIES entries (and compares against a canonical getcwd), and
+# patch paths must still resolve after the `cd "$scratch"` below.
+dest_arg="${1:-$root/build/rayhunter}"
+mkdir -p "$(dirname "$dest_arg")"
+dest="$(cd "$(dirname "$dest_arg")" && pwd -P)/$(basename "$dest_arg")"
+patches_arg="${PATCHES_DIR:-$root/patches}"   # override only for tests/apply-patches.sh
+patches_dir="$(cd "$patches_arg" 2>/dev/null && pwd -P)" \
+    || { echo "error: patch directory not found: $patches_arg" >&2; exit 1; }
 series="$patches_dir/series"
 
 if [[ ! -e "$root/upstream/.git" ]]; then

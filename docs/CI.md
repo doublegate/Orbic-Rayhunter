@@ -98,12 +98,16 @@ host being online.
   runner is a persistent self-hosted host.
 - The scripts are vendored from the `antigravity-pr-review` template and kept byte-identical; the
   workflow runs the copies on the default branch, so script changes take effect only after merge.
-- Local hardening: `AGY_DIFF_MODE: inline`. The template's file-handoff mode passes the whole
-  checkout to agy with `--add-dir`, which, combined with `--dangerously-skip-permissions` and an
-  untrusted diff, would let a prompt injection write `.git/hooks` or `.git/config` that a later
-  token-bearing `git` call executes. Inline mode never exposes the checkout; very large diffs are
-  truncated instead (logged). Open item for the template: write the handoff file outside the
-  repository and scrub agy's environment by allowlist (`ACTIONS_RUNTIME_TOKEN` is still inherited).
+- Isolation (template hardening, 2026-11-22): agy runs with `--dangerously-skip-permissions` and
+  reads an untrusted diff, so it is started from a private `mktemp -d` sandbox under
+  `$RUNNER_TEMP`, never from the checkout. The large-diff handoff file is written into that
+  sandbox and only the sandbox is passed to `--add-dir`. Every credential-named or runner-plumbing
+  variable (`GH_*`, `GITHUB_*`, `ACTIONS_*` including `ACTIONS_RUNTIME_TOKEN`, `RUNNER_*`,
+  `*TOKEN*`, `*SECRET*`, ...) is removed from agy's environment, and the script's post-agy `git`
+  calls disable hooks and fsmonitor. Verified live on PR #1: agy's working directory and its only
+  `--add-dir` were the sandbox, and no credential variable reached it. `agy-review-selftest.sh`
+  asserts all of this. `AGY_DIFF_MODE` is back to the template default (`auto`), so large diffs
+  are reviewed whole again.
 - The template's first-install bootstrap steps were removed before the reviewer reached `main` (it
   bootstrapped itself once on PR #1):
   they check out PR-head code in the job and trip CodeQL's `actions/untrusted-checkout` (high).

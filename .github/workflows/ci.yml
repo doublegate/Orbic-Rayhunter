@@ -44,6 +44,7 @@ jobs:
       build: ${{ steps.f.outputs.build }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         with:
           # Full history: on push, paths-filter diffs locally against
           # github.event.before, which a shallow clone does not contain (a
@@ -120,7 +121,7 @@ jobs:
       # core.fileMode=false clones (NAS share) can drop the exec bit silently.
       - name: Scripts are committed executable (mode 100755)
         run: |
-          bad=$(git ls-files -s scripts/*.sh | awk '$1 != "100755" {print $4}')
+          bad=$(git ls-files -s 'scripts/*.sh' 'tests/*.sh' | awk '$1 != "100755" {print $4}')
           if [ -n "$bad" ]; then echo "::error::not executable in git: $bad"; exit 1; fi
       # Offline self-test of the Antigravity reviewer (no agy, no network); it also
       # checks the reviewer workflow's timeout budget against the script's lock wait.
@@ -165,9 +166,10 @@ jobs:
         with:
           shared-key: patched
           workspaces: build/rayhunter -> target
-          # Patches change sources, not dependencies; key on the series too so
-          # a cache never mixes artifacts across patch sets.
-          key: patches-${{ hashFiles('patches/**') }}
+          # No patch-series key: rust-cache stores only third-party dependencies
+          # (workspace crates are stripped before saving) and already keys on the
+          # staged Cargo.toml/Cargo.lock, so a patch edit must not discard it.
+          # Workspace freshness is handled by apply-patches.sh's mtime rules.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build daemon + rootshell (firmware-devel)
         run: scripts/build.sh devel
