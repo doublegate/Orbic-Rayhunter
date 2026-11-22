@@ -58,9 +58,9 @@ Goal: a buildable, lintable, documented overlay repository with upstream pinned 
 | T-OR-005 | Research corpus in `ref-docs/` | doc | done |
 | T-OR-006 | GitHub repository `doublegate/Orbic-Rayhunter` created | host | done |
 | T-OR-007 | Specification docs, ROADMAP, PROJECT-STATUS, `to-dos/` | doc | done (uncommitted) |
-| T-OR-008 | First commit and push to `main` | host | open |
-| T-OR-009 | Branch protection on `main` with required checks | host | open |
-| T-OR-010 | First CI run on `main` with every job executing its real gate | host | open |
+| T-OR-008 | First commit and push to `main` | host | done |
+| T-OR-009 | Branch protection on `main` with required checks | host | done |
+| T-OR-010 | First CI run on `main` with every job executing its real gate | host | done |
 | T-OR-011 | Tag and release v0.1.0 | host | open |
 
 Exit criteria: T-OR-001..T-OR-011 done; CI green on the tagged commit with no

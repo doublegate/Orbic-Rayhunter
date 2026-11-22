@@ -58,16 +58,18 @@ comm -23 <(grep -rhoE 'T-OR-[0-9]{3}' docs to-dos PROJECT-STATUS.md | sort -u) \
 ### Research (REA/Ghidra/web)
 
 - Cross-check contradictions between `ref-docs/` files (band list, firmware versions) and record
-  corrections as new dated supplemental files, never in-place edits.
+  corrections as new dated supplemental files, never in-place edits. Done:
+  [ref-docs/supplement-2026-11-22-reconciliation.md](../ref-docs/supplement-2026-11-22-reconciliation.md).
 
 ## Sprint 0.3: Publish
 
-- [ ] T-OR-008: first commit (Conventional Commits) and push to `main`
-- [ ] T-OR-009: branch protection on `main`: required checks from `ci`, `docs`, `security`; no
+- [x] T-OR-008: first commit (Conventional Commits) and push to `main`
+- [x] T-OR-009: branch protection on `main`: required checks from `ci`, `docs`, `security`; no
       force push
-- [ ] T-OR-010: first CI run; open each job log and confirm it ran its real gate (no skipped
+- [x] T-OR-010: first CI run; open each job log and confirm it ran its real gate (no skipped
       steps, no `continue-on-error` on blocking jobs, submodule checked out, patch series applied,
-      armv7 build produced artifacts)
+      armv7 build produced artifacts). Done: run 45041852700 on `b982d00`; the first run
+      (45041531302) failed on script modes and was fixed in that commit.
 - [ ] T-OR-011: CHANGELOG `[Unreleased]` to `[0.1.0] - YYYY-MM-DD`, annotated tag v0.1.0, release
       assets verified
 
