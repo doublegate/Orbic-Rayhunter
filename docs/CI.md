@@ -97,6 +97,12 @@ host being online.
   runner is a persistent self-hosted host.
 - The scripts are vendored from the `antigravity-pr-review` template and kept byte-identical; the
   workflow runs the copies on the default branch, so script changes take effect only after merge.
+- Local hardening: `AGY_DIFF_MODE: inline`. The template's file-handoff mode passes the whole
+  checkout to agy with `--add-dir`, which, combined with `--dangerously-skip-permissions` and an
+  untrusted diff, would let a prompt injection write `.git/hooks` or `.git/config` that a later
+  token-bearing `git` call executes. Inline mode never exposes the checkout; very large diffs are
+  truncated instead (logged). Open item for the template: write the handoff file outside the
+  repository and scrub agy's environment by allowlist (`ACTIONS_RUNTIME_TOKEN` is still inherited).
 - The template's first-install bootstrap steps were removed once the reviewer reached `main`:
   they check out PR-head code in the job and trip CodeQL's `actions/untrusted-checkout` (high).
 
