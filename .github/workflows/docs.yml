@@ -111,7 +111,8 @@ jobs:
           args: --no-progress --cache --max-cache-age 1d --config lychee.toml '**/*.md' '.github/**/*.md'
           fail: true
       - name: Save lychee cache
-        if: always()
+        # After a completed check (pass or fail), never on cancellation or before lychee ran.
+        if: ${{ !cancelled() && hashFiles('.lycheecache') != '' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lycheecache

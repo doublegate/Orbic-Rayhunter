@@ -13,7 +13,7 @@ files in `patches/` listed in `patches/series`. Never edit `upstream/` directly.
 | Task | Command |
 |---|---|
 | Host crates gate | `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
-| Scripts lint | `shellcheck scripts/{apply-patches,build,sync-upstream,gen-assets}.sh`; vendored reviewer: `shellcheck -S error scripts/agy-review*.sh scripts/_agy_*.sh` |
+| Scripts lint | `shellcheck` on every `scripts/*.sh` and `tests/*.sh` except the vendored reviewer scripts (CI derives the list); vendored reviewer: `shellcheck -S error scripts/agy-review*.sh scripts/_agy_*.sh` |
 | Reviewer self-test | `bash scripts/agy-review-selftest.sh` |
 | Workflow lint | `actionlint` |
 | Docs lint | `markdownlint-cli2 '**/*.md' '.github/**/*.md'` (`**` skips dot-directories) |

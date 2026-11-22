@@ -755,24 +755,29 @@ fi
 check "agy is never given the checkout via --add-dir" "0" \
   "$(grep -cE -- '--add-dir[[:space:]]+"?\$(PWD|\{PWD\})' "$SCRIPT_DIR/agy-review.sh")"
 check "agy runs from its private sandbox directory (both PTY paths)" "2" \
-  "$(grep -cE 'cd "\$agy_sandbox" && "\$\{agy_env\[@\]\}"' "$SCRIPT_DIR/agy-review.sh")"
+  "$(grep -cE '\( cd "\$agy_sandbox" && ' "$SCRIPT_DIR/agy-review.sh")"
+check "both PTY paths pass agy the allowlisted environment" "2" \
+  "$(grep -cE '\( cd "\$agy_sandbox" && (unbuffer )?"\$\{agy_env\[@\]\}"' "$SCRIPT_DIR/agy-review.sh")"
 check "post-agy git calls disable hooks and fsmonitor" "2" \
   "$(grep -cE 'git -c core\.hooksPath=/dev/null -c core\.fsmonitor=false update-ref' "$SCRIPT_DIR/agy-review.sh")"
 
-# The credential scrub: run the real function against a fake job environment.
-scrub_fn="$(sed -n '/^agy_scrubbed_env_args() {/,/^}/p' "$SCRIPT_DIR/agy-review.sh")"
-scrub_out="$(
+# The allowlisted environment: run the real function against a fake job environment. Anything not
+# on the allowlist is dropped, including credentials under ordinary-looking names.
+env_fn="$(sed -n '/^agy_allowlisted_env_args() {/,/^}/p' "$SCRIPT_DIR/agy-review.sh")"
+env_out="$(
   export GH_TOKEN=x GITHUB_TOKEN=x ACTIONS_RUNTIME_TOKEN=x ACTIONS_ID_TOKEN_REQUEST_TOKEN=x \
-         RUNNER_TEMP=/t NPM_TOKEN=x MY_SECRET=x DEPLOY_API_KEY=x XAUTHORITY=/x KEEP_ME=1
-  eval "$scrub_fn"
+         RUNNER_TEMP=/t NPM_TOKEN=x DATABASE_URL='postgres://u:pw@h/db' SOME_SETTING=x \
+         HOME=/home/u PATH=/usr/bin DBUS_SESSION_BUS_ADDRESS=unix:path=/b XDG_RUNTIME_DIR=/run/u \
+         EXTRA_OK=1 AGY_ENV_PASSTHROUGH='EXTRA_OK BAD=NAME'
+  eval "$env_fn"
   args=( env )
-  while IFS= read -r -d '' a; do args+=( "$a" ); done < <(agy_scrubbed_env_args)
+  while IFS= read -r -d '' a; do args+=( "$a" ); done < <(agy_allowlisted_env_args)
   "${args[@]}" env
 )"
-check "the agy env scrub removes job tokens and credential-named variables" "0" \
-  "$(grep -cE '^(GH_TOKEN|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN|RUNNER_TEMP|NPM_TOKEN|MY_SECRET|DEPLOY_API_KEY)=' <<<"$scrub_out" || true)"
-check "the agy env scrub keeps session variables agy needs" "2" \
-  "$(grep -cE '^(XAUTHORITY|KEEP_ME)=' <<<"$scrub_out" || true)"
+check "agy's environment drops everything off the allowlist (tokens, ordinary-named secrets)" "0" \
+  "$(grep -cE '^(GH_TOKEN|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN|RUNNER_TEMP|NPM_TOKEN|DATABASE_URL|SOME_SETTING|AGY_ENV_PASSTHROUGH|BAD)=' <<<"$env_out" || true)"
+check "agy's environment keeps the session variables it needs, plus AGY_ENV_PASSTHROUGH names" "5" \
+  "$(grep -cE '^(HOME|PATH|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|EXTRA_OK)=' <<<"$env_out" || true)"
 
 if [ "$fails" -ne 0 ]; then
   echo "$fails check(s) failed" >&2

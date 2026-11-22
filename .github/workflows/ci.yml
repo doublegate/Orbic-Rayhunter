@@ -111,8 +111,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Every project script, derived from the globs so a new script is never skipped;
+      # only the vendored reviewer scripts are excluded (checked at -S error below).
       - name: shellcheck (project scripts, full severity)
-        run: shellcheck --version && shellcheck scripts/apply-patches.sh scripts/build.sh scripts/sync-upstream.sh scripts/gen-assets.sh tests/apply-patches.sh
+        run: |
+          shellcheck --version
+          mapfile -t project < <(git ls-files 'scripts/*.sh' 'tests/*.sh' \
+            | grep -vE '^scripts/(agy-review|agy-review-selftest|_agy_[a-z_]+)\.sh$')
+          printf 'checking: %s\n' "${project[@]}"
+          shellcheck "${project[@]}"
       # The reviewer scripts are vendored verbatim from the antigravity-pr-review
       # template and kept byte-identical so they can be re-synced; their style
       # warnings are the template's, so only errors gate here.

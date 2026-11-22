@@ -23,7 +23,7 @@ check pending forever and blocks merges. The required checks on `main` are liste
 | `docs` | `markdownlint` | any `*.md`, markdownlint config, `docs.yml` |
 | `docs` | `links` | any `*.md`, `lychee.toml`, `docs.yml`, and any deletion or rename anywhere (link targets are not only Markdown) |
 | `security` | `gitleaks` | always (fast; a secret can land in any file) |
-| `security` | `cargo-audit` | Cargo manifests or lockfile, `security.yml` |
+| `security` | `cargo-audit` (pinned `cargo-audit` 0.23.0 CLI, `--deny warnings`) | Cargo manifests or lockfile, `security.yml` |
 | `security` | `codeql` | `crates/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.github/**` |
 
 A workflow file change re-runs that workflow's jobs. `workflow_dispatch` runs every job. The
@@ -37,11 +37,11 @@ runs the armv7 build, `gitleaks` and nothing else.
 
 | Cache | Scope | Key |
 |---|---|---|
-| Host crates (`Swatinem/rust-cache`) | `target/`, cargo registry | toolchain + `Cargo.lock` |
-| Patched upstream (`Swatinem/rust-cache`) | `build/rayhunter/target` | toolchain + upstream `Cargo.lock` + hash of `patches/**` |
+| Host crates (`Swatinem/rust-cache`, `shared-key: host`) | `target/`, cargo registry | toolchain + `Cargo.lock` + `CARGO_*` env |
+| Patched upstream (`Swatinem/rust-cache`, `shared-key: patched`) | third-party dependencies built into `build/rayhunter/target` (workspace crates are stripped) | toolchain + staged upstream `Cargo.toml`/`Cargo.lock` + `CARGO_*` env; deliberately not the patch series |
 | rustup toolchain + armv7 target (`actions/cache`) | `~/.rustup/toolchains` | upstream `rust-toolchain.toml` |
 | npm (`setup-node` cache) | npm download cache | `build/rayhunter/package-lock.json` |
-| gitleaks binary (`actions/cache`) | `~/.local/bin/gitleaks` | pinned version |
+| gitleaks binary (`actions/cache`) | `~/.local/bin/gitleaks`, SHA-256-verified before extraction | pinned version |
 | lychee results | `.lycheecache`, 1-day max age | rolling |
 
 Only runs on `main` save Rust caches (`save-if`); pull requests and releases restore them but
@@ -101,11 +101,14 @@ host being online.
 - Isolation (template hardening, 2026-11-22): agy runs with `--dangerously-skip-permissions` and
   reads an untrusted diff, so it is started from a private `mktemp -d` sandbox under
   `$RUNNER_TEMP`, never from the checkout. The large-diff handoff file is written into that
-  sandbox and only the sandbox is passed to `--add-dir`. Every credential-named or runner-plumbing
-  variable (`GH_*`, `GITHUB_*`, `ACTIONS_*` including `ACTIONS_RUNTIME_TOKEN`, `RUNNER_*`,
-  `*TOKEN*`, `*SECRET*`, ...) is removed from agy's environment, and the script's post-agy `git`
-  calls disable hooks and fsmonitor. Verified live on PR #1: agy's working directory and its only
-  `--add-dir` were the sandbox, and no credential variable reached it. `agy-review-selftest.sh`
+  sandbox and only the sandbox is passed to `--add-dir`. agy gets an allowlisted environment
+  (`env -i` plus `HOME`, `PATH`, locale, `TERM`, the `XDG_*` directories,
+  `DBUS_SESSION_BUS_ADDRESS` and display variables, which is what its keyring-held Google session
+  needs); no job token, `ACTIONS_*` variable or workflow `env:` value reaches it, whatever its
+  name. The script's post-agy `git` calls disable hooks and fsmonitor. Verified live on PR #1
+  from a systemd user unit with planted `ACTIONS_RUNTIME_TOKEN` and `DATABASE_URL` canaries:
+  agy's working directory and its only `--add-dir` were the sandbox and its environment held
+  exactly the 12 allowlisted variables present on the host. `agy-review-selftest.sh`
   asserts all of this. `AGY_DIFF_MODE` is back to the template default (`auto`), so large diffs
   are reviewed whole again.
 - The template's first-install bootstrap steps were removed before the reviewer reached `main` (it

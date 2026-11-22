@@ -1038,25 +1038,30 @@ flags=( --print-timeout "$AGY_PRINT_TIMEOUT" --sandbox --dangerously-skip-permis
 # absolute path above) the large-diff handoff file reads back as "does not exist".
 [ "${use_file:-0}" = "1" ] && flags+=( --add-dir "$agy_sandbox" )
 
-# Strip credentials from agy's own environment. agy runs under --dangerously-skip-permissions and
-# ingests an untrusted diff (prompt-injection surface); `gh` and the large-diff fetch run in THIS
-# script, before and after, and agy needs none of the job's tokens. Not just GH_TOKEN/GITHUB_TOKEN:
-# a runner job also carries ACTIONS_RUNTIME_TOKEN (cache and artifact API), ACTIONS_ID_TOKEN_* when
-# OIDC is granted, and whatever a workflow puts in `env:`. A strict allowlist (`env -i`) was tried and
-# broke agy's Google session (it needs the desktop session's D-Bus/keyring environment), so this
-# removes every variable whose NAME marks it as a credential or as runner/job plumbing instead.
-agy_scrubbed_env_args() {
+# agy gets an ALLOWLISTED environment (`env -i` plus the variables below), never the job's.
+# agy runs under --dangerously-skip-permissions and ingests an untrusted diff (prompt-injection
+# surface); `gh` and the large-diff fetch run in THIS script, before and after, and agy needs none
+# of the job's credentials: not GH_TOKEN/GITHUB_TOKEN, not ACTIONS_RUNTIME_TOKEN (cache/artifact
+# API), not ACTIONS_ID_TOKEN_* (OIDC), and not whatever a workflow puts in `env:` under an
+# ordinary-looking name (a DATABASE_URL with a password in it, say), which a name-pattern denylist
+# would miss. What agy does need is its user session: HOME for its config and conversation store,
+# PATH, the locale, and XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS to reach the desktop keyring that
+# holds its Google OAuth session. Verified on the runner host with no other agy running: agy
+# authenticates and answers under exactly this environment. (An earlier test that "hung" had
+# collided with a concurrent review: agy is one singleton per user, which is why the flock below
+# exists.) AGY_ENV_PASSTHROUGH may name extra variables, space-separated, for a host that needs one.
+agy_allowlisted_env_args() {
   local name
-  while IFS= read -r name; do
-    case "$name" in
-      GH_*|GITHUB_*|ACTIONS_*|RUNNER_*|INPUT_*|\
-      *TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*CREDENTIAL*|*_KEY|*_KEY_ID|*APIKEY*|*API_KEY*|*_PAT)
-        printf '%s\0' "-u" "$name" ;;
-    esac
-  done < <(compgen -e)
+  printf '%s\0' "-i"
+  for name in HOME PATH USER LOGNAME SHELL LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES TERM TMPDIR TZ \
+              XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME \
+              DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY XAUTHORITY ${AGY_ENV_PASSTHROUGH:-}; do
+    case "$name" in *[!A-Za-z0-9_]*|'') continue ;; esac   # a name, never an assignment
+    [ -n "${!name+x}" ] && printf '%s\0' "${name}=${!name}"
+  done
 }
 agy_env=( env )
-while IFS= read -r -d '' arg; do agy_env+=( "$arg" ); done < <(agy_scrubbed_env_args)
+while IFS= read -r -d '' arg; do agy_env+=( "$arg" ); done < <(agy_allowlisted_env_args)
 [ -n "$AGY_MODEL" ]  && flags+=( --model "$AGY_MODEL" )
 [ -n "$AGY_EFFORT" ] && flags+=( --effort "$AGY_EFFORT" )
 
@@ -1101,7 +1106,9 @@ for (( attempt=1; attempt<=AGY_RETRIES; attempt++ )); do
   if command -v unbuffer >/dev/null 2>&1; then
     log "running agy via unbuffer (allocates a PTY) [attempt ${attempt}/${AGY_RETRIES}]"
     # From the sandbox directory, so agy's workspace root is never the checkout.
-    ( cd "$agy_sandbox" && "${agy_env[@]}" unbuffer "$AGY_BIN" "${flags[@]}" --print "$(cat "$prompt_file")" ) > "$out_file" 2>>"$LOG" || true
+    # unbuffer (a Tcl/Expect script) keeps the job environment it needs to start; it then runs
+    # `env -i ... agy`, so only agy itself gets the allowlisted environment.
+    ( cd "$agy_sandbox" && unbuffer "${agy_env[@]}" "$AGY_BIN" "${flags[@]}" --print "$(cat "$prompt_file")" ) > "$out_file" 2>>"$LOG" || true
   else
     log "unbuffer not found; falling back to script(1) [attempt ${attempt}/${AGY_RETRIES}]"
     raw="$(mktemp)"
@@ -1110,6 +1117,8 @@ for (( attempt=1; attempt<=AGY_RETRIES; attempt++ )); do
     # (AGY_MODEL / AGY_EFFORT / AGY_PRINT_TIMEOUT) -- is shell-escaped for the inner shell.
     # A raw `${flags[*]}` here would let a shell metacharacter in any of those be evaluated
     # by `sh -c` (command injection); `%q` quotes each token exactly.
+    # script(1) is a plain binary, so it (and the _agy_print.sh it runs) can start inside the
+    # allowlisted environment; agy inherits it from there.
     cmd="$(printf '%q ' "$here/_agy_print.sh" "$prompt_file" "${flags[@]}")"
     ( cd "$agy_sandbox" && "${agy_env[@]}" AGY_BIN="$AGY_BIN" script -qfec "$cmd" "$raw" ) >/dev/null 2>>"$LOG" || true
     # Strip script(1)'s own start/done records so they cannot pass as agy output (see

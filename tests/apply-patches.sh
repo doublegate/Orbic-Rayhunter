@@ -52,6 +52,20 @@ else
     bad "patch skipped with a relative destination or patch dir"
 fi
 
+# 1c. A destination spelled with a trailing '/.' resolves to the same directory.
+rm -f "$root/$rel_dest/README.md"
+(cd "$root" && PATCHES_DIR="$rel_patches" "$script" "$rel_dest/." >/dev/null)
+if grep -q 'ORX-APPLY-PATCHES-TEST-MARKER' "$root/$rel_dest/README.md" 2>/dev/null; then
+    ok "destination with a trailing '/.' stages into the same directory"
+else
+    bad "destination with a trailing '/.' was mishandled"
+fi
+if find "$root/build" -maxdepth 1 -name '.stage-*' | grep -q .; then
+    bad "a scratch staging dir was left behind"
+else
+    ok "no scratch staging dir left behind"
+fi
+
 # 2. Destination outside the repository.
 dest_out="$work/out"
 PATCHES_DIR="$work/patches" "$script" "$dest_out" >/dev/null

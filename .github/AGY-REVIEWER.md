@@ -256,13 +256,17 @@ yours to accept:
   later token-bearing `git` call would execute, is therefore out of reach; the
   script's own post-agy `git` calls also run with `core.hooksPath=/dev/null` and
   `core.fsmonitor=false`.
-- **agy gets no credentials:** every variable whose name marks it as a credential
-  or as runner plumbing (`GH_*`, `GITHUB_*`, `ACTIONS_*` such as
-  `ACTIONS_RUNTIME_TOKEN`, `RUNNER_*`, `INPUT_*`, `*TOKEN*`, `*SECRET*`,
-  `*PASSWORD*`, `*CREDENTIAL*`, `*_KEY`, `*API_KEY*`, ...) is removed from agy's
-  environment. A strict `env -i` allowlist was tried and broke agy's Google session,
-  which needs the desktop session's D-Bus and keyring variables; those are kept.
-  `agy-review-selftest.sh` asserts all of the above.
+- **agy gets no credentials:** agy is started with an **allowlisted** environment
+  (`env -i` plus `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`, the locale, `TERM`,
+  `TMPDIR`, `TZ`, the `XDG_*` directories, `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`,
+  `WAYLAND_DISPLAY`, `XAUTHORITY`). Nothing else from the job reaches it: no
+  `GH_TOKEN`/`GITHUB_TOKEN`, no `ACTIONS_RUNTIME_TOKEN` or OIDC request token, and no
+  workflow `env:` value, including secrets under ordinary names that a
+  name-pattern denylist would miss. The session variables are what agy needs to
+  reach the desktop keyring holding its Google OAuth session, which was verified on
+  the runner host. `AGY_ENV_PASSTHROUGH` (space-separated names) adds a variable
+  if a host needs one. `unbuffer` keeps its own environment and runs `env -i ... agy`,
+  so only agy is reduced. `agy-review-selftest.sh` asserts all of the above.
 
 To reduce the remaining exposure, run each job on a **clean, disposable host** (a VM or
 container image recreated per job). Re-registering a runner on the same host is not enough,
@@ -287,6 +291,7 @@ runner, so disable fork workflows there or gate them the same way.
 | `MAX_DIFF_BYTES` | `5000000` | sanity cap on a pathological diff (5 MB). Not the arg-size limit — a large diff goes to agy as a file, not an argv value |
 | `MAX_PROMPT_BYTES` | `120000` | the inline/file threshold in `auto` mode, and a hard backstop on the **inlined** prompt. agy takes an inlined prompt as a `--print` argv value, and a single `execve` argument cannot exceed `MAX_ARG_STRLEN` (128 KiB); over it `execve` fails with E2BIG before agy starts. Clamped below 128 KiB |
 | `STYLE_GUIDE` | `.github/agy-review.md` | repo-relative style guide, loaded if present |
+| `AGY_ENV_PASSTHROUGH` | *(empty)* | extra environment variable NAMES (space-separated) to pass to agy on top of the session allowlist; everything else is withheld |
 
 ---
 

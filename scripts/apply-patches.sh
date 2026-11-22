@@ -24,8 +24,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # GIT_CEILING_DIRECTORIES entries (and compares against a canonical getcwd), and
 # patch paths must still resolve after the `cd "$scratch"` below.
 dest_arg="${1:-$root/build/rayhunter}"
-mkdir -p "$(dirname "$dest_arg")"
-dest="$(cd "$(dirname "$dest_arg")" && pwd -P)/$(basename "$dest_arg")"
+mkdir -p "$dest_arg"   # resolving the directory itself handles trailing '/', '/.' and '..'
+dest="$(cd "$dest_arg" && pwd -P)"
 patches_arg="${PATCHES_DIR:-$root/patches}"   # override only for tests/apply-patches.sh
 patches_dir="$(cd "$patches_arg" 2>/dev/null && pwd -P)" \
     || { echo "error: patch directory not found: $patches_arg" >&2; exit 1; }

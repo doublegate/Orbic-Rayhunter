@@ -60,8 +60,9 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
   the shell through `env` instead of expression interpolation; every `actions/checkout` sets
   `persist-credentials: false`.
 - Antigravity reviewer re-synced from the hardened template: agy runs from a private sandbox
-  directory outside the checkout (large-diff handoff included), with credential and runner
-  variables stripped from its environment, and post-agy `git` calls ignore hooks. The interim
+  directory outside the checkout (large-diff handoff included), with an allowlisted environment
+  (`env -i` plus the session variables its keyring-held login needs, so no job token or
+  workflow `env:` value reaches it under any name), and post-agy `git` calls ignore hooks. The interim
   `AGY_DIFF_MODE: inline` workaround is removed, and with it the unused `/.agy-review-work/`
   ignore line.
 
@@ -82,9 +83,9 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
   run every job. The detection jobs (`detect changes (ci|docs|security)`) are themselves
   required checks, so a detection failure blocks the merge instead of silently skipping every
   gated check (fail closed). See `docs/CI.md`.
-- CI caching: Rust caches saved only from `main` (restored by PRs and releases), patched-upstream
-  cache keyed on the patch series, rustup toolchain plus armv7 target, npm, the gitleaks binary
-  and lychee link results. Pull-request runs cancel superseded runs; every job has a timeout;
+- CI caching: Rust caches saved only from `main` (restored by PRs and releases) for the host
+  crates and the patched upstream's third-party dependencies, rustup toolchain plus armv7
+  target, npm, the SHA-256-verified gitleaks binary and lychee link results. Pull-request runs cancel superseded runs; every job has a timeout;
   build artifacts are retained 14 days.
 - `scripts/apply-patches.sh` stages upstream plus patches in a scratch directory and syncs it
   into `build/rayhunter` by content (`rsync --checksum --delete`), never touching `target/` or
@@ -93,6 +94,9 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
   Requires `rsync`.
 - Non-PR workflow runs get a per-run concurrency group, so a pending run on `main` is never
   replaced (and its changes never left unvalidated) by a later push.
+- `cargo-audit` runs the pinned `cargo-audit` 0.23.0 CLI (installed by `taiki-e/install-action`)
+  with `--deny warnings` instead of `rustsec/audit-check`, whose latest release targets the
+  deprecated Node.js 20 runtime and required `checks`/`issues` write permissions.
 - The docs `links` job also runs on any deletion or rename, since local link targets are not
   only Markdown.
 - Rust caches use a `shared-key` so `release.yml` restores the caches `ci.yml` saves.
