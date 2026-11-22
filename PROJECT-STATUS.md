@@ -57,7 +57,7 @@ phase: Phase 1 (recon and verified backup).
 | Patches in series | 0 | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 5 passed | `cargo test` (local and CI) |
-| CI runs | `ci` run 45041852700 green (8 required checks pass) | GitHub Actions on `b982d00` |
+| CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
 | Latest release | none | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |
 | Device firmware | `ORB400L_V1.2.0_BVZRT` | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
@@ -110,7 +110,7 @@ phase: Phase 1 (recon and verified backup).
 - [x] Research corpus (T-OR-005)
 - [x] GitHub repository created (T-OR-006)
 - [x] Specification docs, ROADMAP, PROJECT-STATUS, to-dos (T-OR-007)
-- [x] `markdownlint-cli2 '**/*.md'` clean on the full tree
+- [x] `markdownlint-cli2 '**/*.md' '.github/**/*.md'` clean on the full tree
 - [x] First commit and push (T-OR-008)
 - [x] Branch protection on `main` (T-OR-009; classic rule converted to the `main` ruleset, see [docs/CI.md](docs/CI.md))
 - [x] First CI run green with every job executing its real gate (T-OR-010)

@@ -21,7 +21,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="${1:-$root/build/rayhunter}"
-series="$root/patches/series"
+patches_dir="${PATCHES_DIR:-$root/patches}"   # override only for tests/apply-patches.sh
+series="$patches_dir/series"
 
 if [[ ! -e "$root/upstream/.git" ]]; then
     echo "error: upstream submodule missing; run: git submodule update --init" >&2
@@ -41,15 +42,20 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"
     line="$(echo "$line" | xargs)"
     [[ -z "$line" ]] && continue
-    patch_file="$root/patches/$line"
+    patch_file="$patches_dir/$line"
     if [[ ! -f "$patch_file" ]]; then
         echo "error: series lists missing patch: $line" >&2
         exit 1
     fi
     echo "applying $line"
-    # $scratch is a plain directory (not a repo), so git apply acts as patch(1).
-    (cd "$scratch" && git apply --check --whitespace=nowarn "$patch_file" \
-        && git apply --whitespace=nowarn "$patch_file")
+    # git apply must act as plain patch(1) on $scratch. Without a ceiling, git
+    # discovers an enclosing repository (this one, when $scratch is under build/)
+    # and then IGNORES every patched path outside the current subdirectory while
+    # still exiting 0, so the whole series would be skipped silently.
+    # GIT_CEILING_DIRECTORIES stops discovery above $scratch.
+    (cd "$scratch" \
+        && GIT_CEILING_DIRECTORIES="$(dirname "$scratch")" git apply --check --whitespace=nowarn "$patch_file" \
+        && GIT_CEILING_DIRECTORIES="$(dirname "$scratch")" git apply --whitespace=nowarn "$patch_file")
     count=$((count + 1))
 done < "$series"
 

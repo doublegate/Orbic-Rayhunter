@@ -98,6 +98,22 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 
 ### Fixed
 
+- `scripts/apply-patches.sh` silently skipped every patch when staging inside this repository
+  (the default `build/` layout): `git apply` discovered the superproject's `.git` and ignored
+  patched paths outside its subdirectory while exiting 0. It now runs with
+  `GIT_CEILING_DIRECTORIES` so it acts as plain `patch(1)`. Found by the Antigravity review; the
+  series was still empty, so no build was affected. New regression test `tests/apply-patches.sh`
+  (patch applied in and outside the repo, removal restores upstream with a fresh mtime,
+  `target/` survives, missing and non-applying patches fail) runs in CI before every build.
+- Change-detection jobs fetch full history, so on a push `dorny/paths-filter` can diff against
+  `github.event.before` instead of treating every file as added in a shallow clone.
+- `markdownlint` and `links` now cover every Markdown file, including `.github/` and the
+  subdirectory READMEs; `lychee.toml` changes trigger only `links`; CodeQL also runs on
+  `Cargo.lock` and `rust-toolchain.toml` changes.
+- The armv7 build installs the upstream toolchain and target before `rust-cache` probes `rustc`;
+  `release.yml` restores the rustup cache and no longer restores the dev-profile host cache.
+- The reviewer's first-install bootstrap steps are removed (CodeQL `actions/untrusted-checkout`).
+
 - Scripts are committed with mode `100755`; the first CI run failed with `Permission denied`
   because the repository uses `core.fileMode=false`. CI now fails early if a script loses its
   executable bit.

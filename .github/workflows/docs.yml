@@ -41,6 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Full history: on push, paths-filter diffs locally against
+          # github.event.before, which a shallow clone does not contain (a
+          # multi-commit push needs more than one parent).
+          fetch-depth: 0
           persist-credentials: false
       # Only push/PR have a meaningful diff; schedule and dispatch run every job
       # through the event_name clauses in each job's `if:`.
@@ -53,7 +57,6 @@ jobs:
               - '**/*.md'
               - '.markdownlint.yaml'
               - '.markdownlint-cli2.yaml'
-              - 'lychee.toml'
               - '.github/workflows/docs.yml'
             # Local link targets are not only Markdown (LICENSE, images, configs). A
             # link can only break when its source changes or its target goes away, so
@@ -77,11 +80,11 @@ jobs:
       # Pinned: a newer linter adds rules that redden unchanged docs.
       - uses: DavidAnson/markdownlint-cli2-action@3ce8f712b5d8f31acd8e201be6d97e3d2bb23eb7 # v25.1.0
         with:
+          # Every Markdown file; upstream/, build/ and target/ are ignored by
+          # .markdownlint-cli2.yaml. `**` skips dot-directories, hence .github.
           globs: |
-            *.md
-            docs/**/*.md
-            ref-docs/**/*.md
-            to-dos/**/*.md
+            **/*.md
+            .github/**/*.md
 
   links:
     needs: changes
@@ -101,5 +104,5 @@ jobs:
           restore-keys: lychee-
       - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --no-progress --cache --max-cache-age 1d --config lychee.toml './*.md' 'docs/**/*.md' 'to-dos/**/*.md'
+          args: --no-progress --cache --max-cache-age 1d --config lychee.toml '**/*.md' '.github/**/*.md'
           fail: true

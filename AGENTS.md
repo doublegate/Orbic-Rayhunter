@@ -16,7 +16,7 @@ files in `patches/` listed in `patches/series`. Never edit `upstream/` directly.
 | Scripts lint | `shellcheck scripts/{apply-patches,build,sync-upstream,gen-assets}.sh`; vendored reviewer: `shellcheck -S error scripts/agy-review*.sh scripts/_agy_*.sh` |
 | Reviewer self-test | `bash scripts/agy-review-selftest.sh` |
 | Workflow lint | `actionlint` |
-| Docs lint | `markdownlint-cli2 '**/*.md'` |
+| Docs lint | `markdownlint-cli2 '**/*.md' '.github/**/*.md'` (`**` skips dot-directories) |
 | Stage patched upstream | `scripts/apply-patches.sh` (into `build/rayhunter`) |
 | Build device binaries | `scripts/build.sh devel` (into `dist/`) |
 | Upstream update check | `scripts/sync-upstream.sh [<tag>]` |

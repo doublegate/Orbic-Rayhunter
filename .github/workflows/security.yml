@@ -42,6 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Full history: on push, paths-filter diffs locally against
+          # github.event.before, which a shallow clone does not contain (a
+          # multi-commit push needs more than one parent).
+          fetch-depth: 0
           persist-credentials: false
       # Only push/PR have a meaningful diff; schedule and dispatch run every job
       # through the event_name clauses in each job's `if:`.
@@ -58,6 +62,8 @@ jobs:
             code:
               - 'crates/**'
               - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
               - '.github/**'
 
   gitleaks:

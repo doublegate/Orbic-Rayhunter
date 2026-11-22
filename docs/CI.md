@@ -12,18 +12,19 @@ inputs did not change.
 
 Skipping is done with job-level `if:`, never with trigger-level `paths:` filters. A skipped job
 still reports its check run as passing, while a workflow that never starts leaves a required
-check pending forever and blocks merges. The required checks on `main` are listed in
-[PROJECT-STATUS.md](../PROJECT-STATUS.md).
+check pending forever and blocks merges. The required checks on `main` are listed under
+[The `main` ruleset](#the-main-ruleset) below.
 
 | Workflow | Job (required check) | Runs when these change |
 |---|---|---|
 | `ci` | `host crates (fmt, clippy, test)` | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/**`, `ci.yml` |
-| `ci` | `shellcheck` (also file modes and the reviewer self-test) | `scripts/**`, `antigravity-review.yml`, `ci.yml` |
-| `ci` | `patch series + armv7 daemon build` | `upstream` (submodule pointer), `.gitmodules`, `patches/**`, `scripts/apply-patches.sh`, `scripts/build.sh`, `ci.yml` |
-| `docs` | `markdownlint`, `links` | any `*.md`, markdownlint or lychee config, `docs.yml` |
+| `ci` | `shellcheck` (also file modes and the reviewer self-test) | `scripts/**`, `tests/**`, `antigravity-review.yml`, `ci.yml` |
+| `ci` | `patch series + armv7 daemon build` (runs `tests/apply-patches.sh` first) | `upstream` (submodule pointer), `.gitmodules`, `patches/**`, `scripts/apply-patches.sh`, `scripts/build.sh`, `tests/apply-patches.sh`, `ci.yml` |
+| `docs` | `markdownlint` | any `*.md`, markdownlint config, `docs.yml` |
+| `docs` | `links` | any `*.md`, `lychee.toml`, `docs.yml`, and any deletion or rename anywhere (link targets are not only Markdown) |
 | `security` | `gitleaks` | always (fast; a secret can land in any file) |
 | `security` | `cargo-audit` | Cargo manifests or lockfile, `security.yml` |
-| `security` | `codeql` | `crates/**`, `Cargo.toml`, `.github/**` |
+| `security` | `codeql` | `crates/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.github/**` |
 
 A workflow file change re-runs that workflow's jobs. `workflow_dispatch` runs every job. The
 weekly `schedule` runs of `docs` (link rot) and `security` (new advisories and CodeQL queries)
@@ -103,7 +104,8 @@ host being online.
   token-bearing `git` call executes. Inline mode never exposes the checkout; very large diffs are
   truncated instead (logged). Open item for the template: write the handoff file outside the
   repository and scrub agy's environment by allowlist (`ACTIONS_RUNTIME_TOKEN` is still inherited).
-- The template's first-install bootstrap steps were removed once the reviewer reached `main`:
+- The template's first-install bootstrap steps were removed before the reviewer reached `main` (it
+  bootstrapped itself once on PR #1):
   they check out PR-head code in the job and trip CodeQL's `actions/untrusted-checkout` (high).
 
 ## Adding a job
