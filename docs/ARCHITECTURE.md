@@ -38,9 +38,12 @@ device. `scripts/` never talks to the device. Patches never depend on `orx-cli`.
 
 ## Build pipeline
 
-1. `scripts/apply-patches.sh`: `git archive` of the submodule's committed tree into
-   `build/rayhunter`, then each `patches/series` entry with `git apply --check` first. The
-   submodule working tree is never modified.
+1. `scripts/apply-patches.sh`: `git archive` of the submodule's committed tree into a scratch
+   directory, then each `patches/series` entry with `git apply --check` first, then a
+   content-compared sync (`rsync --checksum --delete`) into `build/rayhunter` that leaves
+   `target/` and `node_modules/` alone. Only files whose content changed are rewritten (with a
+   fresh mtime), so Cargo rebuilds exactly what changed. The submodule working tree is never
+   modified.
 2. `scripts/build.sh devel|firmware`: upstream's `rust-toolchain.toml`, `npm run build -w
    daemon/web`, then upstream's cargo aliases (`build-daemon-firmware[-devel]`,
    `build-rootshell-firmware[-devel]`) for `armv7-unknown-linux-musleabihf`.

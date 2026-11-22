@@ -11,9 +11,9 @@ release ([RELEASE-PROCESS.md](RELEASE-PROCESS.md)).
 | Format | `cargo fmt --all --check` |
 | Lint | `cargo clippy --all-targets --locked -- -D warnings` |
 | Unit tests | `cargo test --locked` (filter: `cargo test -p orx-cli <name>`) |
-| Scripts | `shellcheck scripts/*.sh` |
+| Scripts | `shellcheck` (project scripts at full severity; vendored reviewer scripts at `-S error`) and `bash scripts/agy-review-selftest.sh` |
 | Workflows | `actionlint` |
-| Docs | `markdownlint-cli2 '**/*.md'` |
+| Docs | `markdownlint-cli2 '**/*.md' '.github/**/*.md'` |
 
 `orx` tests never touch real hardware: USB detection runs against a fake sysfs tree and network
 probes against a local listener (`crates/orx-cli/src/usb.rs`, `probe.rs`). Every new subcommand

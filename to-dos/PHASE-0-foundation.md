@@ -64,7 +64,7 @@ comm -23 <(grep -rhoE 'T-OR-[0-9]{3}' docs to-dos PROJECT-STATUS.md | sort -u) \
 ## Sprint 0.3: Publish
 
 - [x] T-OR-008: first commit (Conventional Commits) and push to `main`
-- [x] T-OR-009: branch protection on `main`: required checks from `ci`, `docs`, `security`; no
+- [x] T-OR-009 (now the `main` ruleset, see docs/CI.md): branch protection on `main`: required checks from `ci`, `docs`, `security`; no
       force push
 - [x] T-OR-010: first CI run; open each job log and confirm it ran its real gate (no skipped
       steps, no `continue-on-error` on blocking jobs, submodule checked out, patch series applied,
@@ -82,7 +82,7 @@ Verification:
 git log --oneline -1
 gh run list --branch main --limit 5
 gh run view <run-id> --log | less          # read each job
-gh api repos/doublegate/Orbic-Rayhunter/branches/main/protection
+gh api repos/doublegate/Orbic-Rayhunter/rules/branches/main   # rules from the `main` ruleset (docs/CI.md)
 git tag -l v0.1.0 && gh release view v0.1.0
 rel="$(mktemp -d)" && gh release download v0.1.0 -D "$rel" && (cd "$rel" && sha256sum -c SHA256SUMS)
 ```

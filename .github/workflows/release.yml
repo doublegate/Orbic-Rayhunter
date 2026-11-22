@@ -12,9 +12,15 @@ on:
 permissions:
   contents: write
 
+# Must match ci.yml: rust-cache hashes CARGO_* variables into its cache key.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
@@ -23,11 +29,37 @@ jobs:
           submodules: true
           ref: ${{ env.TAG }}
           persist-credentials: false
+      - name: Stage patched upstream (needed for cache keys)
+        run: scripts/apply-patches.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install
+          cache: npm
+          cache-dependency-path: build/rayhunter/package-lock.json
+      # Restore-only: release builds reuse main's caches but never write them.
+      # Each restore mirrors its ci.yml producer exactly (shared-key, workspace and
+      # the workflow-level CARGO_* env), or the cache keys never match.
+      # The root rust-toolchain.toml pins the same 1.98.0 as upstream, so the
+      # upstream install below also serves the orx build. orx-cli has no dependencies and CI's host-crates cache holds only dev/test
+      # artifacts, so it is not restored here (a second rust-cache step would also
+      # re-extract ~/.cargo/registry over the first).
+      - name: Restore rustup toolchain + armv7 target
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.rustup/settings.toml
+          key: rustup-${{ runner.os }}-${{ hashFiles('build/rayhunter/rust-toolchain.toml') }}-armv7
+      - name: Install upstream toolchain + armv7 target
+        working-directory: build/rayhunter
+        run: rustup toolchain install && rustup target add armv7-unknown-linux-musleabihf
+      - name: Restore patched-upstream cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: patched
+          workspaces: build/rayhunter -> target
+          save-if: false
       - name: Build orx (host, x86_64 linux)
         run: cargo build --release --locked -p orx-cli
       - name: Build patched daemon + rootshell

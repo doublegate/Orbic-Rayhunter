@@ -1,5 +1,10 @@
 name: ci
 
+# Path-aware: a `changes` job classifies the diff and every expensive job is
+# gated with `if:`. Jobs are skipped, never left unscheduled, so required
+# status checks on `main` still report (a skipped job counts as passing).
+# Trigger-level `paths:` filters are deliberately not used for that reason.
+
 on:
   push:
     branches: [main]
@@ -10,16 +15,75 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # PR runs share a per-ref group so a newer push supersedes a stale run. Every
+  # other run gets its own group: GitHub replaces a *pending* run in a shared
+  # group even with cancel-in-progress false, and the next push's change
+  # detection only diffs against its own parent, so a replaced run's changes
+  # would never be validated.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 jobs:
+  changes:
+    # Unique name, listed as a required check in the `main` ruleset: if change
+    # detection fails, its dependents are skipped (which would otherwise read as
+    # passing), so this check must fail closed and block the merge itself.
+    name: detect changes (ci)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.f.outputs.rust }}
+      scripts: ${{ steps.f.outputs.scripts }}
+      build: ${{ steps.f.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        with:
+          # Full history: on push, paths-filter diffs locally against
+          # github.event.before, which a shallow clone does not contain (a
+          # multi-commit push needs more than one parent).
+          fetch-depth: 0
+          persist-credentials: false
+      # Only push/PR have a meaningful diff; schedule and dispatch run every job
+      # through the event_name clauses in each job's `if:`.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: f
+        with:
+          filters: |
+            rust:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - '.github/workflows/ci.yml'
+            scripts:
+              - 'scripts/**'
+              - 'tests/**'
+              - '.github/workflows/antigravity-review.yml'
+              - '.github/workflows/ci.yml'
+            build:
+              - 'upstream'
+              - '.gitmodules'
+              - 'patches/**'
+              - 'scripts/apply-patches.sh'
+              - 'scripts/build.sh'
+              - 'tests/apply-patches.sh'
+              - '.github/workflows/ci.yml'
+
   host-crates:
     name: host crates (fmt, clippy, test)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,40 +91,93 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # shared-key replaces the job-ID part of the key so release.yml can
+          # restore this cache from a differently named job.
+          shared-key: host
+          # PRs restore main's cache but do not write their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
   scripts:
     name: shellcheck
+    needs: changes
+    if: needs.changes.outputs.scripts == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: shellcheck --version && shellcheck scripts/*.sh
+      # Every project script, derived from the globs so a new script is never skipped;
+      # only the vendored reviewer scripts are excluded (checked at -S error below).
+      - name: shellcheck (project scripts, full severity)
+        run: |
+          shellcheck --version
+          mapfile -t project < <(git ls-files 'scripts/*.sh' 'tests/*.sh' \
+            | grep -vE '^scripts/(agy-review|agy-review-selftest|_agy_[a-z_]+)\.sh$')
+          printf 'checking: %s\n' "${project[@]}"
+          shellcheck "${project[@]}"
+      # The reviewer scripts are vendored verbatim from the antigravity-pr-review
+      # template and kept byte-identical so they can be re-synced; their style
+      # warnings are the template's, so only errors gate here.
+      - name: shellcheck (vendored Antigravity reviewer, errors only)
+        run: shellcheck -S error scripts/agy-review.sh scripts/_agy_print.sh scripts/_agy_comment_body.sh scripts/agy-review-selftest.sh
       # core.fileMode=false clones (NAS share) can drop the exec bit silently.
       - name: Scripts are committed executable (mode 100755)
         run: |
-          bad=$(git ls-files -s scripts/*.sh | awk '$1 != "100755" {print $4}')
+          bad=$(git ls-files -s 'scripts/*.sh' 'tests/*.sh' | awk '$1 != "100755" {print $4}')
           if [ -n "$bad" ]; then echo "::error::not executable in git: $bad"; exit 1; fi
+      # Offline self-test of the Antigravity reviewer (no agy, no network); it also
+      # checks the reviewer workflow's timeout budget against the script's lock wait.
+      - name: Antigravity reviewer self-test
+        run: bash scripts/agy-review-selftest.sh
 
   patched-upstream:
     name: patch series + armv7 daemon build
+    needs: changes
+    if: needs.changes.outputs.build == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
           persist-credentials: false
+      - name: apply-patches regression tests
+        run: bash tests/apply-patches.sh
       - name: Apply patches/series onto pinned upstream
         run: scripts/apply-patches.sh
+      - name: Cache rustup toolchain + armv7 target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.rustup/settings.toml
+          key: rustup-${{ runner.os }}-${{ hashFiles('build/rayhunter/rust-toolchain.toml') }}-armv7
+      # Install the pinned toolchain and armv7 target explicitly, right after the
+      # cache restore and before rust-cache probes `rustc -vV`, so a cold cache
+      # never lets rustup lazily install a toolchain without the target.
+      - name: Install upstream toolchain + armv7 target
+        working-directory: build/rayhunter
+        run: rustup toolchain install && rustup target add armv7-unknown-linux-musleabihf
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: build/rayhunter/package-lock.json
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: build/rayhunter
+          shared-key: patched
+          workspaces: build/rayhunter -> target
+          # No patch-series key: rust-cache stores only third-party dependencies
+          # (workspace crates are stripped before saving) and already keys on the
+          # staged Cargo.toml/Cargo.lock, so a patch edit must not discard it.
+          # Workspace freshness is handled by apply-patches.sh's mtime rules.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build daemon + rootshell (firmware-devel)
         run: scripts/build.sh devel
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -68,3 +185,4 @@ jobs:
           name: orbic-rayhunter-devel
           path: dist/
           if-no-files-found: error
+          retention-days: 14

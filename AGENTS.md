@@ -13,9 +13,10 @@ files in `patches/` listed in `patches/series`. Never edit `upstream/` directly.
 | Task | Command |
 |---|---|
 | Host crates gate | `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
-| Scripts lint | `shellcheck scripts/*.sh` |
+| Scripts lint | `shellcheck` on every `scripts/*.sh` and `tests/*.sh` except the vendored reviewer scripts (CI derives the list); vendored reviewer: `shellcheck -S error scripts/agy-review*.sh scripts/_agy_*.sh` |
+| Reviewer self-test | `bash scripts/agy-review-selftest.sh` |
 | Workflow lint | `actionlint` |
-| Docs lint | `markdownlint-cli2 '**/*.md'` |
+| Docs lint | `markdownlint-cli2 '**/*.md' '.github/**/*.md'` (`**` skips dot-directories) |
 | Stage patched upstream | `scripts/apply-patches.sh` (into `build/rayhunter`) |
 | Build device binaries | `scripts/build.sh devel` (into `dist/`) |
 | Upstream update check | `scripts/sync-upstream.sh [<tag>]` |
@@ -37,6 +38,14 @@ Toolchain: Rust 1.98.0 (matches `upstream/rust-toolchain.toml`).
 `docs/` is the specification: update it in the same change as behavior. `ref-docs/` is an
 immutable dated research corpus; corrections go in a new dated file. Roadmap tickets are
 `T-OR-NNN`, minted in `ROADMAP.md`. Current state lives only in `PROJECT-STATUS.md`.
+
+## PR review
+
+PRs are reviewed by the self-hosted Antigravity reviewer (`agy`, see `.github/AGY-REVIEWER.md`;
+project rules in `.github/agy-review.md`) plus Codex and CodeRabbit. Address every finding: fix
+blocking and real issues, reply with evidence where a finding is wrong, defer genuine nits to a
+ticket, and resolve the threads you addressed. The `agy-review*.sh` and `_agy_*.sh` scripts are
+vendored from the `antigravity-pr-review` template; re-sync rather than edit them.
 
 ## Commits
 

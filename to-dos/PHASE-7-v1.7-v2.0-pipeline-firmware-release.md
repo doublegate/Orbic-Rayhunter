@@ -127,7 +127,7 @@ Verification:
 
 ```sh
 cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test
-markdownlint-cli2 '**/*.md'
+markdownlint-cli2 '**/*.md' '.github/**/*.md'
 git tag -l v2.0.0 && gh release view v2.0.0
 ```
 

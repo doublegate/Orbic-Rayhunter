@@ -64,7 +64,7 @@ Goal: a buildable, lintable, documented overlay repository with upstream pinned 
 | T-OR-011 | Tag and release v0.1.0 | host | open |
 
 Exit criteria: T-OR-001..T-OR-011 done; CI green on the tagged commit with no
-`continue-on-error` on a blocking gate; `markdownlint-cli2 '**/*.md'` clean; README points to
+`continue-on-error` on a blocking gate; `markdownlint-cli2 '**/*.md' '.github/**/*.md'` clean; README points to
 PROJECT-STATUS.md.
 
 ## v0.2.0 Device recon + verified backup

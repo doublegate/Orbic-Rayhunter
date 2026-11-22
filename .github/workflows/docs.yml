@@ -1,17 +1,79 @@
 name: docs
 
+# Path-aware like ci.yml: jobs are skipped (not unscheduled) when no Markdown
+# or lint config changed, so required checks still report. The weekly
+# schedule re-checks external links for rot regardless of changes.
+
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  # PR runs share a per-ref group so a newer push supersedes a stale run. Every
+  # other run gets its own group: GitHub replaces a *pending* run in a shared
+  # group even with cancel-in-progress false, and the next push's change
+  # detection only diffs against its own parent, so a replaced run's changes
+  # would never be validated.
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  markdownlint:
+  changes:
+    # Unique name, listed as a required check in the `main` ruleset: if change
+    # detection fails, its dependents are skipped (which would otherwise read as
+    # passing), so this check must fail closed and block the merge itself.
+    name: detect changes (docs)
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      md: ${{ steps.f.outputs.md }}
+      links: ${{ steps.f.outputs.links }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        with:
+          # Full history: on push, paths-filter diffs locally against
+          # github.event.before, which a shallow clone does not contain (a
+          # multi-commit push needs more than one parent).
+          fetch-depth: 0
+          persist-credentials: false
+      # Only push/PR have a meaningful diff; schedule and dispatch run every job
+      # through the event_name clauses in each job's `if:`.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: f
+        with:
+          filters: |
+            md:
+              - '**/*.md'
+              - '.markdownlint.yaml'
+              - '.markdownlint-cli2.yaml'
+              - '.github/workflows/docs.yml'
+            # Local link targets are not only Markdown (LICENSE, images, configs). A
+            # link can only break when its source changes or its target goes away, so
+            # also run on any deletion or rename anywhere in the tree.
+            links:
+              - '**/*.md'
+              - 'lychee.toml'
+              - '.github/workflows/docs.yml'
+              - deleted|renamed: '**'
+
+  markdownlint:
+    needs: changes
+    # Run on matching changes, and always on schedule / manual dispatch.
+    if: needs.changes.outputs.md == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -19,19 +81,39 @@ jobs:
       # Pinned: a newer linter adds rules that redden unchanged docs.
       - uses: DavidAnson/markdownlint-cli2-action@3ce8f712b5d8f31acd8e201be6d97e3d2bb23eb7 # v25.1.0
         with:
+          # Every Markdown file; upstream/, build/ and target/ are ignored by
+          # .markdownlint-cli2.yaml. `**` skips dot-directories, hence .github.
           globs: |
-            *.md
-            docs/**/*.md
-            ref-docs/**/*.md
-            to-dos/**/*.md
+            **/*.md
+            .github/**/*.md
 
   links:
+    needs: changes
+    if: needs.changes.outputs.links == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Reuse successful external link results for a day across runs.
+      # Per-run key so every run saves its refreshed results; the scheduled run skips
+      # the restore so it re-checks every external link for rot.
+      - name: Restore lychee cache
+        if: github.event_name != 'schedule'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lycheecache
+          key: lychee-${{ github.run_id }}
+          restore-keys: lychee-
       - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --no-progress --config lychee.toml './*.md' 'docs/**/*.md' 'to-dos/**/*.md'
+          args: --no-progress --cache --max-cache-age 1d --config lychee.toml '**/*.md' '.github/**/*.md'
           fail: true
+      - name: Save lychee cache
+        # After a completed check (pass or fail), never on cancellation or before lychee ran.
+        if: ${{ !cancelled() && hashFiles('.lycheecache') != '' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lycheecache
+          key: lychee-${{ github.run_id }}

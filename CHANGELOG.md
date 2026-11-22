@@ -59,8 +59,79 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 - `upstream-watch.yml` validates upstream tag names against strict SemVer and passes them to
   the shell through `env` instead of expression interpolation; every `actions/checkout` sets
   `persist-credentials: false`.
+- Antigravity reviewer re-synced from the hardened template: agy runs from a private sandbox
+  directory outside the checkout (large-diff handoff included), with an allowlisted environment
+  (`env -i` plus the session variables its keyring-held login needs, so no job token or
+  workflow `env:` value reaches it under any name), and post-agy `git` calls ignore hooks. The interim
+  `AGY_DIFF_MODE: inline` workaround is removed, and with it the unused `/.agy-review-work/`
+  ignore line.
+
+### Added (CI)
+
+- Antigravity PR reviewer (`antigravity-review.yml`, `scripts/agy-review*.sh`, `scripts/_agy_*.sh`,
+  `.github/AGY-REVIEWER.md`), vendored from the `antigravity-pr-review` template: reviews every
+  same-repository PR on open, reopen and push, and on `/agy-review`, using the self-hosted `agy`
+  runner and the `agy` CLI's OAuth session. Project review rules in `.github/agy-review.md`.
+  Fork PR workflows now require approval for all outside contributors.
+- The reviewer's offline self-test runs in the `shellcheck` CI job.
+
+### Changed
+
+- CI is path-aware: `ci`, `docs` and `security` each begin with a `detect changes` job
+  (`dorny/paths-filter`) and skip jobs whose inputs did not change, using job-level `if:` so
+  required checks still report as passing. `gitleaks` always runs; scheduled and manual runs
+  run every job. The detection jobs (`detect changes (ci|docs|security)`) are themselves
+  required checks, so a detection failure blocks the merge instead of silently skipping every
+  gated check (fail closed). See `docs/CI.md`.
+- CI caching: Rust caches saved only from `main` (restored by PRs and releases) for the host
+  crates and the patched upstream's third-party dependencies, rustup toolchain plus armv7
+  target, npm, the SHA-256-verified gitleaks binary and lychee link results. Pull-request runs cancel superseded runs; every job has a timeout;
+  build artifacts are retained 14 days.
+- `scripts/apply-patches.sh` stages upstream plus patches in a scratch directory and syncs it
+  into `build/rayhunter` by content (`rsync --checksum --delete`), never touching `target/` or
+  `node_modules/`: incremental local builds and restored CI caches survive `scripts/build.sh`,
+  and only changed files get a fresh mtime so Cargo never reuses a stale patched artifact.
+  Requires `rsync`.
+- Non-PR workflow runs get a per-run concurrency group, so a pending run on `main` is never
+  replaced (and its changes never left unvalidated) by a later push.
+- `cargo-audit` runs the pinned `cargo-audit` 0.23.0 CLI (installed by `taiki-e/install-action`)
+  with `--deny warnings` instead of `rustsec/audit-check`, whose latest release targets the
+  deprecated Node.js 20 runtime and required `checks`/`issues` write permissions.
+- The docs `links` job also runs on any deletion or rename, since local link targets are not
+  only Markdown.
+- Rust caches use a `shared-key` so `release.yml` restores the caches `ci.yml` saves.
+- `docs.yml` gains a weekly link-rot run.
+- `main` protection moved from a classic branch protection rule to the `main` repository ruleset:
+  same required checks (now pinned to the GitHub Actions app), linear history, no force pushes or
+  deletions, PRs with resolved threads and squash merges; repository admins keep bypass.
 
 ### Fixed
+
+- `scripts/apply-patches.sh` silently skipped every patch when staging inside this repository
+  (the default `build/` layout): `git apply` discovered the superproject's `.git` and ignored
+  patched paths outside its subdirectory while exiting 0. It now runs with
+  `GIT_CEILING_DIRECTORIES` so it acts as plain `patch(1)`. Found by the Antigravity review; the
+  series was still empty, so no build was affected. New regression test `tests/apply-patches.sh`
+  (patch applied in and outside the repo, removal restores upstream with a fresh mtime,
+  `target/` survives, missing and non-applying patches fail) runs in CI before every build.
+- Change-detection jobs fetch full history, so on a push `dorny/paths-filter` can diff against
+  `github.event.before` instead of treating every file as added in a shallow clone.
+- `markdownlint` and `links` now cover every Markdown file, including `.github/` and the
+  subdirectory READMEs; `lychee.toml` changes trigger only `links`; CodeQL also runs on
+  `Cargo.lock` and `rust-toolchain.toml` changes.
+- The armv7 build installs the upstream toolchain and target before `rust-cache` probes `rustc`;
+  `release.yml` restores the rustup cache and no longer restores the dev-profile host cache.
+- The reviewer's first-install bootstrap steps are removed (CodeQL `actions/untrusted-checkout`).
+- The `review` job skips with a visible warning, instead of failing red, while the reviewer
+  scripts are not yet on the default branch (the PR that installs it); any failure inside the
+  reviewer still fails the job.
+- `scripts/apply-patches.sh` canonicalizes the destination and patch directory: git ignores
+  relative `GIT_CEILING_DIRECTORIES` entries, so a relative `$1` would again have skipped every
+  patch. Tests now cover relative paths and assert that unchanged files keep their mtime.
+- The patched-upstream Rust cache is no longer keyed on `patches/**` (rust-cache stores only
+  third-party dependencies, so a patch edit discarded it for nothing); the lychee cache uses a
+  per-run key and the scheduled run re-checks every link; scheduled and manual runs skip the
+  unused full-history checkout; the exec-bit gate covers `tests/*.sh`.
 
 - Scripts are committed with mode `100755`; the first CI run failed with `Permission denied`
   because the repository uses `core.fileMode=false`. CI now fails early if a script loses its

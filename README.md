@@ -156,7 +156,7 @@ Details, ticket IDs and exit criteria: [ROADMAP.md](ROADMAP.md).
 | Device facts (measured vs TBD) | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
 | Backup, recovery, install | [docs/BACKUP-AND-RECOVERY.md](docs/BACKUP-AND-RECOVERY.md), [docs/INSTALL.md](docs/INSTALL.md) |
 | Configuration and analyzers | [docs/CONFIGURATION.md](docs/CONFIGURATION.md), [docs/ANALYZERS.md](docs/ANALYZERS.md) |
-| Build, patches, testing, performance | [docs/BUILD.md](docs/BUILD.md), [docs/PATCH-POLICY.md](docs/PATCH-POLICY.md), [docs/TESTING.md](docs/TESTING.md), [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
+| Build, patches, CI, testing, performance | [docs/BUILD.md](docs/BUILD.md), [docs/PATCH-POLICY.md](docs/PATCH-POLICY.md), [docs/CI.md](docs/CI.md), [docs/TESTING.md](docs/TESTING.md), [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
 | Security model, RE method, releases | [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md), [docs/RE-METHODOLOGY.md](docs/RE-METHODOLOGY.md), [docs/RELEASE-PROCESS.md](docs/RELEASE-PROCESS.md) |
 | Research corpus | [ref-docs/](ref-docs/) (upstream, install, hardware, firmware, DIAG/QMDL, detection literature, legal) |
 | Phase and sprint plans | [to-dos/](to-dos/) |

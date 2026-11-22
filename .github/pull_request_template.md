@@ -9,7 +9,7 @@
 ## Checks run
 
 - [ ] `cargo fmt --all --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`
-- [ ] `shellcheck scripts/*.sh`
+- [ ] shellcheck on changed scripts; `bash scripts/agy-review-selftest.sh` if reviewer files changed
 - [ ] `scripts/apply-patches.sh` (if `patches/` changed)
 - [ ] Docs and `CHANGELOG.md` updated in this PR
 - [ ] Tested on device (firmware build: ) / not applicable
