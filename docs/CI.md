@@ -1,7 +1,7 @@
 # Continuous Integration
 
 How the GitHub Actions workflows decide what to run, what they cache, and how that interacts with
-branch protection.
+the `main` repository ruleset.
 
 ## Path-aware jobs
 
@@ -48,6 +48,23 @@ never write, so caches do not churn across branches. `scripts/apply-patches.sh` 
 `build/rayhunter/target` and `node_modules` when it restages sources, which is what lets the
 restored cache survive `scripts/build.sh`.
 
+## The `main` ruleset
+
+`main` is governed by a repository ruleset named `main` (Settings > Rules > Rulesets), which
+replaced the classic branch protection rule on 2026-11-22. Rules:
+
+- Restrict deletions; block force pushes; require linear history.
+- Require a pull request (0 approvals, review threads resolved, squash merge only).
+- Require these status checks, each pinned to the GitHub Actions app (integration 15368) so no
+  other app can satisfy a check by posting a status with the same name:
+  `host crates (fmt, clippy, test)`, `shellcheck`, `patch series + armv7 daemon build`,
+  `markdownlint`, `links`, `gitleaks`, `cargo-audit`, `codeql`.
+- Bypass: the repository admin role, mode "always". This is intentional: the maintainer may push
+  directly to `main`, and such pushes are checked by CI after they land rather than before.
+  Contributors go through pull requests.
+
+Inspect with `gh api repos/doublegate/Orbic-Rayhunter/rules/branches/main`.
+
 ## Concurrency and limits
 
 - Pull-request runs cancel superseded runs on the same branch; pushes to `main` always finish
@@ -61,4 +78,4 @@ Give it `needs: changes` and an `if:` on a filter output (add the filter to the 
 include `github.event_name == 'workflow_dispatch'` (or the non-push/PR clause used in `docs` and
 `security`) so manual runs still execute it, pin every action to a commit SHA, and set
 `persist-credentials: false` on checkout. If the job should block merges, add its name to the
-branch protection required checks after its first successful run.
+required checks of the `main` ruleset after its first successful run.

@@ -73,6 +73,9 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 - `scripts/apply-patches.sh` keeps `build/rayhunter/target` and `node_modules` when restaging
   sources, so incremental local builds and restored CI caches survive `scripts/build.sh`.
 - `docs.yml` gains a weekly link-rot run.
+- `main` protection moved from a classic branch protection rule to the `main` repository ruleset:
+  same required checks (now pinned to the GitHub Actions app), linear history, no force pushes or
+  deletions, PRs with resolved threads and squash merges; repository admins keep bypass.
 
 ### Fixed
 

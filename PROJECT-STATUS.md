@@ -14,7 +14,7 @@ Phase 0 (Foundation, v0.1.0) is in progress. Sprint 0.1 (scaffold) is complete a
 (specification docs) is complete. The overlay layout, upstream submodule, `orx doctor`, build
 scripts, CI, research corpus, specification docs, roadmap and phase plans are on `main` (first
 commit `12a7679`, CI fix `b982d00`). Every CI job has run its real gate and is green, including
-the armv7 patched-upstream build, and `main` is branch-protected. Rayhunter is not installed on
+the armv7 patched-upstream build, and `main` is governed by a repository ruleset. Rayhunter is not installed on
 the unit and no device backup exists. Remaining for v0.1.0: tag the release (T-OR-011). Next
 phase: Phase 1 (recon and verified backup).
 
@@ -112,6 +112,6 @@ phase: Phase 1 (recon and verified backup).
 - [x] Specification docs, ROADMAP, PROJECT-STATUS, to-dos (T-OR-007)
 - [x] `markdownlint-cli2 '**/*.md'` clean on the full tree
 - [x] First commit and push (T-OR-008)
-- [x] Branch protection on `main` (T-OR-009)
+- [x] Branch protection on `main` (T-OR-009; classic rule converted to the `main` ruleset, see [docs/CI.md](docs/CI.md))
 - [x] First CI run green with every job executing its real gate (T-OR-010)
 - [ ] CHANGELOG `[Unreleased]` renamed to `[0.1.0]`, tag v0.1.0 (T-OR-011)
