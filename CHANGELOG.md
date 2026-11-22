@@ -60,6 +60,15 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
   the shell through `env` instead of expression interpolation; every `actions/checkout` sets
   `persist-credentials: false`.
 
+### Added (CI)
+
+- Antigravity PR reviewer (`antigravity-review.yml`, `scripts/agy-review*.sh`, `scripts/_agy_*.sh`,
+  `.github/AGY-REVIEWER.md`), vendored from the `antigravity-pr-review` template: reviews every
+  same-repository PR on open, reopen and push, and on `/agy-review`, using the self-hosted `agy`
+  runner and the `agy` CLI's OAuth session. Project review rules in `.github/agy-review.md`.
+  Fork PR workflows now require approval for all outside contributors.
+- The reviewer's offline self-test runs in the `shellcheck` CI job.
+
 ### Changed
 
 - CI is path-aware: `ci`, `docs` and `security` each begin with a `detect changes` job
@@ -72,8 +81,16 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
   cache keyed on the patch series, rustup toolchain plus armv7 target, npm, the gitleaks binary
   and lychee link results. Pull-request runs cancel superseded runs; every job has a timeout;
   build artifacts are retained 14 days.
-- `scripts/apply-patches.sh` keeps `build/rayhunter/target` and `node_modules` when restaging
-  sources, so incremental local builds and restored CI caches survive `scripts/build.sh`.
+- `scripts/apply-patches.sh` stages upstream plus patches in a scratch directory and syncs it
+  into `build/rayhunter` by content (`rsync --checksum --delete`), never touching `target/` or
+  `node_modules/`: incremental local builds and restored CI caches survive `scripts/build.sh`,
+  and only changed files get a fresh mtime so Cargo never reuses a stale patched artifact.
+  Requires `rsync`.
+- Non-PR workflow runs get a per-run concurrency group, so a pending run on `main` is never
+  replaced (and its changes never left unvalidated) by a later push.
+- The docs `links` job also runs on any deletion or rename, since local link targets are not
+  only Markdown.
+- Rust caches use a `shared-key` so `release.yml` restores the caches `ci.yml` saves.
 - `docs.yml` gains a weekly link-rot run.
 - `main` protection moved from a classic branch protection rule to the `main` repository ruleset:
   same required checks (now pinned to the GitHub Actions app), linear history, no force pushes or

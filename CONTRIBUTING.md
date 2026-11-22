@@ -5,8 +5,8 @@ Thanks for helping. A few rules keep this project safe to run on real hardware.
 ## Before you open a PR
 
 - Run the gates: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo test`, `shellcheck scripts/*.sh`, and `scripts/apply-patches.sh` if you touched
-  `patches/`.
+  `cargo test`, `shellcheck` on the scripts you changed, `bash scripts/agy-review-selftest.sh`,
+  and `scripts/apply-patches.sh` if you touched `patches/`.
 - Update the matching `docs/` file in the same PR as any behavior change, and add an entry under
   `[Unreleased]` in `CHANGELOG.md`.
 - Use [Conventional Commits](https://www.conventionalcommits.org/): `feat(orx): ...`,

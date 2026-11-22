@@ -15,9 +15,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  # Supersede stale PR runs; let every push to main finish so each commit
-  # on main has a result.
+  # PR runs share a per-ref group so a newer push supersedes a stale run. Every
+  # other run gets its own group: GitHub replaces a *pending* run in a shared
+  # group even with cancel-in-progress false, and the next push's change
+  # detection only diffs against its own parent, so a replaced run's changes
+  # would never be validated.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -58,6 +61,7 @@ jobs:
               - '.github/workflows/ci.yml'
             scripts:
               - 'scripts/**'
+              - '.github/workflows/antigravity-review.yml'
               - '.github/workflows/ci.yml'
             build:
               - 'upstream'
@@ -81,6 +85,9 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # shared-key replaces the job-ID part of the key so release.yml can
+          # restore this cache from a differently named job.
+          shared-key: host
           # PRs restore main's cache but do not write their own.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
@@ -97,12 +104,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: shellcheck --version && shellcheck scripts/*.sh
+      - name: shellcheck (project scripts, full severity)
+        run: shellcheck --version && shellcheck scripts/apply-patches.sh scripts/build.sh scripts/sync-upstream.sh scripts/gen-assets.sh
+      # The reviewer scripts are vendored verbatim from the antigravity-pr-review
+      # template and kept byte-identical so they can be re-synced; their style
+      # warnings are the template's, so only errors gate here.
+      - name: shellcheck (vendored Antigravity reviewer, errors only)
+        run: shellcheck -S error scripts/agy-review.sh scripts/_agy_print.sh scripts/_agy_comment_body.sh scripts/agy-review-selftest.sh
       # core.fileMode=false clones (NAS share) can drop the exec bit silently.
       - name: Scripts are committed executable (mode 100755)
         run: |
           bad=$(git ls-files -s scripts/*.sh | awk '$1 != "100755" {print $4}')
           if [ -n "$bad" ]; then echo "::error::not executable in git: $bad"; exit 1; fi
+      # Offline self-test of the Antigravity reviewer (no agy, no network); it also
+      # checks the reviewer workflow's timeout budget against the script's lock wait.
+      - name: Antigravity reviewer self-test
+        run: bash scripts/agy-review-selftest.sh
 
   patched-upstream:
     name: patch series + armv7 daemon build
@@ -132,6 +149,7 @@ jobs:
           cache-dependency-path: build/rayhunter/package-lock.json
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          shared-key: patched
           workspaces: build/rayhunter -> target
           # Patches change sources, not dependencies; key on the series too so
           # a cache never mixes artifacts across patch sets.

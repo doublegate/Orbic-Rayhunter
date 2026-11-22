@@ -18,7 +18,7 @@ check pending forever and blocks merges. The required checks on `main` are liste
 | Workflow | Job (required check) | Runs when these change |
 |---|---|---|
 | `ci` | `host crates (fmt, clippy, test)` | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/**`, `ci.yml` |
-| `ci` | `shellcheck` | `scripts/**`, `ci.yml` |
+| `ci` | `shellcheck` (also file modes and the reviewer self-test) | `scripts/**`, `antigravity-review.yml`, `ci.yml` |
 | `ci` | `patch series + armv7 daemon build` | `upstream` (submodule pointer), `.gitmodules`, `patches/**`, `scripts/apply-patches.sh`, `scripts/build.sh`, `ci.yml` |
 | `docs` | `markdownlint`, `links` | any `*.md`, markdownlint or lychee config, `docs.yml` |
 | `security` | `gitleaks` | always (fast; a secret can land in any file) |
@@ -44,9 +44,15 @@ runs the armv7 build, `gitleaks` and nothing else.
 | lychee results | `.lycheecache`, 1-day max age | rolling |
 
 Only runs on `main` save Rust caches (`save-if`); pull requests and releases restore them but
-never write, so caches do not churn across branches. `scripts/apply-patches.sh` keeps
-`build/rayhunter/target` and `node_modules` when it restages sources, which is what lets the
-restored cache survive `scripts/build.sh`.
+never write, so caches do not churn across branches. Each Rust cache uses a `shared-key`
+(`host`, `patched`) instead of the default job-ID key, so `release.yml` restores the same cache
+`ci.yml` saves; the release workflow repeats the same workspaces, key and `CARGO_*` environment.
+
+`scripts/apply-patches.sh` restages sources by content (`rsync --checksum`) and never touches
+`build/rayhunter/target` or `node_modules`, so a restored cache survives `scripts/build.sh`.
+Only changed files get a new mtime; that keeps Cargo's fingerprints correct (a reverted file is
+rebuilt, an unchanged one is not), where restoring the archive's commit-time mtimes could make
+Cargo reuse a stale patched artifact.
 
 ## The `main` ruleset
 
@@ -75,6 +81,24 @@ Inspect with `gh api repos/doublegate/Orbic-Rayhunter/rules/branches/main`.
   so every commit on `main` has a result.
 - Every job has a `timeout-minutes` bound (5 to 60 minutes).
 - Build artifacts (`orbic-rayhunter-devel`) are kept for 14 days.
+
+## Antigravity PR reviewer
+
+`antigravity-review.yml` reviews every same-repository PR on open, reopen and each push, and on a
+`/agy-review` comment from a user with write access. It runs on this machine's self-hosted runner
+(label `agy`, unit `github-agy-runner@orbic-rayhunter`) through the `agy` CLI's OAuth session, so
+it uses the Google AI Ultra plan rather than a metered API key. It posts one comment per PR and
+edits it in place, archiving earlier rounds. It is not a required check: it depends on the runner
+host being online.
+
+- Operations, configuration and security model: [.github/AGY-REVIEWER.md](../.github/AGY-REVIEWER.md).
+- Project review rules: [.github/agy-review.md](../.github/agy-review.md).
+- Fork PRs require approval for every outside contributor before any workflow runs, because the
+  runner is a persistent self-hosted host.
+- The scripts are vendored from the `antigravity-pr-review` template and kept byte-identical; the
+  workflow runs the copies on the default branch, so script changes take effect only after merge.
+- The template's first-install bootstrap steps were removed once the reviewer reached `main`:
+  they check out PR-head code in the job and trip CodeQL's `actions/untrusted-checkout` (high).
 
 ## Adding a job
 

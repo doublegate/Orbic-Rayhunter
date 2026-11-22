@@ -11,7 +11,7 @@ release ([RELEASE-PROCESS.md](RELEASE-PROCESS.md)).
 | Format | `cargo fmt --all --check` |
 | Lint | `cargo clippy --all-targets --locked -- -D warnings` |
 | Unit tests | `cargo test --locked` (filter: `cargo test -p orx-cli <name>`) |
-| Scripts | `shellcheck scripts/*.sh` |
+| Scripts | `shellcheck` (project scripts at full severity; vendored reviewer scripts at `-S error`) and `bash scripts/agy-review-selftest.sh` |
 | Workflows | `actionlint` |
 | Docs | `markdownlint-cli2 '**/*.md'` |
 
