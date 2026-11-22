@@ -1,0 +1,48 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Device backups and captures: never committed (firmware blobs, IMEI/IMSI, ICCID)
+/backups/*
+!/backups/README.md
+*.qmdl
+*.qmdl.gz
+*.ndjson
+*.pcap
+*.pcapng
+*.img
+*.bin
+*.ubi
+*.mbn
+
+# Downloaded papers stay local: free to read is not free to redistribute.
+# ref-docs/pdfs/README.md links each source. To track a PDF whose license
+# permits redistribution (e.g. CC-BY), add an explicit !negation with the license noted.
+/ref-docs/pdfs/*.pdf
+
+# Reverse-engineering working state (Ghidra projects, extracted firmware)
+/re/ghidra/
+/re/extracted/
+*.gpr
+*.rep/
+
+# Build staging (patched upstream tree, device artifacts, frontend deps)
+/build/
+/dist/
+node_modules/
+
+# Secrets and local agent/tool state
+.env
+.env.*
+*.pem
+*.key
+wpa_sta.conf
+.claude/settings.local.json
+CLAUDE.local.md
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

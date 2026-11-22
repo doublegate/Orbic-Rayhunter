@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Build orx (host, x86_64 linux)
+        run: cargo build --release --locked -p orx-cli
+      - name: Build patched daemon + rootshell
+        run: scripts/build.sh devel
+      - name: Stage assets
+        run: |
+          cp target/release/orx dist/orx-x86_64-linux
+          cd dist
+          rm -f SHA256SUMS
+          sha256sum -- ./* > ../SHA256SUMS.tmp
+          mv ../SHA256SUMS.tmp SHA256SUMS
+      - name: Extract release notes from CHANGELOG
+        run: |
+          ver="${TAG#v}"
+          awk -v v="$ver" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
+          test -s notes.md || echo "See CHANGELOG.md" > notes.md
+      - name: Create or update release (never duplicates)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "Orbic-Rayhunter $TAG" --notes-file notes.md
+          fi

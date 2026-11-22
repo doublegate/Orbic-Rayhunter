@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in orx, the scripts, the patches or the docs is wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste IMSI, IMEI, ICCID, phone numbers, admin passwords or raw QMDL/PCAP captures.
+  - type: input
+    id: firmware
+    attributes:
+      label: Device firmware build
+      placeholder: ORB400L_V1.2.0_BVZRT
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Orbic-Rayhunter version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `orx doctor` (scrub serials if you prefer)
+      render: text

@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" width="1200" height="680" role="img" aria-labelledby="arch-light-title arch-light-desc">
+  <title id="arch-light-title">Orbic-Rayhunter Architecture (Light)</title>
+  <desc id="arch-light-desc">Architecture diagram showing the Host (Linux) overlay build and orx CLI communicating over USB (RNDIS / ADB) or Wi-Fi with the Orbic RC400L (armv7, Qualcomm MDM9207) running rayhunter-daemon.</desc>
+  <defs>
+    <marker id="arrow-cyan-l" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#0891b2"/>
+    </marker>
+    <marker id="arrow-green-l" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrow-amber-l" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#d97706"/>
+    </marker>
+  </defs>
+
+  <!-- White Background -->
+  <rect x="0" y="0" width="1200" height="680" fill="#ffffff"/>
+
+  <!-- Subtle radar arc decoration in top-right corner -->
+  <g stroke="#0891b2" stroke-opacity="0.16" fill="none" stroke-width="1.5">
+    <circle cx="1140" cy="40" r="60"/>
+    <circle cx="1140" cy="40" r="100"/>
+    <circle cx="1140" cy="40" r="140"/>
+  </g>
+  <circle cx="1048" cy="78" r="4" fill="#f59e0b"/>
+
+  <!-- Header -->
+  <text x="40" y="46" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="22" font-weight="700" letter-spacing="0.3">Orbic-Rayhunter System Architecture</text>
+  <text x="40" y="70" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13">Host overlay build pipeline, orx management CLI, and on-device passive DIAG analysis</text>
+
+  <!-- ==================== LEFT REGION: HOST (LINUX) ==================== -->
+  <rect x="36" y="96" width="470" height="548" rx="12" fill="#f8fafc" stroke="#0891b2" stroke-width="1.75"/>
+  <rect x="36" y="96" width="470" height="44" rx="12" fill="#0b1020"/>
+  <rect x="36" y="128" width="470" height="12" fill="#0b1020"/>
+  <circle cx="62" cy="118" r="6" fill="#22d3ee"/>
+  <text x="78" y="124" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700">Host (Linux)</text>
+
+  <!-- Section label: Overlay Build Pipeline -->
+  <text x="64" y="166" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="0.8">OVERLAY BUILD PIPELINE</text>
+
+  <!-- Box 1: upstream/ -->
+  <rect x="64" y="180" width="414" height="56" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="271" y="206" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">upstream/ (EFForg/rayhunter, pinned tag)</text>
+  <text x="271" y="224" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5">Read-only git submodule</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="271" y1="236" x2="271" y2="262" stroke="#0891b2" stroke-width="2" marker-end="url(#arrow-cyan-l)"/>
+
+  <!-- Box 2: patches/series -->
+  <rect x="64" y="266" width="414" height="52" rx="8" fill="#ffffff" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="271" y="290" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">patches/series</text>
+  <text x="271" y="307" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5">Ordered Orbic RC400L overlay patch queue</text>
+
+  <!-- Arrow 2 -> 3 -->
+  <line x1="271" y1="318" x2="271" y2="344" stroke="#0891b2" stroke-width="2" marker-end="url(#arrow-cyan-l)"/>
+
+  <!-- Box 3: build/rayhunter -->
+  <rect x="64" y="348" width="414" height="52" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="271" y="372" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">build/rayhunter</text>
+  <text x="271" y="389" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5">Staged patched source tree</text>
+
+  <!-- Arrow 3 -> 4 -->
+  <line x1="271" y1="400" x2="271" y2="426" stroke="#0891b2" stroke-width="2" marker-end="url(#arrow-cyan-l)"/>
+
+  <!-- Box 4: dist/ -->
+  <rect x="64" y="430" width="414" height="60" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.75"/>
+  <text x="271" y="456" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">dist/: rayhunter-daemon, rootshell, SHA256SUMS</text>
+  <text x="271" y="476" text-anchor="middle" fill="#15803d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600">Verified armv7 release artifacts</text>
+
+  <!-- Separate Box: orx CLI -->
+  <text x="64" y="528" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="0.8">HOST MANAGEMENT CLI</text>
+  <rect x="64" y="540" width="414" height="78" rx="8" fill="#ecfeff" stroke="#0891b2" stroke-width="2"/>
+  <text x="271" y="572" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="700">orx: doctor, backup, install, verify, pull-logs, restore</text>
+  <text x="271" y="596" text-anchor="middle" fill="#0e7490" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="600">Deploys dist/ artifacts, manages backups, and retrieves captures</text>
+
+  <!-- Subtle link from dist/ to orx -->
+  <line x1="271" y1="490" x2="271" y2="536" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow-cyan-l)"/>
+
+  <!-- ==================== LINK BETWEEN REGIONS ==================== -->
+  <g>
+    <rect x="520" y="330" width="160" height="76" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.75"/>
+    <text x="600" y="362" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700">USB (RNDIS / ADB)</text>
+    <text x="600" y="382" text-anchor="middle" fill="#b45309" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700">or Wi-Fi</text>
+
+    <!-- Connector line Host <-> Link <-> Orbic -->
+    <line x1="506" y1="368" x2="520" y2="368" stroke="#d97706" stroke-width="2.25"/>
+    <line x1="680" y1="368" x2="694" y2="368" stroke="#d97706" stroke-width="2.25" marker-end="url(#arrow-amber-l)"/>
+
+    <!-- Branch from orx box to link bus -->
+    <path d="M 478 579 L 600 579 L 600 406" fill="none" stroke="#0891b2" stroke-width="1.75" stroke-dasharray="5 4" marker-end="url(#arrow-cyan-l)"/>
+    <path d="M 600 330 L 600 282 L 722 282" fill="none" stroke="#0891b2" stroke-width="1.75" stroke-dasharray="5 4" marker-end="url(#arrow-cyan-l)"/>
+  </g>
+
+  <!-- ==================== RIGHT REGION: ORBIC RC400L ==================== -->
+  <rect x="694" y="96" width="470" height="548" rx="12" fill="#f8fafc" stroke="#16a34a" stroke-width="1.75"/>
+  <rect x="694" y="96" width="470" height="44" rx="12" fill="#0b1020"/>
+  <rect x="694" y="128" width="470" height="12" fill="#0b1020"/>
+  <circle cx="720" cy="118" r="6" fill="#22c55e"/>
+  <text x="736" y="124" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700">Orbic RC400L (armv7, Qualcomm MDM9207)</text>
+
+  <!-- Section label: On-Device Runtime -->
+  <text x="722" y="166" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="0.8">PASSIVE ON-DEVICE RUNTIME</text>
+
+  <!-- Device Box 1: /dev/diag -->
+  <rect x="722" y="180" width="414" height="54" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="929" y="204" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="700">/dev/diag</text>
+  <text x="929" y="222" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5">Qualcomm MDM9207 baseband diagnostic character device</text>
+
+  <!-- Arrow /dev/diag -> rayhunter-daemon -->
+  <line x1="929" y1="234" x2="929" y2="260" stroke="#0891b2" stroke-width="2" marker-end="url(#arrow-cyan-l)"/>
+
+  <!-- Device Box 2: rayhunter-daemon -->
+  <rect x="722" y="264" width="414" height="58" rx="8" fill="#ecfeff" stroke="#0891b2" stroke-width="1.75"/>
+  <text x="929" y="290" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">rayhunter-daemon</text>
+  <text x="929" y="309" text-anchor="middle" fill="#0e7490" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600">Reads baseband DIAG frames, records QMDL, dispatches parsers</text>
+
+  <!-- Arrow rayhunter-daemon -> analyzers -->
+  <line x1="929" y1="322" x2="929" y2="348" stroke="#0891b2" stroke-width="2" marker-end="url(#arrow-cyan-l)"/>
+
+  <!-- Device Box 3: analyzers -->
+  <rect x="722" y="352" width="414" height="62" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.75"/>
+  <text x="929" y="378" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">analyzers</text>
+  <text x="929" y="398" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5">LTE RRC / NAS heuristic evaluation for cell-site simulator indicators</text>
+
+  <!-- Fan-out arrows from analyzers to 4 outputs -->
+  <path d="M 825 414 L 825 456" fill="none" stroke="#16a34a" stroke-width="1.75" marker-end="url(#arrow-green-l)"/>
+  <path d="M 1033 414 L 1033 456" fill="none" stroke="#16a34a" stroke-width="1.75" marker-end="url(#arrow-green-l)"/>
+  <path d="M 929 414 L 929 532 L 825 532 L 825 544" fill="none" stroke="#16a34a" stroke-width="1.75" marker-end="url(#arrow-green-l)"/>
+  <path d="M 929 532 L 1033 532 L 1033 544" fill="none" stroke="#16a34a" stroke-width="1.75" marker-end="url(#arrow-green-l)"/>
+
+  <!-- Output 1: web UI :8080 -->
+  <rect x="722" y="460" width="198" height="58" rx="8" fill="#ffffff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="821" y="486" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700">web UI :8080</text>
+  <text x="821" y="505" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11">Status &amp; capture management</text>
+
+  <!-- Output 2: on-device display -->
+  <rect x="938" y="460" width="198" height="58" rx="8" fill="#ffffff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="1037" y="486" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700">on-device display</text>
+  <text x="1037" y="505" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11">LCD indicator bar / status</text>
+
+  <!-- Output 3: ntfy -->
+  <rect x="722" y="548" width="198" height="58" rx="8" fill="#ffffff" stroke="#d97706" stroke-width="1.5"/>
+  <text x="821" y="574" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700">ntfy</text>
+  <text x="821" y="593" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11">Optional push notifications</text>
+
+  <!-- Output 4: QMDL / PCAP recordings -->
+  <rect x="938" y="548" width="198" height="58" rx="8" fill="#ffffff" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="1037" y="574" text-anchor="middle" fill="#0b1020" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="700">QMDL / PCAP recordings</text>
+  <text x="1037" y="593" text-anchor="middle" fill="#475569" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11">Archived baseband captures</text>
+</svg>

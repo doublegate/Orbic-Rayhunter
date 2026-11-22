@@ -1,0 +1,144 @@
+# Phase 5: Alerting, analyzers, storage (v1.1.0..v1.3.0)
+
+Goal: extend upstream's notification path, close the published detection blind spots, and make
+storage self-limiting. Tickets T-OR-045..T-OR-068 ([ROADMAP.md](../ROADMAP.md)). Nearly all work
+is `[UPSTREAM]`: before each ticket, search EFForg/rayhunter issues and PRs and link the result
+in the patch body.
+
+## Sprint 5.1: Alerting (v1.1.0)
+
+- [ ] T-OR-045: ntfy `Title`, `Priority`, `Tags` headers derived from severity and notification
+      type; absent config keeps today's plain POST
+- [ ] T-OR-046: optional auth header (bearer token or basic) for the notification endpoint
+- [ ] T-OR-047: webhook sink with a JSON body: severity, analyzer name and version, recording
+      name, timestamp; no identifiers
+- [ ] T-OR-048: MQTT sink, only after upstream agrees on the dependency cost for armv7
+- [ ] T-OR-049: Gotify sink
+- [ ] T-OR-050: persistent retry queue on `/data` with a size cap, replayed when backhaul returns
+
+Acceptance criteria: each sink tested against a local server in unit or integration tests; a
+payload test asserts no IMSI/IMEI/GUTI pattern; existing `ntfy_url` behavior byte-identical when
+new keys are absent; [docs/CONFIGURATION.md](../docs/CONFIGURATION.md) updated.
+
+Verification:
+
+```sh
+scripts/apply-patches.sh
+(cd build/rayhunter && cargo test -p rayhunter-daemon notifications)
+curl -X POST http://192.168.1.1:8080/api/test-notification
+```
+
+### Research (REA/Ghidra/web)
+
+- Upstream `daemon/src/notifications.rs` (queue of 10, debounce, retry, 10 s timeout) as the
+  extension point.
+- Upstream issues #942, #770, #778 and discussion #1173 (ntfy problems, no-internet case);
+  discussion #777 (Raspberry Pi bridge to MQTT/Home Assistant) for requirements.
+- ntfy and Gotify HTTP API documentation (current versions) for header and body formats.
+
+## Sprint 5.2: Analyzer harness and causal NAS analyzers (v1.2.0, part 1)
+
+- [ ] T-OR-051: harness for synthetic RRC/NAS vectors and golden outputs; scrubber for real
+      captures ([docs/TESTING.md](../docs/TESTING.md) section 3)
+- [ ] T-OR-052: unauthenticated NAS Reject analyzer
+- [ ] T-OR-053: authentication failure / reject analyzer
+- [ ] T-OR-054: own identity disclosure analyzer; `epsid` parsing in `pycrate_rs` if needed
+- [ ] T-OR-055: EIA0 and security-never-activated analyzer
+
+Acceptance criteria: each analyzer has its own version, config flag (default off), heuristics
+doc entry, and positive and negative golden vectors; timeouts use packet timestamps.
+
+Verification:
+
+```sh
+scripts/apply-patches.sh
+(cd build/rayhunter && cargo test -p rayhunter analysis)
+(cd build/rayhunter && cargo run -p rayhunter-check -- -p <vectors-dir> -j out.json -q)
+```
+
+### Research (REA/Ghidra/web)
+
+- Devilray (arXiv 2605.19232, local PDF) section on NAS Reject IMSI catching and cause #9.
+- 3GPP TS 24.301 sections 5.4.2, 5.4.4, 5.5.1.2.5, 5.5.3.2.5, 5.6.1.5, 4.4.4.2 and Annex A.
+- 3GPP TS 33.401 (EIA0 permitted only for unauthenticated emergency sessions).
+- Upstream `lib/src/analysis/imsi_requested.rs`, `diagnostic.rs` (`epsid` gap at lines 65-70),
+  `null_cipher.rs`, `nas_null_cipher.rs`, `information_element.rs`.
+
+## Sprint 5.3: RRC/paging analyzers and plumbing (v1.2.0, part 2)
+
+- [ ] T-OR-056: IMSI paging analyzer; IMSI read from the SIM via AT and held only as a salted
+      in-memory hash
+- [ ] T-OR-057: dedicated-priority and sunset-RAT downgrade, SIB8; MCC policy table as config
+- [ ] T-OR-058: measurement plumbing (new `InformationElement` input for ML1 and RACH TA);
+      upstream issue opened before the patch
+- [ ] T-OR-059: recording-scoped cell identity consistency
+- [ ] T-OR-060: recording-level identity-exposure summary in the report
+
+Acceptance criteria: as Sprint 5.2; T-OR-058 merged or agreed upstream before T-OR-059 depends on
+PCI data.
+
+Verification:
+
+```sh
+(cd build/rayhunter && cargo test -p rayhunter analysis && cargo clippy)
+```
+
+### Research (REA/Ghidra/web)
+
+- Upstream `lib/src/diag/diaglog/ml1.rs`, `ll1.rs`, `lib/src/gsmtap/parser.rs:159`,
+  `lib/src/sim/generic_at.rs`, `analysis/priority_2g_downgrade.rs`,
+  `connection_redirect_downgrade.rs`.
+- 3GPP TS 36.331 (`RRCConnectionRelease`, `idleModeMobilityControlInfo`, SIB8, PCCH) and TS 36.304.
+- Marlin (NDSS 2025) message list and baseline; SeaGlass (PoPETs 2017) impermanence signatures.
+- MobileInsight and SCAT decoders for 0xB17F/0xB180/0xB062 layouts to cross-check `ml1.rs`.
+
+## Sprint 5.4: Calibration and stretch analyzers (v1.2.0, part 3)
+
+- [ ] T-OR-061: negative baselines (days of normal use on Verizon; AT&T and T-Mobile SIMs if
+      available); false-positive rate per analyzer; choose severities; decide default on/off
+- [ ] T-OR-061: ask EFF whether Devilray profiles can be run against candidates 1-6
+- [ ] T-OR-062: SIB reselection-parameter features (stretch)
+- [ ] T-OR-063: emergency-alert spoofing context (stretch)
+- [ ] T-OR-064: RRC Connection Reject DoS context (stretch)
+- [ ] open upstream PRs for each merged-ready analyzer; update [docs/ANALYZERS.md](../docs/ANALYZERS.md)
+
+Acceptance criteria: per-analyzer false-positive counts recorded with capture hours; no analyzer
+enabled by default without data.
+
+Verification:
+
+```sh
+cargo run -p orx-cli -- pull-logs --out ~/orbic-captures/
+(cd build/rayhunter && cargo run -p rayhunter-check -- -p ~/orbic-captures/ -j baseline.json -q)
+```
+
+### Research (REA/Ghidra/web)
+
+- EFF "Rayhunter: What We Have Found So Far" (2025-09-10) for field false-positive experience.
+- Upstream issue #543 (spurious identity-request warnings in low signal on the Orbic).
+
+## Sprint 5.5: Storage and retention (v1.3.0)
+
+- [ ] T-OR-065: on-device retention (size and age caps; oldest unflagged first; current recording
+      never deleted)
+- [ ] T-OR-066: root cause of the #1192 guard failure; `rayhunter.log` rotation
+- [ ] T-OR-067: configurable DIAG log-code subscription (generalizes T-OR-029)
+- [ ] T-OR-068: measure storage growth per hour (idle and active LTE) and set our caps and
+      free-space thresholds from data
+
+Acceptance criteria: fill test to the cap keeps the hotspot and web UI working; growth rates in
+[docs/PERFORMANCE.md](../docs/PERFORMANCE.md); CONFIGURATION.md thresholds no longer provisional.
+
+Verification:
+
+```sh
+# device shell, during the fill test
+df -h /data; du -sk /data/rayhunter/qmdl; ls -l /data/rayhunter/rayhunter.log
+# host
+curl -s http://192.168.1.1:8080/api/system-stats
+```
+
+### Research (REA/Ghidra/web)
+
+- Upstream `daemon/src/qmdl_store.rs` (manifest, `recover`), `daemon/src/diag.rs` (disk checks).
+- Issues #607, #819, #152, #510 (storage management history).

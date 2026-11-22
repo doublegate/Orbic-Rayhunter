@@ -1,0 +1,8 @@
+# markdownlint-cli2 configuration (version pinned in .github/workflows/docs.yml)
+default: true
+MD013: false        # long technical tables and URLs
+MD033: false        # occasional inline HTML
+MD041: false        # files may start with front matter / banners
+MD024:
+  siblings_only: true
+MD060: false        # table pipe alignment; fights compact technical tables

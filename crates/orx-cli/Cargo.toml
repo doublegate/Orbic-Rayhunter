@@ -1,0 +1,17 @@
+[package]
+name = "orx-cli"
+description = "Host-side helper for Rayhunter on the Orbic RC400L: device detection and health checks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "orx"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+# Kept in lockstep with upstream/rust-toolchain.toml so host crates and the
+# patched upstream workspace build with the same compiler.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]

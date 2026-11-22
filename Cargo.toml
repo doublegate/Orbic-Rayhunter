@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/orx-cli"]
+# The upstream Rayhunter workspace is built separately from upstream/ after
+# patches/ is applied (see scripts/build.sh); it is not a member here.
+exclude = ["upstream"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/doublegate/Orbic-Rayhunter"
+rust-version = "1.98"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

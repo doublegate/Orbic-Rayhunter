@@ -1,0 +1,3 @@
+# Patch series applied in order onto upstream/ (see docs/PATCH-POLICY.md).
+# One filename per line, relative to patches/. Tag each patch's subject with
+# [UPSTREAM] (intended for EFForg/rayhunter) or [LOCAL] (Orbic-specific).

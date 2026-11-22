@@ -1,0 +1,44 @@
+# Orbic-Rayhunter recommended config for the Orbic RC400L (ORB400L_V1.2.0_BVZRT).
+#
+# Derived from upstream dist/config.toml.in at v0.13.0; every key here exists
+# upstream. Deviations from upstream defaults are marked "ORX:" with the reason.
+# Installed to /data/rayhunter/config.toml (see docs/CONFIGURATION.md).
+
+qmdl_store_path = "/data/rayhunter/qmdl"
+port = 8080
+debug_mode = false
+colorblind_mode = false
+device = "orbic"
+
+# 0 invisible, 1 subtle status line, 2 orca gif, 3 EFF logo, 4 full-screen status
+ui_level = 1
+
+# ORX: 1 = double-tap power to start a new recording; useful in the field.
+key_input_mode = 1
+
+# Notifications (upstream supports ntfy). Set a private, unguessable topic.
+# ntfy_url = "https://ntfy.sh/<private-topic>"
+enabled_notifications = ["Warning", "LowBattery"]
+
+auto_check_updates = false
+
+# 2 = prompt when the device clock drifts from the browser's clock
+clock_sync_mode = 2
+
+# ORX: keep headroom so a full /data never wedges the stock firmware.
+# Values are provisional until measured in Phase 1 (docs/DEVICE-PROFILE.md).
+min_space_to_start_recording_mb = 64
+min_space_to_continue_recording_mb = 32
+
+wifi_enabled = false
+
+[analyzers]
+imsi_requested = true
+connection_redirect_2g_downgrade = true
+lte_sib6_and_7_downgrade = true
+null_cipher = true
+nas_null_cipher = true
+incomplete_sib = true
+test_analyzer = false
+diagnostic_analyzer = true
+no_nas_messages = false

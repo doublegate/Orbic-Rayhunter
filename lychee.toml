@@ -1,0 +1,13 @@
+# Link checker configuration (docs.yml). ref-docs/ is excluded from the
+# blocking check: it is an immutable dated corpus whose external links rot.
+exclude_path = ["upstream", "build", "target", "ref-docs"]
+exclude = [
+  "^http://192\\.168\\.",
+  "^http://localhost",
+  # Self-links (badges, advisories): relative links are already checked, and
+  # absolute ones 404 for content that only exists on an unmerged branch.
+  "^https://github\\.com/doublegate/Orbic-Rayhunter/",
+]
+accept = ["200..=299", "403", "429"]
+max_retries = 3
+timeout = 20

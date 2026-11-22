@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/doublegate/Orbic-Rayhunter/security/advisories/new
+    about: Report privately, not as an issue.
+  - name: Upstream Rayhunter issue
+    url: https://github.com/EFForg/rayhunter/issues
+    about: Problems in stock Rayhunter belong upstream.

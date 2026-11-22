@@ -1,0 +1,19 @@
+name: Feature request
+description: Propose an enhancement (analyzer, tooling, optimization)
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or motivation
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+  - type: dropdown
+    id: upstream
+    attributes:
+      label: Is this generic enough for upstream EFForg/rayhunter?
+      options: ["Yes, upstream candidate", "No, Orbic-specific", "Unsure"]
