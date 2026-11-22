@@ -151,17 +151,60 @@ OAUTH_URL_RE='https?://accounts\.google\.com/o/oauth2'
 # URL is always present in a real login flow, so it alone is both necessary and sufficient; a
 # lapse is detected AND a leak is blocked by the same unconditional check.
 oauth_url_present() { [ -s "$1" ] && grep -qiE "$OAUTH_URL_RE" "$1"; }
+
+# Credential shapes that must never reach a public PR comment. Every pattern is anchored on a
+# leading non-identifier boundary, so an ordinary identifier (`task-...`, `disk-...`, a word ending
+# in `ghp`) cannot match and wrongly block a review. agy's --sandbox does NOT confine
+# reads (verified 2026-11-22: from the sandbox it read a canary file in $HOME with both its file
+# tool and a shell `cat`), so a prompt-injected diff could make it print a token from the runner
+# host. Fail closed on any match in agy's output. The log names only the KIND that matched, never
+# the value, since Actions logs of a public repository are public too.
+credential_kind_present() {
+  [ -s "$1" ] || return 1
+  local kind re
+  while IFS='|' read -r kind re; do
+    if grep -qE -- "$re" "$1"; then printf '%s' "$kind"; return 0; fi
+  done <<'CREDS'
+google-oauth-access-token|(^|[^A-Za-z0-9_-])ya29\.[0-9A-Za-z_-]{20,}
+google-oauth-refresh-token|(^|[^A-Za-z0-9_/-])1//0[0-9A-Za-z_-]{20,}
+github-token|(^|[^A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{30,}
+github-fine-grained-pat|(^|[^A-Za-z0-9_])github_pat_[A-Za-z0-9_]{40,}
+private-key-block|-----BEGIN [A-Z ]*PRIVATE KEY-----
+jwt|(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
+aws-access-key-id|(^|[^A-Za-z0-9])(AKIA|ASIA)[0-9A-Z]{16}([^A-Za-z0-9]|$)
+anthropic-key|(^|[^A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{32,}
+openai-key|(^|[^A-Za-z0-9_-])sk-(proj-)?[A-Za-z0-9]{32,}([^A-Za-z0-9_-]|$)
+slack-token|(^|[^A-Za-z0-9_-])xox[abprs]-[A-Za-z0-9-]{10,}
+CREDS
+  return 1
+}
 # <<< SELFTEST-EXTRACT
 
 # --- configuration (all env-overridable from the workflow) ---------------------
 AGY_BIN="${AGY_BIN:-agy}"
 command -v "$AGY_BIN" >/dev/null 2>&1 || AGY_BIN="$HOME/.local/bin/agy"
+# Absolute paths before anything is created or a subshell changes directory: agy runs in a
+# subshell that first changes into the sandbox, so a relative TMPDIR (which every later mktemp honors), a relative
+# RUNNER_TEMP or a relative AGY_BIN would otherwise resolve against the sandbox.
+AGY_BIN="$(command -v "$AGY_BIN" 2>/dev/null || printf '%s' "$AGY_BIN")"
+case "$AGY_BIN" in /*) ;; *) AGY_BIN="$PWD/$AGY_BIN" ;; esac
+for _v in TMPDIR RUNNER_TEMP; do
+  case "${!_v:-}" in
+    ''|/*) ;;
+    *) if _abs="$(cd "${!_v}" 2>/dev/null && pwd -P)"; then export "$_v=$_abs"; else unset "$_v"; fi ;;
+  esac
+done
+unset _v _abs
 AGY_MODEL="${AGY_MODEL:-}"                 # empty = agy's configured default (Gemini 3.x Pro)
 AGY_EFFORT="${AGY_EFFORT:-high}"           # low|medium|high
 # Base timeout for a normal review. Scaled up for a large diff further down -- see
 # `scale_timeout_for_diff`. Set AGY_PRINT_TIMEOUT explicitly to pin it and skip the scaling.
 AGY_PRINT_TIMEOUT_EXPLICIT="${AGY_PRINT_TIMEOUT:+set}"
-AGY_PRINT_TIMEOUT="${AGY_PRINT_TIMEOUT:-5m}"
+# Base 10m (was 5m). Backported from three repositories that each pinned 10-15m after reviews
+# timed out at the old base: Infinity-Context PR #31 saw a 79 KB INLINED diff at high effort time
+# out twice at the scaled 367 s, and GH-ListRollup / RustyNES_MiSTer pinned 10m / 15m for the same
+# reason. The scaling below adds to this base for large diffs; the per-attempt cap still bounds it.
+AGY_PRINT_TIMEOUT="${AGY_PRINT_TIMEOUT:-10m}"
 # Seconds of budget per MiB of diff handed to agy, on top of the base. Reading a 1.6 MB patch and
 # reasoning over it is not work a five-minute budget can absorb, and the failure is indistinguishable
 # from a backend outage: `Error: timeout waiting for response`, three times, with no review.
@@ -223,6 +266,16 @@ agy_validate_error_cap() {
 }
 # <<< SELFTEST-EXTRACT
 agy_validate_error_cap
+# OS-level isolation of agy (bubblewrap). agy's own --sandbox does NOT confine reads, and agy loads
+# the user's whole config (MCP servers, skills, hooks), so a prompt-injected diff could read host
+# files or drive powerful local tools. With `bwrap` (the default) agy runs in a jail with an empty
+# private HOME, read-only /usr and /etc, the review sandbox, and a D-Bus that is an xdg-dbus-proxy
+# exposing only agy's own Secret Service item. `none` runs agy unjailed (not recommended). A host
+# missing bwrap/xdg-dbus-proxy/gdbus fails closed rather than silently running unjailed.
+AGY_ISOLATION="${AGY_ISOLATION:-bwrap}"
+case "$AGY_ISOLATION" in bwrap|none) ;; *) echo "AGY_ISOLATION must be bwrap or none, got '$AGY_ISOLATION'" >&2; exit 1 ;; esac
+# Attributes agy uses to look up its keyring item (observed on the Secret Service bus).
+AGY_KEYRING_ATTRS="${AGY_KEYRING_ATTRS:-username=antigravity service=gemini}"
 AGY_DIFF_MODE="${AGY_DIFF_MODE:-auto}"     # auto|inline|file. A diff is passed to agy either inlined
                                            # in the --print prompt, or written to a FILE agy reads with
                                            # its own tools. `auto` inlines a diff that fits under the
@@ -336,7 +389,7 @@ REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY not set}"
 # _perm_err so cleanup() could never see it (agy review, GH-ListRollup PR #6).
 # Remove every temp file on exit. Pre-declared so the trap is safe under `set -u` even if the
 # script exits before a given file is created.
-diff_file= diff_err= meta_file= prompt_file= out_file= raw= body_file= agy_diff_file= agy_sandbox= jq_err= prior_body_file= archived_file= api_err=
+diff_file= diff_err= meta_file= prompt_file= out_file= raw= body_file= agy_diff_file= agy_sandbox= agy_jail_home= agy_jail_rt= agy_proxy_pid= jq_err= prior_body_file= archived_file= api_err=
 # Also created mid-flight (permission lookup, compare-API merge base, archive trimming); a signal
 # or abort while one of those commands runs would otherwise leak the file in /tmp.
 _perm_err='' compare_err='' trimmed=''
@@ -394,9 +447,13 @@ cleanup() {
   # agy's private working directory (see `agy_sandbox` below). It is this run's own `mktemp -d`,
   # outside the checkout, so removing it whole cannot touch anything else. Kept on dry run (it holds
   # the handed-off diff that dry run exists to expose).
-  if [ -n "${agy_sandbox:-}" ] && [ -z "$keep_set" ] && [ -d "$agy_sandbox" ]; then
-    rm -rf -- "$agy_sandbox"
+  if [ -n "${agy_sandbox:-}" ] && [ -d "$agy_sandbox" ] \
+     && { [ -z "$keep_set" ] || [ -z "${agy_diff_file:-}" ]; }; then
+    rm -rf -- "$agy_sandbox"   # an inline dry run has nothing in it to keep
   fi
+  [ -n "${agy_proxy_pid:-}" ] && kill "$agy_proxy_pid" 2>/dev/null
+  [ -n "${agy_jail_home:-}" ] && [ -d "$agy_jail_home" ] && rm -rf -- "$agy_jail_home"
+  [ -n "${agy_jail_rt:-}" ] && [ -d "$agy_jail_rt" ] && rm -rf -- "$agy_jail_rt"
   if [ -n "${agy_refs_created:-}" ] && [ -n "${PR:-}" ]; then
     # Hooks and fsmonitor disabled: these git calls run after agy, with the job token in the
     # environment, so they must not execute anything a compromised checkout could have planted.
@@ -863,7 +920,11 @@ inline_budget=$(( MAX_PROMPT_BYTES - head_bytes - 512 ))   # margin covers the d
 # the large-diff handoff file is written INTO it, and only it is passed to --add-dir. It lives in
 # RUNNER_TEMP (outside the checkout, wiped between jobs) and the EXIT trap removes it.
 agy_sandbox="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/agy-sandbox.XXXXXX")"
-case "$(cd "$agy_sandbox" && pwd -P)/" in
+# Stored canonical: a relative RUNNER_TEMP/TMPDIR would otherwise put a relative path in the prompt
+# (agy's file tool needs an absolute one) and make `--add-dir` resolve against the sandbox itself
+# after the `cd "$agy_sandbox"` below.
+agy_sandbox="$(cd "$agy_sandbox" && pwd -P)"
+case "$agy_sandbox/" in
   "$(pwd -P)"/*)
     log "agy sandbox ${agy_sandbox} is inside the checkout; refusing to expose the repository to agy"
     exit 1 ;;
@@ -1052,16 +1113,81 @@ flags=( --print-timeout "$AGY_PRINT_TIMEOUT" --sandbox --dangerously-skip-permis
 # exists.) AGY_ENV_PASSTHROUGH may name extra variables, space-separated, for a host that needs one.
 agy_allowlisted_env_args() {
   local name
+  local -a extra=()
+  # `read -a` splits on whitespace without pathname expansion, so a glob character in the
+  # passthrough list can never expand against the checkout.
+  # -d '' reads across newlines too, so a multi-line YAML block (`AGY_ENV_PASSTHROUGH: |`) keeps
+  # every entry; read returns 1 at end of input, which is expected.
+  IFS=$' \t\n' read -r -d '' -a extra <<<"${AGY_ENV_PASSTHROUGH:-}" || true
   printf '%s\0' "-i"
   for name in HOME PATH USER LOGNAME SHELL LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES TERM TMPDIR TZ \
               XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME \
-              DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY XAUTHORITY ${AGY_ENV_PASSTHROUGH:-}; do
-    case "$name" in *[!A-Za-z0-9_]*|'') continue ;; esac   # a name, never an assignment
+              DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY XAUTHORITY "${extra[@]}"; do
+    # A valid identifier only: never an assignment, and never a leading digit (`1` would read the
+    # positional parameter $1, and `1FOO` aborts with "bad substitution").
+    [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     [ -n "${!name+x}" ] && printf '%s\0' "${name}=${!name}"
   done
+  return 0
 }
 agy_env=( env )
 while IFS= read -r -d '' arg; do agy_env+=( "$arg" ); done < <(agy_allowlisted_env_args)
+
+# --- the bubblewrap jail (AGY_ISOLATION=bwrap) --------------------------------------------------
+# Verified 2026-11-22: inside this jail agy authenticates and reviews, sees only an empty HOME, has
+# no MCP servers/skills/hooks, cannot read any host file outside the jail, and over D-Bus can fetch
+# only its own keyring item (another item's GetSecret, the bulk Service.GetSecrets and every other
+# session service are AccessDenied by the proxy).
+agy_jail=()
+if [ "$AGY_ISOLATION" = bwrap ]; then
+  for _t in bwrap xdg-dbus-proxy gdbus; do
+    command -v "$_t" >/dev/null 2>&1 || { log "AGY_ISOLATION=bwrap needs '$_t' on the runner host; refusing to run agy unjailed (set AGY_ISOLATION=none to override, not recommended)"; exit 1; }
+  done
+  [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] \
+    || { log "AGY_ISOLATION=bwrap needs XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS (a user session)"; exit 1; }
+  # agy's own keyring item(s), resolved OUTSIDE the jail: object paths only, never secrets.
+  _dict=""
+  for _kv in $AGY_KEYRING_ATTRS; do
+    [[ "$_kv" =~ ^[A-Za-z0-9_.-]+=[A-Za-z0-9_.:@-]+$ ]] || { log "invalid AGY_KEYRING_ATTRS entry '$_kv'"; exit 1; }
+    _dict="${_dict:+$_dict, }'${_kv%%=*}': '${_kv#*=}'"
+  done
+  mapfile -t _items < <(gdbus call --session --dest org.freedesktop.secrets \
+      --object-path /org/freedesktop/secrets/aliases/default \
+      --method org.freedesktop.Secret.Collection.SearchItems "{${_dict}}" 2>/dev/null \
+    | grep -oE '/org/freedesktop/secrets/collection/[A-Za-z0-9_]+/[A-Za-z0-9_]+')
+  [ "${#_items[@]}" -ge 1 ] || { log "no keyring item matches AGY_KEYRING_ATTRS ($AGY_KEYRING_ATTRS); is agy logged in on this host?"; exit 1; }
+  _rules=(
+    "--call=org.freedesktop.secrets=org.freedesktop.Secret.Service.OpenSession@/org/freedesktop/secrets"
+    "--call=org.freedesktop.secrets=org.freedesktop.Secret.Service.Unlock@/org/freedesktop/secrets"
+    "--call=org.freedesktop.secrets=org.freedesktop.DBus.Properties.Get@/org/freedesktop/secrets"
+    "--call=org.freedesktop.secrets=org.freedesktop.Secret.Collection.SearchItems@/org/freedesktop/secrets/aliases/default"
+    "--call=org.freedesktop.secrets=org.freedesktop.Secret.Session.Close@/org/freedesktop/secrets/session/*"
+  )
+  for _it in "${_items[@]}"; do _rules+=( "--call=org.freedesktop.secrets=org.freedesktop.Secret.Item.GetSecret@${_it}" ); done
+  agy_jail_rt="$(mktemp -d "$XDG_RUNTIME_DIR/agy-jail.XXXXXX")"
+  agy_jail_home="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/agy-home.XXXXXX")"
+  agy_jail_home="$(cd "$agy_jail_home" && pwd -P)"
+  xdg-dbus-proxy "$DBUS_SESSION_BUS_ADDRESS" "$agy_jail_rt/bus" --filter "${_rules[@]}" &
+  agy_proxy_pid=$!
+  for _ in $(seq 1 100); do [ -S "$agy_jail_rt/bus" ] && break; sleep 0.1; done
+  [ -S "$agy_jail_rt/bus" ] || { log "xdg-dbus-proxy did not start; refusing to run agy unjailed"; exit 1; }
+  _uid="$(id -u)"
+  agy_jail=( bwrap --unshare-all --share-net --die-with-parent --new-session
+    --ro-bind /usr /usr
+    --symlink usr/lib /lib --symlink usr/lib /lib64 --symlink usr/bin /bin --symlink usr/bin /sbin
+    --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp
+    --ro-bind-try /run/systemd/resolve /run/systemd/resolve
+    --tmpfs /home --bind "$agy_jail_home" "$HOME"
+    --ro-bind "$(readlink -f "$AGY_BIN")" "$AGY_BIN"
+    --ro-bind "$(cd "$(dirname "$0")" && pwd)/_agy_print.sh" "$(cd "$(dirname "$0")" && pwd)/_agy_print.sh"
+    --ro-bind "$prompt_file" "$prompt_file"
+    --bind "$agy_sandbox" "$agy_sandbox" --chdir "$agy_sandbox"
+    --dir "/run/user/$_uid" --ro-bind "$agy_jail_rt/bus" "/run/user/$_uid/bus" )
+  # Inside the jail, D-Bus is the filtered proxy (later env assignments override earlier ones).
+  agy_env+=( "XDG_RUNTIME_DIR=/run/user/$_uid" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$_uid/bus" )
+  log "agy isolation: bwrap jail, empty HOME, D-Bus limited to ${#_items[@]} keyring item(s)"
+  unset _t _dict _kv _items _rules _it _uid
+fi
 [ -n "$AGY_MODEL" ]  && flags+=( --model "$AGY_MODEL" )
 [ -n "$AGY_EFFORT" ] && flags+=( --effort "$AGY_EFFORT" )
 
@@ -1106,9 +1232,10 @@ for (( attempt=1; attempt<=AGY_RETRIES; attempt++ )); do
   if command -v unbuffer >/dev/null 2>&1; then
     log "running agy via unbuffer (allocates a PTY) [attempt ${attempt}/${AGY_RETRIES}]"
     # From the sandbox directory, so agy's workspace root is never the checkout.
-    # unbuffer (a Tcl/Expect script) keeps the job environment it needs to start; it then runs
-    # `env -i ... agy`, so only agy itself gets the allowlisted environment.
-    ( cd "$agy_sandbox" && unbuffer "${agy_env[@]}" "$AGY_BIN" "${flags[@]}" --print "$(cat "$prompt_file")" ) > "$out_file" 2>>"$LOG" || true
+    # `env -i ...` starts unbuffer itself inside the allowlisted environment (verified to work in
+    # the runner's environment). Putting it the other way round made every NAME=VALUE an argv
+    # entry of the long-lived unbuffer process, world-readable in /proc/<pid>/cmdline.
+    ( cd "$agy_sandbox" && "${agy_env[@]}" unbuffer "${agy_jail[@]}" "$AGY_BIN" "${flags[@]}" --print "$(cat "$prompt_file")" ) > "$out_file" 2>>"$LOG" || true
   else
     log "unbuffer not found; falling back to script(1) [attempt ${attempt}/${AGY_RETRIES}]"
     raw="$(mktemp)"
@@ -1119,7 +1246,7 @@ for (( attempt=1; attempt<=AGY_RETRIES; attempt++ )); do
     # by `sh -c` (command injection); `%q` quotes each token exactly.
     # script(1) is a plain binary, so it (and the _agy_print.sh it runs) can start inside the
     # allowlisted environment; agy inherits it from there.
-    cmd="$(printf '%q ' "$here/_agy_print.sh" "$prompt_file" "${flags[@]}")"
+    cmd="$(printf '%q ' "${agy_jail[@]}" "$here/_agy_print.sh" "$prompt_file" "${flags[@]}")"
     ( cd "$agy_sandbox" && "${agy_env[@]}" AGY_BIN="$AGY_BIN" script -qfec "$cmd" "$raw" ) >/dev/null 2>>"$LOG" || true
     # Strip script(1)'s own start/done records so they cannot pass as agy output (see
     # agy_strip_script_records).
@@ -1244,6 +1371,12 @@ body_file="$(mktemp)"
   printf '%s' "$truncated"
   printf '\n\n<sub>Automated first-pass review by `agy` on a self-hosted runner -- not a human review.</sub>\n'
 } > "$body_file"
+# Fail closed before ANY post path (edit-in-place or new comment) if agy's output carries a
+# credential shape; see credential_kind_present.
+if cred_kind="$(credential_kind_present "$out_file")"; then
+  log "refusing to post: agy's output contains a credential-shaped string (${cred_kind}). Nothing was posted. Inspect the runner host; the diff may carry a prompt injection."
+  exit 1
+fi
 
 # Final hard guard — the last line of defense, and UNCONDITIONAL, run BEFORE anything is
 # deleted or posted. Layer 1 (the retry loop) already rejects a lapsed-session capture, but

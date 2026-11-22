@@ -710,13 +710,19 @@ case "$lv" in
 esac
 # And it must be able to fail: the old 300 s wait against the same workflow is short.
 real_wf="$wf"
-sed 's/^\([[:space:]]*AGY_LOCK_WAIT:[[:space:]]*\)"[0-9]*"/\1"300"/' "$real_wf" > "$TMPD/lock300.yml"
+sed 's/^\([[:space:]]*AGY_LOCK_WAIT:[[:space:]]*\)"\{0,1\}[0-9]*"\{0,1\}/\1"300"/' "$real_wf" > "$TMPD/lock300.yml"
 wf="$TMPD/lock300.yml"
 check "a 300 s AGY_LOCK_WAIT is reported shorter than one review's hold" "short" "$(lock_verdict | cut -d' ' -f1)"
 wf="$real_wf"
 # The pin must count: the same workflow with a 50-minute pin has to be reported as exceeding.
 real_wf="$wf"
-sed 's/^\([[:space:]]*\)AGY_EFFORT:.*/&\n\1AGY_PRINT_TIMEOUT: 50m/' "$real_wf" > "$TMPD/pinned.yml"
+# Drop any pin the real workflow already carries first, so the synthetic file has exactly one
+# AGY_PRINT_TIMEOUT key whatever this repository pins (a duplicate key only "worked" because the
+# reader stops at the first match).
+sed -e '/^[[:space:]]*AGY_PRINT_TIMEOUT:/d' \
+    -e 's/^\([[:space:]]*\)AGY_EFFORT:.*/&\n\1AGY_PRINT_TIMEOUT: 50m/' "$real_wf" > "$TMPD/pinned.yml"
+check "the synthetic pinned workflow has exactly one AGY_PRINT_TIMEOUT key" "1" \
+  "$(grep -c '^[[:space:]]*AGY_PRINT_TIMEOUT:' "$TMPD/pinned.yml")"
 wf="$TMPD/pinned.yml"
 check "a pinned AGY_PRINT_TIMEOUT counts in the timeout budget" "exceeds" "$(budget_verdict | cut -d' ' -f1)"
 wf="$real_wf"
@@ -756,19 +762,65 @@ check "agy is never given the checkout via --add-dir" "0" \
   "$(grep -cE -- '--add-dir[[:space:]]+"?\$(PWD|\{PWD\})' "$SCRIPT_DIR/agy-review.sh")"
 check "agy runs from its private sandbox directory (both PTY paths)" "2" \
   "$(grep -cE '\( cd "\$agy_sandbox" && ' "$SCRIPT_DIR/agy-review.sh")"
-check "both PTY paths pass agy the allowlisted environment" "2" \
-  "$(grep -cE '\( cd "\$agy_sandbox" && (unbuffer )?"\$\{agy_env\[@\]\}"' "$SCRIPT_DIR/agy-review.sh")"
+check "both PTY paths start inside the allowlisted environment (env -i before unbuffer/script)" "2" \
+  "$(grep -cE '\( cd "\$agy_sandbox" && "\$\{agy_env\[@\]\}" (unbuffer|AGY_BIN=)' "$SCRIPT_DIR/agy-review.sh")"
+# bubblewrap isolation (AGY_ISOLATION=bwrap): agy's --sandbox does not confine reads and agy loads
+# the user's MCP servers/skills/hooks, so the jail is the real boundary. Statically pin its shape.
+SCRIPT="$SCRIPT_DIR/agy-review.sh"
+check "isolation defaults to bwrap" "1" \
+  "$(grep -c '^AGY_ISOLATION="\${AGY_ISOLATION:-bwrap}"' "$SCRIPT")"
+check "both PTY paths launch agy through the jail" "2" \
+  "$(grep -cE 'unbuffer "\$\{agy_jail\[@\]\}" "\$AGY_BIN"|printf .%q . "\$\{agy_jail\[@\]\}" "\$here/_agy_print.sh"' "$SCRIPT")"
+check "the jail gives agy an empty private HOME (tmpfs /home + private bind)" "1" \
+  "$(grep -c -- '--tmpfs /home --bind "\$agy_jail_home" "\$HOME"' "$SCRIPT")"
+check "Item.GetSecret is granted only on the resolved keyring item(s)" "1" \
+  "$(grep -c 'Secret.Item.GetSecret@' "$SCRIPT")"
+check "the GetSecret grant uses the resolved item variable, never a wildcard" "1" \
+  "$(grep -c 'Secret.Item.GetSecret@\${_it}' "$SCRIPT")"
+check "the bulk Service.GetSecrets call is never granted" "0" \
+  "$(grep -c 'Secret.Service.GetSecrets' "$SCRIPT")"
+check "a missing bwrap/xdg-dbus-proxy/gdbus fails closed" "1" \
+  "$(grep -c "refusing to run agy unjailed (set AGY_ISOLATION=none" "$SCRIPT")"
+check "the proxy runs with --filter (deny by default)" "1" \
+  "$(grep -c 'xdg-dbus-proxy "\$DBUS_SESSION_BUS_ADDRESS" "\$agy_jail_rt/bus" --filter' "$SCRIPT")"
+# Credential scan: every shape is caught, ordinary review text is not.
+cred_tmp="$TMPD/cred.txt"
+# Samples are assembled at runtime from split pieces, so this file never contains a literal that a
+# repository secret scanner (gitleaks) would flag.
+s_jwt="eyJ""hbGciOiJIUzI1NiJ9.""eyJ""zdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop"
+s_aws="AKI""AABCDEFGHIJKLMNOP"
+s_key="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+for sample in "token ya2""9.$(printf 'a%.0s' {1..30})" "refresh 1/""/0$(printf 'b%.0s' {1..30})" \
+              "gh""p_$(printf 'c%.0s' {1..36})" "github""_pat_$(printf 'd%.0s' {1..50})" \
+              "$s_key" "$s_jwt" "key $s_aws." "sk-a""nt-$(printf 'e%.0s' {1..40})" \
+              "sk-pro""j-$(printf 'f%.0s' {1..40})" "xox""b-1234567890-abcdef"; do
+  printf '## Review\n\nfound %s here\n' "$sample" > "$cred_tmp"
+  check "credential scan catches: ${sample:0:14}..." "yes" \
+    "$(credential_kind_present "$cred_tmp" >/dev/null && echo yes || echo no)"
+done
+# No false positives on ordinary identifiers that merely CONTAIN a token prefix.
+for benign in "task-$(printf 'g%.0s' {1..40})" "disk-$(printf 'h%.0s' {1..40})" \
+              "risk-assessment-of-the-new-staging-pipeline-in-detail" \
+              "xghp_$(printf 'i%.0s' {1..36})" "myxoxb-thing" "BAKIA$(printf 'J%.0s' {1..16})Z"; do
+  printf '## Review\n\nsee %s for details\n' "$benign" > "$cred_tmp"
+  check "credential scan ignores: ${benign:0:14}..." "no" \
+    "$(credential_kind_present "$cred_tmp" >/dev/null && echo yes || echo no)"
+done
+printf '## Review\n\nNo blocking issues. GH_TOKEN is stripped; see ya29 docs and the BEGIN marker.\n' > "$cred_tmp"
+check "credential scan passes ordinary review text" "no" \
+  "$(credential_kind_present "$cred_tmp" >/dev/null && echo yes || echo no)"
 check "post-agy git calls disable hooks and fsmonitor" "2" \
   "$(grep -cE 'git -c core\.hooksPath=/dev/null -c core\.fsmonitor=false update-ref' "$SCRIPT_DIR/agy-review.sh")"
 
 # The allowlisted environment: run the real function against a fake job environment. Anything not
 # on the allowlist is dropped, including credentials under ordinary-looking names.
 env_fn="$(sed -n '/^agy_allowlisted_env_args() {/,/^}/p' "$SCRIPT_DIR/agy-review.sh")"
+check "the allowlist function was found in agy-review.sh" "yes" "$([ -n "$env_fn" ] && echo yes || echo no)"
 env_out="$(
   export GH_TOKEN=x GITHUB_TOKEN=x ACTIONS_RUNTIME_TOKEN=x ACTIONS_ID_TOKEN_REQUEST_TOKEN=x \
          RUNNER_TEMP=/t NPM_TOKEN=x DATABASE_URL='postgres://u:pw@h/db' SOME_SETTING=x \
          HOME=/home/u PATH=/usr/bin DBUS_SESSION_BUS_ADDRESS=unix:path=/b XDG_RUNTIME_DIR=/run/u \
-         EXTRA_OK=1 AGY_ENV_PASSTHROUGH='EXTRA_OK BAD=NAME'
+         EXTRA_OK=1 AGY_ENV_PASSTHROUGH='BAD=NAME 1 1FOO * ../x EXTRA_OK'
   eval "$env_fn"
   args=( env )
   while IFS= read -r -d '' a; do args+=( "$a" ); done < <(agy_allowlisted_env_args)
@@ -776,6 +828,9 @@ env_out="$(
 )"
 check "agy's environment drops everything off the allowlist (tokens, ordinary-named secrets)" "0" \
   "$(grep -cE '^(GH_TOKEN|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN|RUNNER_TEMP|NPM_TOKEN|DATABASE_URL|SOME_SETTING|AGY_ENV_PASSTHROUGH|BAD)=' <<<"$env_out" || true)"
+# Invalid passthrough entries (an assignment, a bare digit that would read $1, `1FOO` that used
+# to abort with "bad substitution", a glob, a path) are skipped without aborting, so EXTRA_OK,
+# listed last, must still arrive.
 check "agy's environment keeps the session variables it needs, plus AGY_ENV_PASSTHROUGH names" "5" \
   "$(grep -cE '^(HOME|PATH|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|EXTRA_OK)=' <<<"$env_out" || true)"
 

@@ -78,8 +78,9 @@ agy -p "reply with the single word: ok"     # should print: ok
 
 # Tools the reviewer uses (all already present here):
 #   gh jq sqlite3 col script  + unbuffer (from `expect`)
+#   bwrap xdg-dbus-proxy gdbus   (the agy jail; AGY_ISOLATION=bwrap, the default)
 #   iconv (glibc) for UTF-8 scrubbing; python3 is an optional fallback used only without iconv
-pacman -Q github-cli jq sqlite expect util-linux >/dev/null   # verify; install any missing with paru/pacman
+pacman -Q github-cli jq sqlite expect util-linux bubblewrap xdg-dbus-proxy glib2 >/dev/null   # verify; install any missing with paru/pacman
 ```
 
 `unbuffer` is preferred. Without it, the reviewer falls back to `script(1)` and strips the
@@ -240,13 +241,29 @@ yours to accept:
   `scripts/agy-review.sh`, which asks the permissions API for the commenter and
   fails closed; the script also re-checks that the PR is not from a fork, because
   the `issue_comment` payload has no head-repo field for the `if:` to gate on.
-- **First-install bootstrap:** on a repository whose default branch has no
-  reviewer yet, the workflow runs the PR head's scripts once, only for a same-repo
-  branch whose author has write access *at run time*. Remove the bootstrap steps
-  once the reviewer is on the default branch (they also trip CodeQL's
-  `actions/untrusted-checkout`).
+- **First-install bootstrap:** as shipped, on a repository whose default branch has
+  no reviewer yet, the workflow runs the PR head's scripts once, only for a
+  same-repo branch whose author has write access *at run time*. Remove the
+  bootstrap steps once the reviewer is on the default branch (they also trip
+  CodeQL's `actions/untrusted-checkout`); most repositories carrying this reviewer
+  have done so. Without them, a PR opened while the default branch has no
+  reviewer gets a `::warning::` and a skipped review step (the "Check the
+  reviewer is present" step), not a red check.
 - **Least surface in the job:** review-only prompt, `--sandbox`, no repo secrets
   (built-in `GITHUB_TOKEN` only), temp files cleaned via an `EXIT` trap.
+- **agy runs in a bubblewrap jail (`AGY_ISOLATION=bwrap`, the default):** agy's
+  own `--sandbox` does **not** confine reads (verified: it read a canary file in
+  `$HOME`), and agy loads the user's whole configuration, including MCP servers
+  (REA, Blender, ...), skills and hooks. So the script starts it in a `bwrap` jail
+  with an empty private `HOME`, read-only `/usr` and `/etc`, the review sandbox,
+  and no other part of the host filesystem. Its D-Bus is an `xdg-dbus-proxy` with
+  `--filter` that allows only the Secret Service calls agy makes, and `GetSecret`
+  only on agy's own keyring item. The script resolves that item outside the jail
+  from `AGY_KEYRING_ATTRS`. Verified: inside the jail agy logs in and reviews, has
+  no MCP tools, cannot read `~/.config/gh` or any repository, and fetching another
+  keyring item (the `gh` token), the bulk `GetSecrets` call or any other session
+  service is `AccessDenied`. A host without `bwrap`, `xdg-dbus-proxy` or `gdbus`
+  fails closed. `AGY_ISOLATION=none` opts out, which is not recommended.
 - **agy never sees the checkout:** agy runs with `--dangerously-skip-permissions`
   and reads an untrusted diff, so a prompt injection could try to write files.
   It is started from a private, empty `mktemp -d` sandbox under `$RUNNER_TEMP`
@@ -282,7 +299,7 @@ runner, so disable fork workflows there or gate them the same way.
 |----------|---------|---------|
 | `AGY_MODEL` | *(agy default)* | e.g. `gemini-3-pro`; run `agy models` to see IDs |
 | `AGY_EFFORT` | `high` | reasoning effort: `low` / `medium` / `high` |
-| `AGY_PRINT_TIMEOUT` | `5m` | base wait for a single `agy --print`; raised for a large diff (next row). Setting it pins it and turns the raise off |
+| `AGY_PRINT_TIMEOUT` | `10m` | base wait for a single `agy --print`; raised for a large diff (next row). Setting it pins it and turns the raise off. Was `5m`: mid-size inlined diffs at `high` effort timed out at that base |
 | `AGY_TIMEOUT_SECONDS_PER_MIB` | `900` | extra seconds per MiB of diff. A diff handed over as a file costs agy 6-8 minutes almost whatever its size, so this is deliberately steep (240 left a 426 KB diff at 397 s, too little) |
 | `AGY_PRINT_TIMEOUT_MAX_SECONDS` | `1800` (workflow: `900`) | ceiling on one attempt after the raise |
 | `AGY_RETRIES` | `3` (workflow: `2`) | attempts; a retry is for a transient backend error, so more of them at the same budget only repeat a timeout |
@@ -291,6 +308,8 @@ runner, so disable fork workflows there or gate them the same way.
 | `MAX_DIFF_BYTES` | `5000000` | sanity cap on a pathological diff (5 MB). Not the arg-size limit — a large diff goes to agy as a file, not an argv value |
 | `MAX_PROMPT_BYTES` | `120000` | the inline/file threshold in `auto` mode, and a hard backstop on the **inlined** prompt. agy takes an inlined prompt as a `--print` argv value, and a single `execve` argument cannot exceed `MAX_ARG_STRLEN` (128 KiB); over it `execve` fails with E2BIG before agy starts. Clamped below 128 KiB |
 | `STYLE_GUIDE` | `.github/agy-review.md` | repo-relative style guide, loaded if present |
+| `AGY_ISOLATION` | `bwrap` | `bwrap` runs agy in the jail described under the security model; `none` runs it unjailed (not recommended) |
+| `AGY_KEYRING_ATTRS` | `username=antigravity service=gemini` | Secret Service attributes of agy's own login item; the jail's D-Bus proxy allows `GetSecret` on the matching item(s) only |
 | `AGY_ENV_PASSTHROUGH` | *(empty)* | extra environment variable NAMES (space-separated) to pass to agy on top of the session allowlist; everything else is withheld |
 
 ---
