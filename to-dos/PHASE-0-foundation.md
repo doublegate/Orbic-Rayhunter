@@ -82,7 +82,7 @@ Verification:
 git log --oneline -1
 gh run list --branch main --limit 5
 gh run view <run-id> --log | less          # read each job
-gh api repos/doublegate/Orbic-Rayhunter/branches/main/protection
+gh api repos/doublegate/Orbic-Rayhunter/rules/branches/main   # rules from the `main` ruleset (docs/CI.md)
 git tag -l v0.1.0 && gh release view v0.1.0
 rel="$(mktemp -d)" && gh release download v0.1.0 -D "$rel" && (cd "$rel" && sha256sum -c SHA256SUMS)
 ```

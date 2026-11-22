@@ -17,7 +17,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: security-${{ github.ref }}
+  # PR runs share a per-ref group so a newer push supersedes a stale run. Every
+  # other run gets its own group: GitHub replaces a *pending* run in a shared
+  # group even with cancel-in-progress false, and the next push's change
+  # detection only diffs against its own parent, so a replaced run's changes
+  # would never be validated.
+  group: security-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

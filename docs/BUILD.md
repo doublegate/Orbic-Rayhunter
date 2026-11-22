@@ -9,6 +9,8 @@
   musl.cc) or the `messense/rust-musl-cross:armv7-musleabihf` container, because the `pq-tls`
   backend compiles C. The `devel` profile needs only rustup.
 
+Staging needs `rsync` (content-compared sync into `build/rayhunter`).
+
 ## Host tool
 
 ```sh

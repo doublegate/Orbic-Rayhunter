@@ -12,6 +12,11 @@ on:
 permissions:
   contents: write
 
+# Must match ci.yml: rust-cache hashes CARGO_* variables into its cache key.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -34,11 +39,18 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
       # Restore-only: release builds reuse main's caches but never write them.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Each restore mirrors its ci.yml producer exactly (shared-key, workspace,
+      # key, and the workflow-level CARGO_* env), or the cache keys never match.
+      - name: Restore host-crates cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: |
-            . -> target
-            build/rayhunter -> target
+          shared-key: host
+          save-if: false
+      - name: Restore patched-upstream cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: patched
+          workspaces: build/rayhunter -> target
           key: patches-${{ hashFiles('patches/**') }}
           save-if: false
       - name: Build orx (host, x86_64 linux)

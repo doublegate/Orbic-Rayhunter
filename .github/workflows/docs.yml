@@ -16,7 +16,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: docs-${{ github.ref }}
+  # PR runs share a per-ref group so a newer push supersedes a stale run. Every
+  # other run gets its own group: GitHub replaces a *pending* run in a shared
+  # group even with cancel-in-progress false, and the next push's change
+  # detection only diffs against its own parent, so a replaced run's changes
+  # would never be validated.
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -32,6 +37,7 @@ jobs:
       pull-requests: read
     outputs:
       md: ${{ steps.f.outputs.md }}
+      links: ${{ steps.f.outputs.links }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,6 +55,14 @@ jobs:
               - '.markdownlint-cli2.yaml'
               - 'lychee.toml'
               - '.github/workflows/docs.yml'
+            # Local link targets are not only Markdown (LICENSE, images, configs). A
+            # link can only break when its source changes or its target goes away, so
+            # also run on any deletion or rename anywhere in the tree.
+            links:
+              - '**/*.md'
+              - 'lychee.toml'
+              - '.github/workflows/docs.yml'
+              - deleted|renamed: '**'
 
   markdownlint:
     needs: changes
@@ -71,7 +85,7 @@ jobs:
 
   links:
     needs: changes
-    if: needs.changes.outputs.md == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
+    if: needs.changes.outputs.links == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
