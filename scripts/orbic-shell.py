@@ -49,9 +49,11 @@ from pathlib import Path
 # Deliberately EXCLUDED, though they can read: `awk`/`nawk`/`gawk` (`system()`,
 # `"cmd" | getline`), `command`/`env` (run any program), `find` (`-exec`/`-delete`),
 # `sed` (`-i`, `w` writes), `dd`/`nanddump` (write with `of=`/`-f`), `mount`, `xxd`
-# (`xxd a b` writes `b`), and the setters `sort` (`-o`), `date` (`-s`/operand),
-# `hostname <name>`. The recon inventory needs none of them; arbitrary-execution
-# or setter tools have no place
+# (`xxd a b` writes `b`), `uniq` (`uniq in out` writes `out`), `file` (`file -C`
+# compiles a magic cache), and the setters `sort` (`-o`), `date` (`-s`/operand),
+# `hostname <name>`. Every remaining reader writes only to stdout and takes input
+# operands only. The recon inventory needs none of the removed ones; arbitrary-
+# execution, output-operand or setter tools have no place
 # in a read-only gate guarding an unauthenticated root shell before a backup.
 READ_COMMANDS = {
     "cat",
@@ -87,7 +89,6 @@ READ_COMMANDS = {
     "stat",
     "readlink",
     "realpath",
-    "file",
     "od",
     "hexdump",
     "strings",
@@ -101,7 +102,6 @@ READ_COMMANDS = {
     "basename",
     "dirname",
     "cut",
-    "uniq",
     "tr",
     "du",
     "pwd",
@@ -344,6 +344,9 @@ def selftest() -> int:
         "date 010100002020",  # busybox date sets the clock from a bare operand
         "hostname newname",
         "xxd /proc/mtd /etc/passwd",  # xxd writes its second operand
+        "uniq /proc/mtd /etc/passwd",  # uniq writes its second (output) operand
+        "busybox uniq a b",
+        "file -C -m /proc/mtd",  # file -C compiles a writable magic cache
         "env rm -rf /",
         "/usr/bin/env rm -rf /",
         # shell grouping/definition/substitution syntax riding on an allowed program
