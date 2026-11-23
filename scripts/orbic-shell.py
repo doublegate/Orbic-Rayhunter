@@ -42,15 +42,21 @@ from pathlib import Path
 # must be a known pure reader, or the whole command is refused. A denylist of
 # writers would fail open -- an unlisted writer (`ubidetach`, `fw_setenv`,
 # `insmod`, a device-specific tool) would slip through. Classification is by the
-# FIRST word of each simple command, so a reader name that appears only as an
-# argument (`grep nandwrite`, `cat /etc/passwd`) is judged on the real program.
+# FIRST word of each simple command (tokenised with shlex, so quoting cannot
+# disguise a program name), so a reader name that appears only as an argument
+# (`grep nandwrite`, `cat /etc/passwd`) is judged on the real program.
+#
+# Deliberately EXCLUDED, though they can read: `awk`/`nawk`/`gawk` (`system()`,
+# `"cmd" | getline`), `command` (runs any program), `find` (`-exec`/`-delete`),
+# `sed` (`-i`, `w` writes), `dd`/`nanddump` (write with `of=`/`-f`), and `mount`.
+# The recon inventory needs none of them; arbitrary-execution tools have no place
+# in a read-only gate guarding an unauthenticated root shell before a backup.
 READ_COMMANDS = {
     "cat",
     "ls",
     "ps",
     "df",
     "free",
-    "mount",
     "mountpoint",
     "uname",
     "hostname",
@@ -59,10 +65,6 @@ READ_COMMANDS = {
     "grep",
     "egrep",
     "fgrep",
-    "awk",
-    "nawk",
-    "gawk",
-    "sed",
     "wc",
     "md5sum",
     "sha1sum",
@@ -70,8 +72,6 @@ READ_COMMANDS = {
     "cksum",
     "cmp",
     "diff",
-    "nanddump",
-    "dd",
     "ubinfo",
     "dmesg",
     "netstat",
@@ -83,8 +83,6 @@ READ_COMMANDS = {
     "groups",
     "which",
     "type",
-    "command",
-    "find",
     "stat",
     "readlink",
     "realpath",
@@ -116,82 +114,108 @@ READ_COMMANDS = {
     "expr",
     "seq",
 }
-# Dual-use readers that become writers in a specific FORM; refused when they do.
-WRITER_SUBFORMS = re.compile(
-    r"\bsed\b[^|;&]*\s-i|"  # sed -i (in-place)
-    r"\bdd\b[^|;&]*\bof=|"  # dd of=<file>
-    r"\bfind\b[^|;&]*\s-(delete|exec|execdir|fprint|fls|fprintf)\b|"  # find writers
-    r"\bdmesg\b[^|;&]*\s-(c|C|-clear|-read-clear)\b|"  # dmesg clears the ring buffer
-    r"\bsort\b[^|;&]*\s-o\b|"  # sort -o <file>
-    r"\bmount\b[^|;&]*\b(remount|[\s,]rw\b)|\bmount\b\s+(-o\s+)?\brw\b|"  # remount rw
-    r"\bbusybox\s+(nc|nandwrite|flash_erase\w*|ubi\w+|rm|rmdir|mv|cp|ln|touch|"
-    r"mknod|chmod|chown|chgrp|mkfs\w*|dd|tee|reboot|halt|poweroff|kill\w*|"
-    r"setprop|passwd|truncate|install|insmod|rmmod|fw_setenv)\b"
-)
-# Command substitution and escapes: `$(...)`, backticks, and a backslash. The
-# allowlist checks only each command's PROGRAM word, so an allowed reader with a
-# substituted argument -- `cat $(reboot)`, `ls \`nandwrite ...\`` -- would run
-# arbitrary code. Those (and backslash escapes that can confuse parsing) are
-# refused outright; recon never needs them.
+# Command substitution and escapes: `$(...)`, backticks, and a backslash. Even
+# with an allowlisted program, a substituted argument -- `cat $(reboot)`,
+# `ls \`nandwrite ...\`` -- runs arbitrary code; a backslash can also confuse the
+# lexer. Refused outright; recon never needs them.
 _INJECTION = re.compile(r"\$\(|`|\\")
-# A redirect operator (optionally fd-prefixed `1>`/`2>>`, or bash `&>`) and its
-# target, scanned on the RAW command and failing closed: a `>` inside quotes is
-# treated as a redirect and refused rather than reasoning about quoting (a
-# quote-stripping regex can mismatch). Recon uses no quoted `>`.
-_REDIRECT = re.compile(r"(?:\d*|&)>>?\s*(\S*)")
+# Programs that READ but take a setter/writer FORM via a specific flag; refused in
+# that form. Checked against shlex TOKENS (not the raw string), so quoting --
+# `dmesg '-c'`, `sort '-o' f` -- cannot hide the flag.
+_FORBIDDEN_FLAGS = {
+    "dmesg": {"-c", "-C", "--clear", "--read-clear"},  # clears the ring buffer
+    "sort": {"-o", "--output"},  # writes its output to a file
+    "date": {"-s", "--set", "--set-time"},  # sets the clock
+}
+# Read only with no positional operand; any bare operand makes them set state
+# (`hostname newname`), so a non-flag operand is refused.
+_NO_OPERAND = {"hostname"}
 
-
-def _has_file_redirect(command: str) -> bool:
-    """True if the command redirects anywhere other than /dev/null or an fd dup
-    (`2>&1`). Catches fd-prefixed writes (`echo x 1>/etc/passwd`), bash `&>`, and
-    a dangling `>` with no target."""
-    for m in _REDIRECT.finditer(command):
-        target = m.group(1)
-        if re.fullmatch(r"&\d+", target) or target == "/dev/null":
-            continue  # fd dup (2>&1) or the bit bucket
-        return True
-    return False
-
-
+# Tokens shlex (punctuation_chars=True) emits for shell operators.
+_CMD_SEP = {"|", "||", "&&", ";", "&", "|&", ";;"}
+_OUT_FILE = {">", ">>", ">|", "&>", "&>>"}  # target must be /dev/null
+_DUP = {">&", "<&"}  # target: a bare fd (2>&1) or /dev/null
+_IN = {"<", "<<", "<<<"}  # input redirect: reading, target not a write
 _ASSIGN_OR_WRAP = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*=|exec$|env$|nice$|time$)")
+_FD = re.compile(r"\d+")
 
 
-def _first_words(command: str) -> list[str]:
-    """The leading program of each simple command. Tokenised with shlex so that a
-    pipe/semicolon INSIDE quotes (`grep 'a|b'`) is an argument, not an operator;
-    a lexing error (unbalanced quotes, exotic syntax) fails closed as []."""
+def _split_simple(tokens: list[str]) -> list[list[str]] | None:
+    """Split the token stream into simple commands at operator tokens, validating
+    redirects: an output redirect to anything but /dev/null (or an fd dup like
+    2>&1) makes the command a writer. Returns None (fail closed) on any such write
+    or a malformed redirect."""
+    simples: list[list[str]] = []
+    cur: list[str] = []
+    i, n = 0, len(tokens)
+    while i < n:
+        t = tokens[i]
+        if t in _CMD_SEP:
+            if cur:
+                simples.append(cur)
+                cur = []
+            i += 1
+        elif t in _OUT_FILE:
+            if (tokens[i + 1] if i + 1 < n else "") != "/dev/null":
+                return None
+            i += 2
+        elif t in _DUP:
+            tgt = tokens[i + 1] if i + 1 < n else ""
+            if not _FD.fullmatch(tgt) and tgt != "/dev/null":
+                return None  # `>&/dev/mtd0` redirects to a file, not an fd dup
+            i += 2
+        elif t == "<>":
+            return None  # read-write
+        elif t in _IN:
+            i += 2  # input redirect; reading is fine
+        else:
+            cur.append(t)
+            i += 1
+    if cur:
+        simples.append(cur)
+    return simples
+
+
+def _simple_ok(tokens: list[str]) -> bool:
+    """One simple command is read-only: its program is an allowed reader and it is
+    not in a setter/writer form."""
+    idx = 0
+    while idx < len(tokens) - 1 and _ASSIGN_OR_WRAP.match(tokens[idx]):
+        idx += 1  # skip VAR=val and exec/env/nice/time wrappers (never the last)
+    if idx >= len(tokens):
+        return False
+    prog = tokens[idx].rsplit("/", 1)[-1]
+    args = tokens[idx + 1 :]
+    if prog not in READ_COMMANDS:
+        return False
+    if prog == "busybox":
+        # only `--list`/`--help`, or an applet that is itself an allowed reader
+        applet = next((a for a in args if not a.startswith("-")), None)
+        if applet is not None and applet not in READ_COMMANDS:
+            return False
+    forbidden = _FORBIDDEN_FLAGS.get(prog)
+    if forbidden and any(a in forbidden for a in args):
+        return False
+    return not (prog in _NO_OPERAND and any(not a.startswith("-") for a in args))
+
+
+def is_read_only(command: str) -> bool:
+    """True only when every simple command is a known reader in a read form.
+    Fails closed: a control char (newline injection), command substitution, an
+    unknown or arbitrary-execution program, a writer flag, or an output
+    redirection to a file all return False."""
+    if any(c in command for c in ("\n", "\r", "\x00")) or _INJECTION.search(command):
+        return False
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)
     except ValueError:
-        return []
-    words: list[str] = []
-    expect_command = True
-    for tok in tokens:
-        if tok in ("|", "||", "&&", ";", "&", "|&", ";;", "\n"):
-            expect_command = True
-            continue
-        if not expect_command:
-            continue
-        # skip leading wrappers and VAR=val assignments, then take the program
-        if _ASSIGN_OR_WRAP.match(tok):
-            continue
-        words.append(tok.rsplit("/", 1)[-1])
-        expect_command = False
-    return words
-
-
-def is_read_only(command: str) -> bool:
-    """True only when every simple command is a known reader in a read form.
-    Fails closed: an unknown program, an unparseable fragment, a writer subform,
-    or a redirection to a file all return False."""
-    if _INJECTION.search(command):
+        return False  # unbalanced quotes / exotic syntax -> fail closed
+    simples = _split_simple(tokens)
+    if not simples:
         return False
-    if _has_file_redirect(command) or WRITER_SUBFORMS.search(command):
-        return False
-    words = _first_words(command)
-    return bool(words) and all(w in READ_COMMANDS for w in words)
+    return all(_simple_ok(toks) for toks in simples)
 
 
 def run_one(
@@ -247,10 +271,21 @@ def selftest() -> int:
         "df -h",
         "uname -a",
         "ubinfo -a",
+        "cat /dev/mtd0 2>/dev/null",  # stderr to the bit bucket is fine
+        "ps w 2>&1 | grep x",  # fd dup is fine
+        "busybox --list",
+        "busybox | head -1",
+        "busybox cat /proc/mtd",  # applet is itself an allowed reader
+        "dmesg | grep -i -E 'nand|ubi|mtd'",
+        "ps w | grep -iE 'fota|update|ota'",
+        "sha256sum /etc/init.d/misc-daemon",
+        "netstat -tlnp",
+        "date +%s",  # date without a setter flag
+        "ls -la /dev/*diag* 2>/dev/null",
+        "grep -c '2>/etc/passwd' /proc/mtd",  # a quoted `>` is a search arg, not a redirect
     ]
     writes = [
         "cat x > y",
-        "dd if=/dev/mtd0 of=/tmp/x",
         "rm -rf /data",
         "flash_erase /dev/mtd0 0 0",
         "reboot",
@@ -263,27 +298,37 @@ def selftest() -> int:
         "insmod /lib/x.ko",
         "ubiupdatevol /dev/ubi0_0 img",
         "install -m0755 x /bin/y",
-        "find / -name x -delete",
-        "dmesg -c",
         "cat /proc/mtd; nandwrite /dev/mtd0 x",  # a writer hiding after a reader
         "&& rm -rf /",  # operator-only / unparseable fragment
-        # fd-prefixed and bash redirects a lookbehind check would miss:
+        # fd-prefixed and bash redirects
         "echo foo 1>/etc/passwd",
         "cat /etc/version 2>/etc/init.d/misc-daemon",
         "cat /proc/mtd &>/dev/mtd0",
         "ls / >>/data/x",
+        "cat /proc/mtd >&/dev/mtd0",  # >&file redirects to a file, not an fd dup
         "cat >",  # dangling redirect, no target
         # command substitution / escapes: an allowed reader runs arbitrary code
         "cat $(reboot)",
         "ls `nandwrite /dev/mtd0 x`",
         "cat /etc/\\passwd",
-        "grep -c '2>/etc/passwd' /proc/mtd",  # quoted `>` now fails closed (acceptable)
+        # newline injection: shlex folds \n to whitespace, so reject control chars
+        "cat /proc/mtd\nflash_erase /dev/mtd0 0 0",
+        # arbitrary-execution programs removed from the allowlist
+        "awk 'BEGIN{system(\"reboot\")}'",
+        "command rm -rf /",
+        "busybox 'rm' -rf /",  # quoting cannot hide the busybox applet
+        'dd if=/dev/zero "of"=/dev/mtd0',
+        "sed '-i' s/a/b/ /etc/passwd",
+        "sed 'w /etc/passwd' /proc/mtd",
+        "nanddump -f /etc/passwd /dev/mtd0",
+        "mount /dev/ubi0_0 /mnt",
+        "find / -name x -delete",
+        # setter FORMS of dual-use readers, caught on tokens despite quoting
+        "dmesg '-c'",
+        "sort '-o' /etc/x /proc/mtd",
+        "date -s '2020-01-01'",
+        "hostname newname",
     ]
-    also_reads = [
-        "cat /dev/mtd0 2>/dev/null",  # stderr to the bit bucket is fine
-        "ps w 2>&1 | grep x",  # fd dup is fine
-    ]
-    reads += also_reads
     for c in reads:
         if not is_read_only(c):
             print(f"  FAIL  read command refused: {c}")
