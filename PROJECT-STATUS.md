@@ -26,7 +26,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Phase | Release(s) | Theme | Status | Plan |
 |---|---|---|---|---|
 | 0 | v0.1.0 | Foundation | **released 2026-11-23** (T-OR-001..T-OR-011 done) | [to-dos/PHASE-0-foundation.md](to-dos/PHASE-0-foundation.md) |
-| 1 | v0.2.0 | Device recon + verified backup | in progress (Sprint 1.1 + 1.2 done; 1.3 on-device archives captured and verified; off-repo copy pending) | [to-dos/PHASE-1-recon-backup.md](to-dos/PHASE-1-recon-backup.md) |
+| 1 | v0.2.0 | Device recon + verified backup + OTA block | **released 2026-11-23** (recon, verified backup, off-repo copy, reversible OTA block; empirical 0x11EB deferred -- no active plan) | [to-dos/PHASE-1-recon-backup.md](to-dos/PHASE-1-recon-backup.md) |
 | 2 | v0.3.0 | Stock upstream install | installed & validated on-device 2026-11-23 (web UI, recording, reboot-persistent, rayhunter-check); release pending | [to-dos/PHASE-2-stock-install.md](to-dos/PHASE-2-stock-install.md) |
 | 3 | v0.4.0 | Reproducible patched build | not started | [to-dos/PHASE-3-reproducible-build.md](to-dos/PHASE-3-reproducible-build.md) |
 | 4 | v0.5.0..v1.0.0 | `orx` tooling, baseline | not started | [to-dos/PHASE-4-orx-tooling.md](to-dos/PHASE-4-orx-tooling.md) |
@@ -56,12 +56,12 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 106 minted; 18 done (T-OR-001..T-OR-018, T-OR-106) | [ROADMAP.md](ROADMAP.md) |
+| Tickets | 106 minted; 20 done (T-OR-001..T-OR-022 except deferred 0x11EB-empirical, T-OR-106) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 0 | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 10 passed; 3 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
-| Latest release | v0.1.0 (2026-11-23) | `gh release list` |
+| Latest release | v0.2.0 (2026-11-23) | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |
 | Device firmware | `ORB400L_V1.2.0_BVZRT` | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
 | Device backup | none | `backups/` |

@@ -1,9 +1,3 @@
-# Changelog
-
-All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
 ## [Unreleased]
 
 ### Added
@@ -15,28 +9,31 @@ All notable changes to this project are documented here. The format follows
   analyzed clean by `rayhunter-check` (0 warnings), with an `EMM Attach Reject` confirming the
   inactive SIM reaches towers -- end-to-end capture + analysis without an active plan.
 
-- `ref-docs/running-without-active-service-2026-11-23.md`: research synthesis on running
-  Rayhunter without an active plan. An inactive SIM (the built-in Verizon SIM here) captures
-  broadcast control-plane only (SIB1/Paging) -- enough for the broadcast heuristics and to
-  validate the capture path via the Test Heuristic -- while connection-based heuristics and
-  user-plane capture need an active data session. Analyzer accuracy work proceeds offline with
-  `rayhunter-check` + golden QMDL vectors.
-- T-OR-019 (0x11EB privacy check) answered from the upstream source: it subscribes to
-  `LOG_DATA_PROTOCOL_LOGGING_C` ("User IP traffic"), so an active plan would log user IP packets
-  to QMDL; the empirical on-device test is deferred (no active plan), the mitigation (T-OR-029)
-  justified. Recorded in docs/DEVICE-PROFILE.md and docs/TESTING.md.
+## [0.2.0] - 2026-11-23
+
+Completes Phase 1: on-device reconnaissance plus the reversible OTA-update block. The carrier updater (`oma_dm`/`dmclient`/`mdm-daemon`) is reverse-engineered and reversibly disabled; the 0x11EB user-IP-traffic privacy question is answered from the upstream source; and the no-active-service path is established (an inactive SIM captures broadcast control-plane, enough to validate the capture path; analyzer accuracy work runs offline with `rayhunter-check`). Builds on v0.1.0 (foundation + recon + verified backup). Upstream pin: EFForg/rayhunter `v0.13.0` (`cd462a1`). Nothing in this release modifies the device beyond the reversible OTA block, which is backup-gated and has an undo manifest.
+
+### Added
 
 - `scripts/orbic-ota-block.py`: reversibly disables the on-demand OTA/FOTA updater
   (`oma_dm`/`dmclient`/`mdm-daemon`) by renaming them to `.orx-disabled`. The first tool that
   writes to the device: a fixed target allowlist (no arbitrary paths), a verified-backup gate,
   an undo manifest and `--undo`, and an audit line. Status (read-only) is the default; `--apply`
   requires `--backup-manifest`. Applied on this unit (T-OR-018).
-
 - `re/notes/ota-mechanism.md` and `re/notes/install-footprint.md`: read-only RE of the backed-up
   firmware (T-OR-020). Auto-FOTA is off on this unit, there is no boot-time update daemon, and
-  the on-demand updater (`oma_dm`/`dmclient`/`mdm-daemon`) is triggered only by the stock UI's
-  `goahead` `/goform/Fota*` actions or a carrier-pushed OMA-DM session. The upstream install
-  footprint is a `misc-daemon` hook plus files under `/data`, fully file-level reversible.
+  the on-demand updater is triggered only by the stock UI's `goahead` `/goform/Fota*` actions or
+  a carrier-pushed OMA-DM session. The upstream install footprint is a `misc-daemon` hook plus
+  files under `/data`, fully file-level reversible.
+- `ref-docs/running-without-active-service-2026-11-23.md`: how to run Rayhunter without an active
+  plan. An inactive SIM (the built-in Verizon SIM here) captures broadcast control-plane only
+  (SIB1/Paging) -- enough for the broadcast heuristics and to validate the capture path -- while
+  connection-based heuristics and user-plane capture need an active data session. Analyzer
+  accuracy work proceeds offline with `rayhunter-check` + golden QMDL vectors.
+- T-OR-019 (0x11EB privacy check) answered from the upstream source: it subscribes to
+  `LOG_DATA_PROTOCOL_LOGGING_C` ("User IP traffic"), so an active plan would log user IP packets
+  to QMDL; the empirical on-device test is deferred (no active plan), the mitigation (T-OR-029)
+  justified. Recorded in docs/DEVICE-PROFILE.md and docs/TESTING.md.
 
 ### Changed
 
