@@ -41,15 +41,15 @@ nmap -Pn -p 1-1024,5555,8080,8081 192.168.1.1
 
 ## Sprint 1.2: Shell and read-only inventory
 
-- [ ] T-OR-013: open the network shell with `installer util orbic-shell` (upstream v0.13.0
+- [x] T-OR-013: open the network shell with `installer util orbic-shell` (upstream v0.13.0
       release binary, zip SHA-256 verified); record exactly what was sent
-- [ ] T-OR-013: note the stock remote-access settings before and after; after the next reboot
+- [x] T-OR-013: note the stock remote-access settings before and after; after the next reboot
       check whether port 24 still listens
-- [ ] T-OR-014: run every command in the DEVICE-PROFILE.md checklist (identity, kernel, memory,
+- [x] T-OR-014: run every command in the DEVICE-PROFILE.md checklist (identity, kernel, memory,
       storage, processes, sockets, init layout, USB mode, DIAG node, peripherals)
-- [ ] T-OR-014: copy outputs to `backups/<date>-V1.2.0/layout/`; summarize redacted values in
+- [x] T-OR-014: copy outputs to `backups/<date>-V1.2.0/layout/`; summarize redacted values in
       DEVICE-PROFILE.md
-- [ ] T-OR-014: inventory restore tools on the device (`nanddump`, `nandwrite`, `flash_erase`,
+- [x] T-OR-014: inventory restore tools on the device (`nanddump`, `nandwrite`, `flash_erase`,
       `ubiupdatevol`, `sha256sum`, `tar`, `nc` options)
 
 Acceptance criteria: every DEVICE-PROFILE.md on-device row filled or deferred with a reason; no
@@ -76,26 +76,38 @@ nmap -Pn -p 24,8081 192.168.1.1      # after closing the shell and rebooting
 
 ## Sprint 1.3: Backup and verification
 
-- [ ] T-OR-015: stream every `/proc/mtd` partition to the host (`dd` or `nanddump` piped to
-      `busybox nc`); SHA-256 on device and host; `MANIFEST.sha256` and `device-hashes.txt`
-- [ ] T-OR-016: `rootfs.tar` of `etc bin sbin usr lib data usrdata`; byte copies with hashes of
-      `/etc/init.d/misc-daemon`, all of `/etc/init.d`, `/usrdata/mode.cfg`,
-      `/usrdata/mode_tmp.cfg`, `/data/usb/boot_hsusb_composition`, `wlan_conf_6174.xml`,
-      `mobileap_cfg.xml`
-- [ ] T-OR-017: second pass into `pass2/`; compare; explain every difference
-- [ ] T-OR-017: encrypted off-repo copy on separate media; decrypt round-trip hash checked
-- [ ] T-OR-017: all items of the BACKUP-AND-RECOVERY.md step 6 gate checked
+Raw NAND images were abandoned: `nanddump`/`dd` of `/dev/mtd*` deadlocks this device after the
+first partition (raw MTD contends with the live UBI, wedging the NAND into unkillable D-state,
+measured 2026-11-23). The backup is instead a `tar` of each writable `ubifs` filesystem through
+the VFS -- safe, and the correct rollback for a Rayhunter install, which only changes the mounted
+volumes. `scripts/orbic-backup.py` implements it; BACKUP-AND-RECOVERY.md is the procedure.
 
-Acceptance criteria: the step 6 gate passes in full. This is the gate for every later device
-write in the project.
+- [x] T-OR-015: `scripts/orbic-backup.py` archives each writable filesystem with `tar` on the
+      device, streamed over the port-24 shell channel (the firewall blocks connect-back), rolling
+      SHA-256 on the host
+- [x] T-OR-016: `root.tar`, `data.tar`, `usrdata.tar`, `firmware.tar`, `cache.tar` captured to
+      `backups/2026-11-23-V1.2.0/fs/`; `root.tar` contains `./etc/init.d/misc-daemon` (baseline
+      SHA-256 `8f9bb4ce...fe3f1cf9`); the USB-composition files and secret configs live under
+      `/usrdata` and `/data`, so they are in `usrdata.tar` and `data.tar` (not `root.tar`, which
+      excludes those mounts)
+- [x] T-OR-017: two passes per filesystem with `tar`'s exit status captured and required zero;
+      byte-identical for quiescent `/`, `/usrdata`, `/firmware`, `/cache`; `/data` reads clean but
+      differs between passes as a live fs; each archive validated readable; all mode 0600
+- [ ] T-OR-017: encrypted off-repo copy on separate media; decrypt round-trip hash checked
+      (**remaining** -- needs offline media and a passphrase; the gate is not fully closed until
+      this is done)
+
+Acceptance criteria: every writable filesystem has a verified `ok`/`ok-live` archive AND the
+off-repo encrypted copy is verified -- i.e. the BACKUP-AND-RECOVERY.md step 4 gate passes in
+full. The on-device archives are captured and verified; the off-repo copy is the one open item.
+This is the gate for every later device write.
 
 Verification:
 
 ```sh
-cd backups/<date>-V1.2.0 && sha256sum -c MANIFEST.sha256
-diff <(cut -d' ' -f1 MANIFEST.sha256) <(cut -d' ' -f1 device-hashes.txt)
-diff MANIFEST.sha256 pass2/MANIFEST.sha256
-tar -tf rootfs.tar > /dev/null && tar -tf rootfs.tar | grep -x 'etc/init.d/misc-daemon'
+cat backups/<date>-V1.2.0/fs/MANIFEST.txt                        # every fs ok / ok-live
+for t in backups/<date>-V1.2.0/fs/*.tar; do tar -tf "$t" >/dev/null && echo "$t ok"; done
+tar -tf backups/<date>-V1.2.0/fs/root.tar | grep -x './etc/init.d/misc-daemon'
 age -d /media/<offline-disk>/orbic-<date>.tar.age | sha256sum
 ```
 

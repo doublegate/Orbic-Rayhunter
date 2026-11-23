@@ -10,6 +10,33 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 
 ### Added
 
+- `scripts/orbic-ui-read.py`: a read-only client for the stock GoAhead web UI. It logs in with
+  the same encoding as upstream's installer (verified against four reference vectors from
+  upstream's own `encode_password`), calls only an allowlist of read endpoints, and **refuses**
+  `FotaGetVersionInfo` (which would ask the device to check for an OTA update). The admin
+  password is read from a mode-600 file, never argv, and identifier fields are length-redacted
+  on stdout.
+- `scripts/orbic-shell.py`: drives the upstream root shell (busybox `nc` on TCP 24) one command
+  at a time with per-command markers and exit status. It is read-only by policy, decided entirely
+  on shlex TOKENS (so quoting cannot disguise a program or flag): a fail-closed allowlist of pure
+  readers, with every arbitrary-execution program (`awk`, `command`, `find`, `sed`, `dd`,
+  `nanddump`, `mount`) excluded, control characters and command substitution rejected, and output
+  redirects validated per token. No recon run can write flash before the Sprint 1.3 backup, and
+  there is no write-enable override. `scripts/recon/` holds the inventory command lists.
+- `scripts/orbic-backup.py`: the Sprint 1.3 backup tool (T-OR-015..T-OR-017). It archives each
+  mounted `ubifs` filesystem with `tar` on the device, streamed to the host over the port-24 root
+  shell (the device firewall blocks a connect-back), and verifies each as a complete, readable tar
+  with a two-pass SHA-256 (byte-identical for a quiescent fs, readable-only for a live one like
+  `/data`), promoting it to a mode-0600 `<label>.tar` only on success. **Not** a raw NAND image:
+  `nanddump`/`dd` of `/dev/mtd*` deadlocks this device (raw MTD contends with the live UBI and
+  wedges the NAND), and tar through the VFS is both safe and the correct rollback for a Rayhunter
+  install, which only changes the mounted volumes.
+- Phase 1 Sprint 1.2 on-device recon (T-OR-013/T-OR-014) recorded in docs/DEVICE-PROFILE.md:
+  kernel 3.18.48 and command line, the 17-partition MTD table and UBI layout, mounts and free
+  space, the available backup tools (`nanddump`, `nandwrite`, `flash_erase`, `ubinfo`,
+  `sha256sum`), listening sockets, the absence of a persistent FOTA daemon, and the stock
+  `misc-daemon` SHA-256 baseline. The one device change from opening the shell (`telnetd` 1->0
+  in the remote-access config) is noted; identifiers are redacted.
 - Repository scaffold: GPL-3.0-or-later license (ADR 0002), overlay layout (ADR 0001), upstream
   EFForg/rayhunter submodule pinned to `v0.13.0` (`cd462a1`), Rust 1.98.0 toolchain pin matching
   upstream.

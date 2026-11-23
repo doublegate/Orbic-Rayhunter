@@ -49,3 +49,7 @@ CLAUDE.local.md
 
 # Local salvage of session scratch (never published)
 /salvaged/
+
+# Python bytecode
+__pycache__/
+*.pyc
