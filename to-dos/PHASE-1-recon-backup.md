@@ -15,8 +15,6 @@ verification) -> 1.4 (OTA block, then SIM, then 0x11EB). No write to the device 
 - [x] T-OR-012: interface class/subclass/protocol per USB function recorded in DEVICE-PROFILE.md
 - [x] T-OR-012: `orx doctor` transcript; serial redacted before committing
 - [x] T-OR-012: stock UI response headers (2026-11-23)
-- [ ] T-OR-012: the firmware string as the UI reports it. It is shown only after the admin login,
-      so it needs the admin password; read it once the OTA client is blocked (see below)
 - [x] T-OR-012: host-side port scan of the device (expect 24 and 8081 closed before any shell)
 
 Acceptance criteria: DEVICE-PROFILE.md host-side table filled; no write to the device.
@@ -114,6 +112,9 @@ age -d /media/<offline-disk>/orbic-<date>.tar.age | sha256sum
 - [ ] T-OR-018: block it reversibly (stop, rename the init link; record original name, path,
       hash); DNS block of update hosts if identified
 - [ ] T-OR-018: verify across a reboot without the SIM, then with the active SIM inserted
+- [ ] T-OR-012 (moved here from Sprint 1.1): read the firmware string as the stock UI reports it.
+      It is shown only after the admin login, and the UI's page load calls the FOTA client, so it
+      is read only once the FOTA client is blocked
 - [ ] T-OR-019: run the 0x11EB procedure in [docs/TESTING.md](../docs/TESTING.md) with the
       upstream release daemon run manually (not installed persistently), then remove it
 - [ ] T-OR-019: record the result in DEVICE-PROFILE.md; delete the capture

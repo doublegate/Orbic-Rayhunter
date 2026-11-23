@@ -41,7 +41,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Upstream pinned as submodule | present | T-OR-001 | v0.13.0 |
 | Patch series pipeline | present, series empty | T-OR-004 | `scripts/apply-patches.sh` |
 | armv7 daemon build | present, built locally and in CI | T-OR-004 | `scripts/build.sh devel` produced `dist/` |
-| `orx doctor` | present | T-OR-003 | USB f626/f601/9008, TCP :80 and :8080; f622 not classified |
+| `orx doctor` | present | T-OR-003, T-OR-106 | USB f626/f601/9008 with the serial read from the `_SN:` product suffix, TCP :80 and :8080; f622 not classified |
 | CI workflows | green on `main` | T-OR-002, T-OR-010 | ci, docs, security, upstream-watch; release untested until a tag |
 | Specification docs | present | T-OR-007 | `docs/` |
 | Device profile | host-side facts measured (USB descriptors, web server, TLS, ports, OTA trigger) | T-OR-012, T-OR-014 | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
@@ -55,11 +55,11 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 
 | Metric | Value | Source |
 |---|---|---|
-| Commits | 5 on `main` | `git log` |
-| Tickets | 105 minted; 10 done (T-OR-001..T-OR-010) | [ROADMAP.md](ROADMAP.md) |
+| Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
+| Tickets | 106 minted; 11 done (T-OR-001..T-OR-010, T-OR-106) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 0 | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
-| Host unit tests | 7 passed | `cargo test` (local and CI) |
+| Host unit tests | 10 passed | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
 | Latest release | none | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |

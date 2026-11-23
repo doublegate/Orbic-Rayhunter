@@ -21,7 +21,7 @@ Recording rules for this file:
 | USB serial | 8 hex characters; value redacted (device identifier). In normal mode there is **no** `serial` sysfs attribute: the serial is embedded in the product string after `_SN:` (so a product string is redacted too), and `orx doctor` reads it from there (T-OR-106) | `lsusb -v`, sysfs, `orx doctor` | 2026-11-23 |
 | USB functions (normal mode) | two interfaces: 0 = class `e0`/`01`/`03` (Wireless, RF, RNDIS), "RNDIS Communications Control"; 1 = class `0a`/`00`/`00` (CDC Data), "RNDIS Ethernet Data" | `lsusb -v`, sysfs `bInterface*` | 2026-11-23 |
 | Host address on the RNDIS link | DHCP from the device: `192.168.1.112` (2026-11-22), `192.168.1.134` (2026-11-23); default route via `192.168.1.1` | `ip -br addr`, `ip route` | 2026-11-23 |
-| Stock web UI | `http://192.168.1.1/` reachable (TCP :80 open) | `orx doctor` | 2026-11-22 |
+| Stock web UI | `http://192.168.1.1/` reachable (TCP :80 open) | `orx doctor` | 2026-11-23 |
 | Rayhunter | not installed (TCP :8080 closed) | `orx doctor` | 2026-11-23 |
 | Web server | GoAhead (session cookie `-goahead-session-`; no `Server` header). `/` answers `302` to `/common/home.html` (`Last-Modified: Fri Nov 20 03:47:42 2020`); every response carries `X-Frame-Options: SAMEORIGIN` | `curl -sI` / `curl -D` | 2026-11-23 |
 | Unauthenticated login probe | `GET /goform/GetLoginInfo` returns `retcode`, `loginStatus` (0 = logged out), `loginUser`, `loginRole` and an 11-character `priKey`, and sets a session cookie, all without authentication. The `priKey` value is not recorded | `curl` | 2026-11-23 |
