@@ -185,3 +185,15 @@ gh release view v1.0.0
 ### Research (REA/Ghidra/web)
 
 - None new; review open upstream issues affecting the Orbic since v0.13.0 before tagging.
+
+## v0.8.0 review follow-ups (deferred from PR #6, agy suggestions)
+
+Additive hardening for `orx install`, deferred from the v0.8.0 PR as next-PR work (the shipped
+command is backup-gated, dry-run-first, atomic, and validates payloads; these make it stricter):
+
+- [ ] T-OR-036a: verify `dist/rayhunter-daemon` against `dist/SHA256SUMS` before transfer (catch a
+      stale/corrupt local artifact); allow an explicit opt-out.
+- [ ] T-OR-036b: `--config <path>` and deploy our hardened `config.toml` (wifi_enabled = false,
+      retention/free-space thresholds) instead of bare upstream `config.toml.in`; ties to T-OR-040.
+- [ ] T-OR-036c: `/data` (and `/`) free-space preflight before staging a second copy of the daemon,
+      or stop `rayhunter_daemon` first (unlinked-but-open blocks hold space until reboot; #1192).

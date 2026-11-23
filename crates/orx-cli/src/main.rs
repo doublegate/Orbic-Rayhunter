@@ -310,7 +310,7 @@ fn cmd_uninstall(backup: &Path, ip: &str, apply: bool) -> ExitCode {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
-            return ExitCode::from(2);
+            return ExitCode::from(1); // same as cmd_install: a refusal, not a usage error
         }
     };
     run_plan(

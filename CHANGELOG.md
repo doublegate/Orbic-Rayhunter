@@ -6,7 +6,7 @@
 
 ## [0.8.0] - 2026-11-23
 
-Adds `orx install` and `orx uninstall` -- the device-write operations that complete the orx tooling. Both are DRY-RUN by default (print the exact step plan) and `--apply` executes; both refuse unless `verify::gate()` passes for the backup directory, so a device write is impossible without a verified rootfs backup to roll back to. The deployed file set and paths mirror upstream's network installer and the install-footprint RE, but deploy OUR firmware build; uninstall restores the true stock misc-daemon extracted from the verified backup's `root.tar` and removes our files (leaving recordings). orx-cli stays zero-dependency; 54 unit tests, dry-run validated on the unit against the verified Sprint 1.3 backup.
+Adds `orx install` and `orx uninstall` -- the device-write operations that complete the orx tooling. Both are DRY-RUN by default (print the exact step plan) and `--apply` executes; both refuse unless `verify::gate()` passes for the backup directory, so a device write is impossible without a verified rootfs backup to roll back to. The deployed file set and paths mirror upstream's network installer and the install-footprint RE, but deploy OUR firmware build; uninstall restores the true stock misc-daemon extracted from the verified backup's `root.tar` and removes our files (leaving recordings). orx-cli stays zero-dependency; 58 unit tests, dry-run validated on the unit against the verified Sprint 1.3 backup.
 
 ### Added
 

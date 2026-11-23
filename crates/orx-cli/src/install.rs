@@ -19,6 +19,7 @@
 //! writes.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::transport::{Shell, safe_remote};
 
@@ -115,10 +116,19 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 /// A device init script must be non-empty and start with a `#!` shebang (reject a
 /// truncated or CRLF-mangled script before it can break boot).
 fn check_init_script(bytes: &[u8], what: &str) -> Result<(), String> {
-    if bytes.len() < 10 || &bytes[..2] != b"#!" {
+    if bytes.len() < 10 || !bytes.starts_with(b"#!") {
         return Err(format!(
             "{what} is not a plausible shell script (too short or no #! shebang)"
         ));
+    }
+    // The first line is the shebang and must invoke /bin/sh (BusyBox on the
+    // RC400L has no /bin/bash); there must be a line after it.
+    let first_line_end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| format!("{what} has no newline after the shebang"))?;
+    if !contains(&bytes[..first_line_end], b"/bin/sh") {
+        return Err(format!("{what} shebang does not invoke /bin/sh"));
     }
     if bytes.contains(&b'\r') {
         return Err(format!(
@@ -145,11 +155,13 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 /// binary, a text file, or a corrupt artifact before it is deployed as the
 /// daemon. `e_machine == 40` is EM_ARM; `EI_CLASS == 1` 32-bit; `EI_DATA == 1` LE.
 fn is_arm32_elf(bytes: &[u8]) -> bool {
-    bytes.len() >= 20
-        && &bytes[..4] == b"\x7fELF"
-        && bytes[4] == 1
-        && bytes[5] == 1
-        && u16::from_le_bytes([bytes[18], bytes[19]]) == 40
+    if bytes.len() < 52 || &bytes[..4] != b"\x7fELF" || bytes[4] != 1 || bytes[5] != 1 {
+        return false;
+    }
+    let e_type = u16::from_le_bytes([bytes[16], bytes[17]]);
+    let e_machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+    // ET_EXEC (2) or ET_DYN (3) -- not an ET_REL object; EM_ARM (40).
+    (e_type == 2 || e_type == 3) && e_machine == 40
 }
 
 /// Build the install step plan. Validates every source (fail before any device
@@ -261,11 +273,7 @@ pub fn stock_misc_daemon(backup_dir: &Path) -> Result<Vec<u8>, String> {
     // in which case its misc-daemon is the HOOKED one -- restoring that would
     // leave a dangling hook after we remove rayhunter_daemon. Only a genuinely
     // stock (unhooked) script is a valid restore target.
-    if out
-        .stdout
-        .windows(b"rayhunter_daemon".len())
-        .any(|w| w == b"rayhunter_daemon")
-    {
+    if contains(&out.stdout, b"rayhunter_daemon") {
         return Err(
             "misc-daemon in the backup is already hooked for rayhunter (backup taken after install); \
              supply a stock backup to uninstall"
@@ -290,8 +298,10 @@ pub fn uninstall_plan(stock_misc_daemon: Vec<u8>) -> Vec<Step> {
             command: format!("rm -f {RAYHUNTER_INIT}"),
         },
         Step::Cmd {
-            desc: "remove daemon + config".into(),
-            command: format!("rm -f {DAEMON_REMOTE} {CONFIG_REMOTE}"),
+            desc: "remove daemon, config, and install dirs".into(),
+            command: format!(
+                "rm -f {DAEMON_REMOTE} {CONFIG_REMOTE}; rm -rf /data/rayhunter/scripts /data/rayhunter/bin"
+            ),
         },
         Step::Cmd {
             desc: "flush to flash".into(),
@@ -330,29 +340,63 @@ pub fn execute(
                 if !safe_remote(remote) {
                     return Err(format!("unsafe remote path in plan: {remote:?}"));
                 }
+                // execute is pub; defend the interpolated mode even though the
+                // plans only ever pass "755"/"644".
+                if !((3..=4).contains(&chmod.len())
+                    && chmod.bytes().all(|b| (b'0'..=b'7').contains(&b)))
+                {
+                    return Err(format!("invalid chmod mode in plan: {chmod:?}"));
+                }
                 let tmp = format!("{remote}.orx-new");
-                // verifies the temp's sha256; clean up the temp on failure so a
-                // partial/failed transfer never leaks (a stray 16 MB daemon temp
-                // on /data can wedge the daemon and AP, #1192).
+                // cleanup helper: a partial/failed write must never leave a stray
+                // temp (a 16 MB daemon temp on /data can wedge the daemon+AP, #1192).
+                let cleanup = |sh: &mut dyn Shell| {
+                    let _ = sh.run(&format!("rm -f {tmp}"));
+                };
                 if let Err(e) = shell.send_file(&tmp, bytes) {
-                    let _ = shell.run(&format!("rm -f {tmp}"));
+                    cleanup(shell);
                     return Err(e);
                 }
-                let c = shell.run(&format!("chmod {chmod} {tmp}"))?;
-                if c.status != 0 {
-                    let _ = shell.run(&format!("rm -f {tmp}"));
-                    return Err(format!("chmod {chmod} {tmp} failed: {}", c.output.trim()));
+                match shell.run(&format!("chmod {chmod} {tmp}")) {
+                    Ok(c) if c.status == 0 => {}
+                    Ok(c) => {
+                        cleanup(shell);
+                        return Err(format!("chmod {chmod} {tmp} failed: {}", c.output.trim()));
+                    }
+                    Err(e) => {
+                        cleanup(shell);
+                        return Err(format!("chmod {chmod} {tmp}: {e}"));
+                    }
                 }
-                let m = shell.run(&format!("mv {tmp} {remote}"))?;
-                if m.status != 0 {
-                    let _ = shell.run(&format!("rm -f {tmp}"));
-                    return Err(format!("mv {tmp} {remote} failed: {}", m.output.trim()));
+                match shell.run(&format!("mv -f {tmp} {remote}")) {
+                    Ok(m) if m.status == 0 => {}
+                    Ok(m) => {
+                        cleanup(shell);
+                        return Err(format!("mv {tmp} {remote} failed: {}", m.output.trim()));
+                    }
+                    Err(e) => {
+                        cleanup(shell);
+                        return Err(format!("mv {tmp} {remote}: {e}"));
+                    }
                 }
             }
             Step::Cmd { command, .. } => {
                 if command.trim() == "reboot" {
-                    let _ = shell.run("reboot"); // closes the shell; no status to wait on
-                    println!("  device rebooting");
+                    // reboot drops the link without a clean close: a disconnect or
+                    // read timeout is the EXPECTED success. Bound it so orx cannot
+                    // block for the long transfer timeout, and surface only an
+                    // explicit non-zero exit as a failure.
+                    shell.set_timeout(Duration::from_secs(10));
+                    match shell.run("reboot") {
+                        Ok(r) if r.status != 0 => {
+                            return Err(format!(
+                                "reboot returned status {}: {}",
+                                r.status,
+                                r.output.trim()
+                            ));
+                        }
+                        _ => println!("  device rebooting"),
+                    }
                     continue;
                 }
                 let r = shell.run(command)?;
@@ -407,6 +451,7 @@ mod tests {
         b[..4].copy_from_slice(b"\x7fELF");
         b[4] = 1; // ELFCLASS32
         b[5] = 1; // little-endian
+        b[16] = 2; // e_type = ET_EXEC
         b[18] = 40; // EM_ARM (little end of e_machine)
         b
     }
@@ -581,6 +626,90 @@ mod tests {
                 .contains("already hooked")
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn execute_apply_issues_expected_command_sequence() {
+        let mut sh = FakeShell::default();
+        let d = tmp();
+        write_artifacts(&d);
+        execute(&mut sh, &plan(&d), || Ok(()), true).unwrap();
+        // Ignoring the sha256sum verification calls, the ordered device commands.
+        let seq: Vec<&String> = sh
+            .cmds
+            .iter()
+            .filter(|c| !c.starts_with("sha256sum"))
+            .collect();
+        assert!(seq[0].starts_with("mkdir -p /data/rayhunter"));
+        assert!(
+            seq.iter()
+                .any(|c| c.starts_with("chmod 755 /data/rayhunter/rayhunter-daemon.orx-new"))
+        );
+        assert!(
+            seq.iter()
+                .any(|c| c.starts_with("mv -f /data/rayhunter/rayhunter-daemon.orx-new"))
+        );
+        assert_eq!(*seq[seq.len() - 2], "sync");
+        assert_eq!(*seq[seq.len() - 1], "reboot");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn execute_cleans_up_temp_on_failed_send_file() {
+        let mut sh = FakeShell {
+            drop_writes: true, // put drops data -> device sha256 mismatch -> send_file fails
+            ..Default::default()
+        };
+        let d = tmp();
+        write_artifacts(&d);
+        assert!(execute(&mut sh, &plan(&d), || Ok(()), true).is_err());
+        assert!(
+            sh.cmds
+                .iter()
+                .any(|c| c.starts_with("rm -f ") && c.contains(".orx-new"))
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn execute_rejects_unsafe_remote_and_bad_mode() {
+        let mut bad_path = FakeShell::default();
+        let steps = vec![Step::Put {
+            desc: "x".into(),
+            remote: "/etc/init.d/misc-daemon; rm -rf /".into(),
+            bytes: vec![0u8; 16],
+            chmod: "755",
+        }];
+        assert!(execute(&mut bad_path, &steps, || Ok(()), true).is_err());
+        assert!(bad_path.fs.is_empty());
+
+        let mut bad_mode = FakeShell::default();
+        let steps = vec![Step::Put {
+            desc: "x".into(),
+            remote: "/data/rayhunter/x".into(),
+            bytes: vec![0u8; 16],
+            chmod: "7o5",
+        }];
+        assert!(execute(&mut bad_mode, &steps, || Ok(()), true).is_err());
+    }
+
+    #[test]
+    fn uninstall_apply_restores_stock_and_removes_our_files() {
+        let mut sh = FakeShell::default();
+        let steps = uninstall_plan(b"#!/bin/sh\nstock\n".to_vec());
+        execute(&mut sh, &steps, || Ok(()), true).unwrap();
+        assert!(sh.fs.contains_key("/etc/init.d/misc-daemon.orx-new"));
+        assert!(
+            sh.cmds
+                .iter()
+                .any(|c| c.contains("rm -f /etc/init.d/rayhunter_daemon"))
+        );
+        assert!(
+            sh.cmds
+                .iter()
+                .any(|c| c.contains("rm -rf /data/rayhunter/scripts"))
+        );
+        assert_eq!(sh.cmds.last().unwrap(), "reboot");
     }
 
     use std::sync::atomic::{AtomicUsize, Ordering};

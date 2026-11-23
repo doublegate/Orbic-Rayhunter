@@ -191,10 +191,12 @@ With `--apply` it, in order:
      `/data/rayhunter/config.toml` (0644). Values and reasons: [CONFIGURATION.md](CONFIGURATION.md);
    - `rayhunter_daemon` -> `/etc/init.d/rayhunter_daemon` (0755);
    - the hooked `misc-daemon` -> `/etc/init.d/misc-daemon` (0755), last before reboot.
-3. Reboots.
+3. Runs `sync`, then reboots.
 
-The daemon binary and both init scripts are validated before any write (daemon non-empty; init
-scripts start with a `#!` shebang and have no CRLF). The backup -- not a `.prev` copy -- is the
+The daemon binary and both init scripts are validated before any write: the daemon must be a
+32-bit little-endian ARM ELF, the init scripts must have a `#!/bin/sh` shebang with no CRLF/NUL and
+valid UTF-8, the `rayhunter_daemon` init must reference `/data/rayhunter/rayhunter-daemon`, and the
+`misc-daemon` must reference `rayhunter_daemon` (the hook). The backup -- not a `.prev` copy -- is the
 rollback; `orx uninstall` (section 6) uses it. On a stock unit, run upstream's `installer orbic`
 (step 3) first if you prefer, then `orx install --apply` to replace its build with ours.
 
