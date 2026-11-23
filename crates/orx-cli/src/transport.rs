@@ -226,6 +226,37 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
+/// Build the device-side shell command that receives one file on `data_port` and
+/// atomically commits it to `remote`. Factored out so a test can run it through
+/// `/bin/sh`. Properties, all exercised on the device:
+/// - stages into a per-transfer temp (`{remote}.{marker}.ncpart`, so concurrent
+///   or retried transfers to the same `remote` cannot clobber each other's temp);
+/// - commits `remote` only when `nc` exited cleanly AND the received byte count
+///   equals `len` AND the `mv` succeeds; otherwise `remote` is left untouched;
+/// - a watchdog (stdio detached so it never holds the control shell's socket)
+///   kills the listener after `listen_secs`. Its `TERM` trap is registered BEFORE
+///   `sleep` is spawned and guarded by `[ -n "$s" ]`, so an immediate cancel
+///   cannot leave `sleep` orphaned;
+/// - reports the committing step's exit status in run()'s `{marker} <status>.`
+///   framing.
+fn listener_command(
+    data_port: u16,
+    remote: &str,
+    marker: &str,
+    len: usize,
+    listen_secs: u64,
+) -> String {
+    let part = format!("{remote}.{marker}.ncpart");
+    format!(
+        "nc -l -p {data_port} > {part} & p=$!; \
+         (s=''; trap '[ -n \"$s\" ] && kill $s 2>/dev/null; exit' TERM; sleep {listen_secs} & s=$!; wait $s; kill $p 2>/dev/null) </dev/null >/dev/null 2>&1 & w=$!; \
+         wait $p; st=$?; kill $w 2>/dev/null; ok=0; \
+         if [ $st -eq 0 ] && [ \"$(wc -c < {part} 2>/dev/null | tr -d ' ')\" = \"{len}\" ]; then mv {part} {remote} && ok=1; fi; \
+         [ $ok -eq 1 ] || rm -f {part}; [ $ok -eq 1 ] && st=0 || st=1; \
+         printf '{marker} %s.' \"$st\"\n"
+    )
+}
+
 impl Shell for TcpShell {
     fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
@@ -327,24 +358,9 @@ impl Shell for TcpShell {
         // wall clock: too short kills an active transfer of the large daemon on a
         // slow link; too long leaves the port bound after a failed connect.
         let listen_secs = self.timeout.as_secs().clamp(30, 1800);
-        let part = format!("{remote}.ncpart");
         let len = bytes.len();
-        // The watchdog runs with its stdio detached from the control channel (so
-        // it does not hold the control shell's socket open) and terminates its
-        // own `sleep` on cancel via a TERM trap (so killing the watchdog does not
-        // leave `sleep` lingering and holding FDs).
-        ctl.write_all(
-            format!(
-                "nc -l -p {data_port} > {part} & p=$!; \
-                 (sleep {listen_secs} & s=$!; trap 'kill $s 2>/dev/null; exit' TERM; wait $s; kill $p 2>/dev/null) </dev/null >/dev/null 2>&1 & w=$!; \
-                 wait $p; st=$?; kill $w 2>/dev/null; ok=0; \
-                 if [ $st -eq 0 ] && [ \"$(wc -c < {part} 2>/dev/null | tr -d ' ')\" = \"{len}\" ]; then mv {part} {remote} && ok=1; fi; \
-                 [ $ok -eq 1 ] || rm -f {part}; [ $ok -eq 1 ] && st=0 || st=1; \
-                 printf '{marker} %s.' \"$st\"\n"
-            )
-            .as_bytes(),
-        )
-        .map_err(|e| format!("start device listener: {e}"))?;
+        ctl.write_all(listener_command(data_port, remote, &marker, len, listen_secs).as_bytes())
+            .map_err(|e| format!("start device listener: {e}"))?;
 
         // Peek the control channel BEFORE connecting: a healthy listener is silent
         // (nc blocks in accept(), nothing is printed until the transfer ends), so
@@ -354,22 +370,25 @@ impl Shell for TcpShell {
         // never stream this file's bytes into a listener bound to another path.
         ctl.set_read_timeout(Some(Duration::from_millis(300))).ok();
         let mut pbuf = [0u8; 256];
-        match ctl.read(&mut pbuf) {
-            Ok(0) => return Err("device control channel closed before transfer".to_string()),
-            Ok(n) => {
-                // Surface the device's own words: it may be a stale listener
-                // (EADDRINUSE), or the shell failing to open `{part}` (EROFS,
-                // ENOSPC, missing dir) before `nc` even ran.
-                let said = String::from_utf8_lossy(&pbuf[..n]);
-                let said = said.replace(|c: char| c.is_control(), " ");
-                return Err(format!(
-                    "device listener on port {data_port} produced output before any transfer \
-                     (did not bind -- stale listener, or the target could not be opened); aborted before sending: {}",
-                    said.trim()
-                ));
+        loop {
+            match ctl.read(&mut pbuf) {
+                Ok(0) => return Err("device control channel closed before transfer".to_string()),
+                Ok(n) => {
+                    // Surface the device's own words: it may be a stale listener
+                    // (EADDRINUSE), or the shell failing to open `{part}` (EROFS,
+                    // ENOSPC, missing dir) before `nc` even ran.
+                    let said = String::from_utf8_lossy(&pbuf[..n]);
+                    let said = said.replace(|c: char| c.is_control(), " ");
+                    return Err(format!(
+                        "device listener on port {data_port} produced output before any transfer \
+                         (did not bind -- stale listener, or the target could not be opened); aborted before sending: {}",
+                        said.trim()
+                    ));
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
+                Err(e) => return Err(format!("device control channel: {e}")),
             }
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(e) => return Err(format!("device control channel: {e}")),
         }
 
         // Connect the data channel; retry briefly while the listener binds.
@@ -377,7 +396,11 @@ impl Shell for TcpShell {
         // listener binds within a second or two; no need to retry for minutes).
         let connect_deadline = Instant::now() + self.timeout.min(Duration::from_secs(10));
         let data = loop {
-            match TcpStream::connect_timeout(&data_addr, Duration::from_secs(1)) {
+            // Never let a single connect attempt overrun the deadline.
+            let budget = connect_deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(1));
+            match TcpStream::connect_timeout(&data_addr, budget.max(Duration::from_millis(50))) {
                 Ok(s) => break Some(s),
                 Err(_) if Instant::now() < connect_deadline => {
                     std::thread::sleep(Duration::from_millis(150));
@@ -737,6 +760,36 @@ mod tests {
         sh.data_port = data_port;
         assert!(sh.put("/data/rayhunter/x", b"payload").is_err());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn listener_command_is_valid_posix_sh() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let cmd = listener_command(8081, "/data/rayhunter/x.orx-new", "__orx_test__", 6000, 45);
+        // The emitted command must be syntactically valid sh (catches a quoting or
+        // syntax regression that the mocked loopback tests cannot).
+        let mut child = Command::new("sh")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        child.stdin.take().unwrap().write_all(cmd.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "sh -n rejected the command: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The per-transfer temp carries the marker; the size gate and atomic mv
+        // reference the same temp.
+        assert!(cmd.contains("nc -l -p 8081 > /data/rayhunter/x.orx-new.__orx_test__.ncpart"));
+        assert!(cmd.contains("wc -c < /data/rayhunter/x.orx-new.__orx_test__.ncpart"));
+        assert!(cmd.contains(
+            "mv /data/rayhunter/x.orx-new.__orx_test__.ncpart /data/rayhunter/x.orx-new"
+        ));
+        assert!(cmd.contains("printf '__orx_test__ %s.'"));
     }
 
     #[test]

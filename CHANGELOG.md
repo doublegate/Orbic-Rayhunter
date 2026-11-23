@@ -9,7 +9,7 @@
 First stable release: a documented, reproducible, reversible install of our Rayhunter build,
 **validated on the real Orbic RC400L** (`ORB400L_V1.2.0_BVZRT`). The core `orx` host tooling is
 in place -- `doctor`, `backup`, `verify`, `install`, `uninstall` -- all zero-dependency and
-unit-tested (63 orx-cli tests), with every device write gated on a verified rootfs backup.
+unit-tested (64 orx-cli tests), with every device write gated on a verified rootfs backup.
 (`orx pull-logs`/`check`/`purge` remain as Phase 4 follow-ups.)
 
 ### Added
