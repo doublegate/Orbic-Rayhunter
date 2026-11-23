@@ -370,6 +370,13 @@ def main(argv: list[str]) -> int:
     targets = backup_targets(mounts)
     if args.only:
         want = {m.strip() for m in args.only.split(",")}
+        known = {mp for mp, _ in targets}
+        unknown = want - known
+        if unknown:  # a typo must fail loudly, not silently back up nothing
+            ap.error(
+                f"--only names mount(s) that are not backup targets: "
+                f"{', '.join(sorted(unknown))} (known: {', '.join(sorted(known))})"
+            )
         targets = [m for m in targets if m[0] in want]
     if not targets:
         ap.error("no filesystems selected")
@@ -377,23 +384,33 @@ def main(argv: list[str]) -> int:
     session = ShellTar(args.ip, args.shell_port, args.idle_timeout, args.timeout)
     results = backup_all(session, mounts, targets, Path(args.out_dir))
 
+    def manifest_line(r: dict) -> str:
+        if r["verdict"] == "ABORT":
+            return f"{r['mount']} {r['fstype']} ABORT"
+        return (
+            f"{r['mount']} {r['fstype']} size={r['size']} entries={r['entries']} "
+            f"sha256={r['sha256']} {r['verdict']}"
+        )
+
     manifest = Path(args.out_dir) / "MANIFEST.txt"
-    # The manifest lists each filesystem and its hash; create it owner-only from
-    # the start rather than chmod-ing after it has been written world-readable.
+    header = "# Orbic RC400L filesystem backup manifest (tar over the root shell)"
+    # Merge, keyed by mount point: a `--only` run updates its filesystems' records
+    # and PRESERVES the records of filesystems it did not touch, instead of
+    # overwriting the whole manifest and losing them.
+    records: dict[str, str] = {}
+    if manifest.exists():
+        for ln in manifest.read_text(encoding="utf-8").splitlines():
+            if ln and not ln.startswith("#"):
+                records[ln.split()[0]] = ln
+    for r in results:
+        records[r["mount"]] = manifest_line(r)
+    # Owner-only from creation: the manifest lists each filesystem and its hash.
     mfd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.fchmod(mfd, 0o600)
     with os.fdopen(mfd, "w", encoding="utf-8") as fh:
-        fh.write(
-            "# Orbic RC400L filesystem backup manifest (tar over the root shell)\n"
-        )
-        for r in results:
-            if r["verdict"] == "ABORT":
-                fh.write(f"{r['mount']} {r['fstype']} ABORT\n")
-            else:
-                fh.write(
-                    f"{r['mount']} {r['fstype']} size={r['size']} entries={r['entries']} "
-                    f"sha256={r['sha256']} {r['verdict']}\n"
-                )
+        fh.write(header + "\n")
+        for mp in sorted(records):
+            fh.write(records[mp] + "\n")
     failed = [r for r in results if r["verdict"] not in ("ok", "ok-live")]
     print(
         f"\n{len(results) - len(failed)}/{len(results)} filesystems backed up; manifest: {manifest}"

@@ -209,6 +209,11 @@ def is_read_only(command: str) -> bool:
         return False
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    # shlex treats `#` as a comment and drops the rest of the line, but /bin/sh
+    # only does so when `#` starts a word -- `cat /etc/x#; nandwrite ...` is NOT a
+    # comment to sh, so the device would run the writer while the gate saw only the
+    # `cat`. Disable comment handling so the tokens match what the device executes.
+    lexer.commenters = ""
     try:
         tokens = list(lexer)
     except ValueError:
@@ -255,12 +260,11 @@ def run_one(
     raw = b"".join(chunks).decode("utf-8", "replace")
     m = re.search(re.escape(marker) + r" (-?\d+)", raw)
     status = int(m.group(1)) if m else -1
+    # Everything before the marker is the command's own output. The device shell
+    # (`nc -e /bin/sh`, no PTY) does not echo its input, so there is no command line
+    # to strip -- an earlier heuristic that tried to could drop a real first line.
     output = raw[: m.start()].rstrip("\n") if m else raw
-    # Strip the echoed command line the shell may prepend.
-    lines = output.split("\n")
-    if lines and command.strip().endswith(lines[0].strip().split(";")[-1].strip()):
-        lines = lines[1:]
-    return "\n".join(lines), status
+    return output, status
 
 
 def tcp_connect(ip: str, port: int, timeout: float) -> socket.socket:
@@ -294,6 +298,7 @@ def selftest() -> int:
         "netstat -tlnp",
         "ls -la /dev/*diag* 2>/dev/null",
         "grep -c '2>/etc/passwd' /proc/mtd",  # a quoted `>` is a search arg, not a redirect
+        "echo a#b",  # a mid-word `#` is a literal char to /bin/sh, not a comment
     ]
     writes = [
         "cat x > y",
@@ -358,6 +363,8 @@ def selftest() -> int:
         # combined-operator tokens that must not fall through as arguments
         "cat /proc/mtd;>/etc/passwd",
         "echo x&&>/etc/passwd",
+        # a mid-word `#` is not a comment to /bin/sh, so the writer after it runs
+        "cat /etc/foo#; nandwrite /dev/mtd0 x",
         # busybox applet bypasses (validated by recursing on the applet)
         "busybox sort -o /etc/passwd /proc/mtd",
         "busybox busybox rm -rf /",
