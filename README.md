@@ -24,9 +24,9 @@ back to EFForg/rayhunter.
 
 > Status: **v1.0.0 -- stable baseline.** Our reproducible build is installed and running on the
 > real ORB400L_V1.2.0_BVZRT (reboot-persistent, capturing); the full `orx` tooling (doctor, backup,
-> verify, install, uninstall) is complete and backup-gated. Next: Phase 5 (alerting, analyzers). Use the upstream release and the
-> [official Orbic guide](https://efforg.github.io/rayhunter/orbic.html) until v1.0.0. Current
-> state: [PROJECT-STATUS.md](PROJECT-STATUS.md).
+> verify, install, uninstall) is backup-gated; the install milestone is done. Phase 4 follow-ups
+> (`orx pull-logs`/`check`/`purge`) and Phase 5 (alerting, analyzers) are next. Current state:
+> [PROJECT-STATUS.md](PROJECT-STATUS.md).
 
 ## Support matrix
 
@@ -34,7 +34,7 @@ back to EFForg/rayhunter.
 |---|---|---|---|
 | Orbic Speed RC400L (Verizon), Qualcomm MDM9207 | `ORB400L_V1.2.0_BVZRT` | v0.13.0 | in development |
 
-Other firmware builds and other Rayhunter-supported devices are out of scope until v1.0.0.
+Other firmware builds and other Rayhunter-supported devices are out of scope for the v1.x baseline.
 
 ## What the research established
 

@@ -235,7 +235,9 @@ orx uninstall --dir <backup-dir>           # T-OR-039 (v0.8.0): DRY RUN
 orx uninstall --dir <backup-dir> --apply   # execute
 ```
 
-`orx uninstall` needs the root shell on TCP 24, which is **not reboot-persistent** on this unit, so it is absent after an install reboot -- re-establish it first (the Phase 1 method). `orx uninstall` is **dry-run by default** and **backup-gated** like install. With `--apply` it
+`orx uninstall` needs the root shell on TCP 24, which is **not reboot-persistent** on this unit, so
+it is absent after an install reboot -- re-establish it first (the Phase 1 method). `orx uninstall`
+is **dry-run by default** and **backup-gated** like install. With `--apply` it
 restores the **true stock** `/etc/init.d/misc-daemon` -- extracted from the verified backup's
 `root.tar` (piped to `tar -xO -f -`), NOT copied from the device, because the device may already carry the
 hooked script -- atomically (`<path>.orx-new` -> `chmod 755` -> `mv`), then removes
