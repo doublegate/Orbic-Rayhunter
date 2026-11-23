@@ -70,18 +70,33 @@ fn parse_hex_u16(s: &str) -> Option<u16> {
     u16::from_str_radix(s.trim(), 16).ok()
 }
 
+/// The serial embedded in a product string such as `MDM9207-MTP _SN:0123ABCD`.
+///
+/// The RC400L (V1.2.0) exposes no `serial` sysfs attribute in normal mode and
+/// carries the serial here instead. Only a plain ASCII alphanumeric token of
+/// 1..=64 characters is accepted, so arbitrary product text is never reported
+/// as a serial.
+pub fn serial_from_product(product: &str) -> Option<String> {
+    let tail = product.rsplit_once("_SN:")?.1.trim();
+    (!tail.is_empty() && tail.len() <= 64 && tail.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| tail.to_string())
+}
+
 /// Read one sysfs USB device directory. Returns `None` for interfaces,
 /// hubs without IDs, or non-Qualcomm devices.
 pub fn read_device(dir: &Path) -> Option<QualcommDevice> {
     let vid = parse_hex_u16(&read_attr(dir, "idVendor")?)?;
     let pid = parse_hex_u16(&read_attr(dir, "idProduct")?)?;
     let mode = OrbicMode::classify(vid, pid)?;
+    let product = read_attr(dir, "product");
+    let serial =
+        read_attr(dir, "serial").or_else(|| product.as_deref().and_then(serial_from_product));
     Some(QualcommDevice {
         sysfs_name: dir.file_name()?.to_string_lossy().into_owned(),
         vid,
         pid,
-        product: read_attr(dir, "product"),
-        serial: read_attr(dir, "serial"),
+        product,
+        serial,
         mode,
     })
 }
@@ -158,6 +173,59 @@ mod tests {
         assert_eq!(d.sysfs_name, "1-4");
         assert_eq!(d.mode, OrbicMode::Normal);
         assert_eq!(d.serial.as_deref(), Some("0000TEST"));
+    }
+
+    #[test]
+    fn serial_falls_back_to_the_product_string() {
+        // The RC400L (V1.2.0) exposes no `serial` attribute in normal mode; the
+        // serial is embedded in the product string instead (measured 2026-11-23).
+        let t = TempDir::new("sn");
+        fake_dev(
+            &t.0,
+            "1-1",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "f626"),
+                ("product", "MDM9207-MTP _SN:0000TEST"),
+            ],
+        );
+        fake_dev(
+            &t.0,
+            "1-2",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "f601"),
+                ("product", "MDM9207-MTP"),
+            ],
+        );
+        fake_dev(
+            &t.0,
+            "1-3",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "9008"),
+                ("product", "MDM9207-MTP _SN:not a serial!"),
+            ],
+        );
+        let found = scan(&t.0).unwrap();
+        assert_eq!(found[0].serial.as_deref(), Some("0000TEST"));
+        assert_eq!(found[1].serial, None);
+        assert_eq!(found[2].serial, None);
+    }
+
+    #[test]
+    fn serial_from_product_takes_only_a_plain_token() {
+        assert_eq!(
+            serial_from_product("X _SN:F00D1234"),
+            Some("F00D1234".into())
+        );
+        assert_eq!(serial_from_product("X _SN:"), None);
+        assert_eq!(serial_from_product("X"), None);
+        assert_eq!(serial_from_product("X _SN:ab/cd"), None);
+        assert_eq!(
+            serial_from_product(&format!("X _SN:{}", "A".repeat(65))),
+            None
+        );
     }
 
     #[test]

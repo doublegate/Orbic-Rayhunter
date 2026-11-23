@@ -83,6 +83,7 @@ partition before anything is written. Block OTA updates and settle the 0x11EB pr
 | T-OR-018 | Identify the FOTA/OTA client and block it before an active SIM is inserted | device | open |
 | T-OR-019 | 0x11EB check: does user IP traffic land in QMDL on this unit | device | open |
 | T-OR-020 | Firmware RE triage: `goahead` endpoints, FOTA client, stock vs upstream `misc-daemon` diff | doc | open |
+| T-OR-106 | `orx doctor` reads the USB serial from the product string (`_SN:`) when sysfs has no `serial` attribute, as on the RC400L in normal mode (found in T-OR-012) | host | done |
 
 Exit criteria: backup manifest with SHA-256 per image matching on host and device, two
 consecutive passes compared, encrypted copy verified on separate media; OTA block in place and
