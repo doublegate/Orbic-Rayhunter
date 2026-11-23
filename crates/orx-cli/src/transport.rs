@@ -176,8 +176,11 @@ impl TcpShell {
                 Ok(0) => return Ok(raw),
                 Ok(n) => {
                     raw.extend_from_slice(&buf[..n]);
-                    if find_sub(&raw, marker.as_bytes()).is_some() || raw.len() > MAX {
+                    if find_sub(&raw, marker.as_bytes()).is_some() {
                         return Ok(raw);
+                    }
+                    if raw.len() > MAX {
+                        return Err("read: output exceeded 64 MiB cap before marker".to_string());
                     }
                 }
                 // A read timeout means the deadline was reached without the marker.

@@ -83,7 +83,10 @@ jobs:
         # release is therefore comprehensive without hand-assembly.
         run: |
           ver="${TAG#v}"
-          awk -v v="$ver" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > body.md
+          # Literal match (index), not a regex: a version like 0.6.0 has dots
+          # that would otherwise match any character, and a build-metadata `+`
+          # would be a regex metacharacter.
+          awk -v v="$ver" 'index($0, "## [" v "]") == 1 {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > body.md
           test -s body.md || echo "See CHANGELOG.md for details." > body.md
           upstream_tag=$(git -C upstream describe --tags --always 2>/dev/null || echo unknown)
           upstream_sha=$(git -C upstream rev-parse --short HEAD 2>/dev/null || echo unknown)

@@ -1,8 +1,34 @@
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- (nothing yet)
+Address all eight findings from an adversarial `agy` (Antigravity) review of the v0.1.0-v0.6.0
+changes that were pushed straight to `main` without a PR review:
+
+- **Backup write-gate now verifies the archive, not just the manifest text** (`orbic-ota-block.py`
+  `_backup_gate`): the `root.tar` beside the manifest must exist, clear the 1 KiB floor, and match
+  the `size=`/`sha256=` the manifest records; tokens are parsed by key so both the Python and Rust
+  manifest layouts are accepted. A stale, hand-edited, or deleted archive no longer passes.
+- **`orx backup` emits a gate-compatible `ok-live`** (was `ok-live (tar exit N)`, whose trailing
+  text made every live-rootfs manifest fail the gate's last-token check).
+- **A failed `orx backup` no longer leaves a gate-passable `MANIFEST.txt`**: on a target failure it
+  removes any stale `MANIFEST.txt` and writes `MANIFEST.incomplete.txt`, so a partial backup cannot
+  unlock device writes.
+- **`orbic-ota-block.py --apply` always persists the undo manifest**, even on a mid-loop failure
+  (the device is never mutated without an undo record), refuses to overwrite an existing
+  `.orx-disabled` saved binary, and `--undo` refuses to clobber a binary already present at the
+  original path and warns on a restored-hash mismatch.
+- **`backup::unescape` no longer corrupts non-ASCII mountpoints** (decodes bytes once via
+  `from_utf8_lossy` instead of casting each UTF-8 byte to `char`; octal predicate is `0-7`).
+- **`scripts/build.sh firmware` cleans up its multi-GB temp target dir** on exit (the container
+  chowns it back to the host user so the trap can remove it).
+- **`release.yml` matches the CHANGELOG header literally** (`index()`), not as a regex whose dots
+  and `+` could match unintended versions.
+- **`probe::json_str_field` matches a key, not a same-named value**, and refuses `\uXXXX` rather
+  than emitting a bogus literal; **`transport` `read_until` errors on the 64 MiB cap** instead of
+  returning a misleading "no marker".
+
+All fixes carry unit tests (34 orx-cli tests + the Python gate self-test); every gate green.
 
 ## [0.6.0] - 2026-11-23
 

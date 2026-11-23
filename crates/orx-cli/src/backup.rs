@@ -22,28 +22,34 @@ pub struct Mount {
 }
 
 /// Decode the octal escapes `/proc/mounts` uses for spaces etc. (`\040`).
+///
+/// Works at the byte level and decodes once at the end, so a multi-byte UTF-8
+/// mountpoint survives (casting each UTF-8 byte to `char` would corrupt it into
+/// Latin-1). Only a `\` followed by three `0-7` octal digits is an escape.
 fn unescape(field: &str) -> String {
     let bytes = field.as_bytes();
-    let mut out = String::new();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         let octal = bytes[i] == b'\\'
             && i + 3 < bytes.len()
-            && bytes[i + 1..i + 4].iter().all(u8::is_ascii_digit);
+            && bytes[i + 1..i + 4]
+                .iter()
+                .all(|b| (b'0'..=b'7').contains(b));
         let decoded = if octal {
             u8::from_str_radix(&field[i + 1..i + 4], 8).ok()
         } else {
             None
         };
         if let Some(code) = decoded {
-            out.push(code as char);
+            out.push(code);
             i += 4;
         } else {
-            out.push(bytes[i] as char);
+            out.push(bytes[i]);
             i += 1;
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Parse `/proc/mounts`, last mount of a given mountpoint winning (overlays).
@@ -223,7 +229,11 @@ pub fn classify(
     }
     match status {
         0 => Ok("ok".to_string()),
-        s if writable && allow_live => Ok(format!("ok-live (tar exit {s})")),
+        // The state word MUST stay exactly `ok-live` (no trailing text): the
+        // write-gate in orbic-ota-block.py and `orx verify` match the last token
+        // against {ok, ok-live}. The tar exit code is reported to the operator by
+        // the caller, not embedded in the manifest.
+        _ if writable && allow_live => Ok("ok-live".to_string()),
         s => Err(format!(
             "tar exited {s}; rerun with --allow-live for a writable filesystem"
         )),
@@ -322,7 +332,8 @@ ubi1:data /data ubifs ro,remount 0 0";
         let big = 4096;
         assert_eq!(classify(0, big, true, false).unwrap(), "ok");
         assert!(classify(1, big, true, false).is_err());
-        assert!(classify(1, big, true, true).unwrap().starts_with("ok-live"));
+        // ok-live must be exactly the gate token, no trailing text.
+        assert_eq!(classify(1, big, true, true).unwrap(), "ok-live");
         assert!(classify(2, big, false, true).is_err()); // not writable -> no live allowance
         // Size floor: a tiny "archive" (e.g. a tar usage error) always fails.
         assert!(

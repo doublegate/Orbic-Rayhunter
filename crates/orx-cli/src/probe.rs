@@ -86,24 +86,38 @@ pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> Result<Strin
 /// trusted local response, not a general JSON decoder.
 pub fn json_str_field(body: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
-    let after = &body[body.find(&needle)? + needle.len()..];
-    let after = after.trim_start();
-    let after = after.strip_prefix(':')?.trim_start();
-    let mut chars = after.strip_prefix('"')?.chars();
-    let mut out = String::new();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => return Some(out),
-            '\\' => match chars.next()? {
-                'n' => out.push('\n'),
-                't' => out.push('\t'),
-                'r' => out.push('\r'),
-                other => out.push(other), // covers \" \\ \/ and the rest
-            },
-            other => out.push(other),
+    // Find an occurrence of `"key"` that is actually a KEY -- i.e. followed by
+    // optional whitespace and `:` -- not a string value that merely equals the
+    // key text. Try each occurrence until one qualifies.
+    for (pos, _) in body.match_indices(&needle) {
+        let after = body[pos + needle.len()..].trim_start();
+        let Some(after) = after.strip_prefix(':') else {
+            continue;
+        };
+        let after = after.trim_start();
+        let Some(after) = after.strip_prefix('"') else {
+            continue; // value is not a string (number/null/object)
+        };
+        let mut chars = after.chars();
+        let mut out = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => match chars.next()? {
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'r' => out.push('\r'),
+                    // A \uXXXX escape is not decoded; refuse rather than emit a
+                    // bogus literal `uXXXX`.
+                    'u' => return None,
+                    other => out.push(other), // \" \\ \/ \b \f and the rest
+                },
+                other => out.push(other),
+            }
         }
+        return None; // unterminated string
     }
-    None // unterminated string
+    None
 }
 
 #[cfg(test)]
@@ -161,6 +175,21 @@ mod tests {
                 .unwrap_err()
                 .contains("404")
         );
+    }
+
+    #[test]
+    fn json_str_field_matches_key_not_value_and_rejects_unicode_escape() {
+        // A value equal to the key text must not be mistaken for the key.
+        assert_eq!(
+            json_str_field(
+                "{\"x\":\"rayhunter_version\",\"rayhunter_version\":\"0.13.0\"}",
+                "rayhunter_version"
+            )
+            .as_deref(),
+            Some("0.13.0")
+        );
+        // \uXXXX is refused rather than decoded to a bogus literal.
+        assert_eq!(json_str_field("{\"a\":\"\\u0041\"}", "a"), None);
     }
 
     #[test]

@@ -122,10 +122,27 @@ fn cmd_backup(ip: &str, out_dir: &Path, allow_live: bool) -> ExitCode {
         }
     }
 
-    let manifest = out_dir.join("MANIFEST.txt");
+    // A partial backup must NOT leave a gate-passable MANIFEST.txt: the write
+    // gates only look for a `/` ok line, so a manifest from a run where another
+    // filesystem failed would still unlock device writes. On failure, remove any
+    // stale MANIFEST.txt and write MANIFEST.incomplete.txt instead.
+    let manifest = if failed {
+        let stale = out_dir.join("MANIFEST.txt");
+        if stale.exists() {
+            let _ = fs::remove_file(&stale);
+        }
+        out_dir.join("MANIFEST.incomplete.txt")
+    } else {
+        out_dir.join("MANIFEST.txt")
+    };
     let body = format!(
-        "# orx backup {}\n# <mountpoint> <fstype> size=<bytes> sha256=<hex> <state>\n{}\n",
+        "# orx backup {}{}\n# <mountpoint> <fstype> size=<bytes> sha256=<hex> <state>\n{}\n",
         ip,
+        if failed {
+            " (INCOMPLETE: a target failed)"
+        } else {
+            ""
+        },
         lines.join("\n")
     );
     match open_tmp(&manifest) {
@@ -145,6 +162,7 @@ fn cmd_backup(ip: &str, out_dir: &Path, allow_live: bool) -> ExitCode {
     }
     println!("manifest: {}", manifest.display());
     if failed {
+        eprintln!("backup INCOMPLETE: a target failed; no gate-passable MANIFEST.txt written");
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

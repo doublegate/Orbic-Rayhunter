@@ -49,10 +49,19 @@ case "$profile" in
         # the digest deliberately and record it; see re/notes/reproducible-build.md.
         image="${ORX_MUSL_CROSS_IMAGE:-messense/rust-musl-cross:armv7-musleabihf@sha256:dd494898259cf6981f9832bfd4437ddfc8393605164b3c242e4efe8a6bc30dfb}"
         tgt="$(mktemp -d "${TMPDIR:-/tmp}/orx-firmware.XXXXXX")"
+        # The target dir holds a multi-GB cross-compile tree; always remove it on
+        # exit. The container runs as root, so it chowns /target back to the host
+        # user as its last step, otherwise this rm could not delete it.
+        trap 'rm -rf "$tgt" 2>/dev/null || true' EXIT
+        # HOST_UID/HOST_GID are passed into the container with -e and expand in
+        # the container's shell (the final chown returns /target to the host user
+        # so the trap can delete it), not in this single-quoted host string.
+        # shellcheck disable=SC2016
         "$engine" run --rm \
-            -v "$tree":/work -v "$tgt":/target -e CARGO_TARGET_DIR=/target -w /work \
+            -v "$tree":/work -v "$tgt":/target -e CARGO_TARGET_DIR=/target \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -w /work \
             "$image" \
-            bash -lc 'rustup target add armv7-unknown-linux-musleabihf >/dev/null 2>&1; cargo build-daemon-firmware && cargo build-rootshell-firmware'
+            bash -lc 'rustup target add armv7-unknown-linux-musleabihf >/dev/null 2>&1; cargo build-daemon-firmware && cargo build-rootshell-firmware && chown -R "$HOST_UID:$HOST_GID" /target'
         out="$tgt/$target/firmware"
         cp "$out/rayhunter-daemon" "$out/rootshell" "$root/dist/"
         ;;

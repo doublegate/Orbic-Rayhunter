@@ -26,6 +26,7 @@ Prerequisite: the root shell must be open on TCP 24 (BACKUP-AND-RECOVERY.md step
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import secrets
@@ -114,50 +115,97 @@ def status(sock_factory, ip: str, port: int) -> list[dict]:
 
 
 def _backup_gate(manifest: Path) -> None:
-    """Refuse to write unless a verified backup of rootfs (/) exists: /usr/bin lives
-    on `/`, so a rootfs restore is the recovery path for a bad rename."""
+    """Refuse to write unless a VERIFIED backup of rootfs (/) exists: /usr/bin lives
+    on `/`, so a rootfs restore is the recovery path for a bad rename. It is not
+    enough that the manifest says `ok` -- the `root.tar` beside it must exist and
+    match the size and SHA-256 the manifest records (a manifest can be stale, hand
+    edited, or point at a deleted/truncated archive). Tokens are parsed by key, so
+    both the Python (`size= entries= sha256=`) and Rust (`size= sha256=`) manifest
+    layouts are accepted."""
     if not manifest.is_file():
-        raise SystemExit(
-            f"backup manifest not found: {manifest} (run orbic-backup.py first)"
-        )
-    root_ok = False
+        raise SystemExit(f"backup manifest not found: {manifest} (run a backup first)")
+    root = None
     for ln in manifest.read_text(encoding="utf-8").splitlines():
+        if ln.startswith("#"):
+            continue
         f = ln.split()
-        if len(f) >= 2 and f[0] == "/" and ln.rstrip().endswith(("ok", "ok-live")):
-            root_ok = True
-    if not root_ok:
+        if len(f) >= 3 and f[0] == "/":
+            root = f
+    if root is None:
+        raise SystemExit(f"{manifest} has no rootfs '/' entry; refusing to write")
+    state = root[-1]
+    if state not in ("ok", "ok-live"):
         raise SystemExit(
-            f"{manifest} does not show rootfs '/' as ok/ok-live; refusing to write"
+            f"{manifest}: rootfs '/' state is {state!r}, not ok/ok-live; refusing to write"
         )
+    toks = dict(t.split("=", 1) for t in root if "=" in t)
+    tar = manifest.parent / "root.tar"
+    if not tar.is_file():
+        raise SystemExit(
+            f"{tar} is missing; the manifest is not backed by a rootfs archive"
+        )
+    size = tar.stat().st_size
+    if size < 1024:
+        raise SystemExit(f"{tar} is only {size} bytes; not a valid archive")
+    if "size" in toks and toks["size"] != str(size):
+        raise SystemExit(
+            f"{tar} size {size} != manifest {toks['size']}; refusing to write"
+        )
+    if "sha256" in toks:
+        h = hashlib.sha256()
+        with open(tar, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        if h.hexdigest() != toks["sha256"]:
+            raise SystemExit(
+                f"{tar} SHA-256 does not match the manifest; refusing to write"
+            )
 
 
 def apply_block(sock_factory, ip: str, port: int, out_dir: Path) -> int:
     undo: list[dict] = []
-    for t in TARGETS:
-        assert _SAFE_TARGET.match(t)  # fixed list; defense in depth
-        if not _exists(sock_factory, ip, port, t):
-            print(f"  skip   {t} (already absent or disabled)")
-            continue
-        sha = _device_sha(sock_factory, ip, port, t)
-        out, st = run(sock_factory, ip, port, f"mv {t} {t}{SUFFIX}")
-        if (
-            st != 0
-            or _exists(sock_factory, ip, port, t)
-            or not _exists(sock_factory, ip, port, t + SUFFIX)
-        ):
-            print(f"  FAIL   {t}: rename did not take (status {st}): {out}")
-            return 1
-        undo.append({"path": t, "disabled": t + SUFFIX, "sha256": sha})
-        print(f"  disabled  {t} -> {t}{SUFFIX}  sha256={(sha or '?')[:16]}")
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    rec = {"action": "ota-block", "ts": ts, "targets": undo}
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = out_dir / f"ota-block-{ts}.json"
-    manifest.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
-    print(
-        f"\nAUDIT ota-block {ts}: disabled {len(undo)} updater binary(ies); undo manifest {manifest}"
-    )
-    return 0
+
+    def _persist_undo() -> None:
+        # Always record what WAS disabled -- even on a partial failure -- so the
+        # device is never mutated without an undo manifest for --undo.
+        if not undo:
+            return
+        rec = {"action": "ota-block", "ts": ts, "targets": undo}
+        manifest.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+        print(
+            f"\nAUDIT ota-block {ts}: disabled {len(undo)} updater binary(ies); undo manifest {manifest}"
+        )
+
+    try:
+        for t in TARGETS:
+            assert _SAFE_TARGET.match(t)  # fixed list; defense in depth
+            if not _exists(sock_factory, ip, port, t):
+                print(f"  skip   {t} (already absent or disabled)")
+                continue
+            # Never overwrite an existing saved binary: if <t>.orx-disabled is
+            # already present, a prior block's original would be clobbered.
+            if _exists(sock_factory, ip, port, t + SUFFIX):
+                print(
+                    f"  FAIL   {t}: {t}{SUFFIX} already exists; refusing to overwrite the saved binary"
+                )
+                return 1
+            sha = _device_sha(sock_factory, ip, port, t)
+            out, st = run(sock_factory, ip, port, f"mv {t} {t}{SUFFIX}")
+            if (
+                st != 0
+                or _exists(sock_factory, ip, port, t)
+                or not _exists(sock_factory, ip, port, t + SUFFIX)
+            ):
+                print(f"  FAIL   {t}: rename did not take (status {st}): {out}")
+                return 1
+            undo.append({"path": t, "disabled": t + SUFFIX, "sha256": sha})
+            print(f"  disabled  {t} -> {t}{SUFFIX}  sha256={(sha or '?')[:16]}")
+        return 0
+    finally:
+        _persist_undo()
 
 
 def undo_block(sock_factory, ip: str, port: int, manifest: Path) -> int:
@@ -170,10 +218,22 @@ def undo_block(sock_factory, ip: str, port: int, manifest: Path) -> int:
         if not _exists(sock_factory, ip, port, disabled):
             print(f"  skip   {disabled} (not present)")
             continue
+        # Refuse to clobber a binary that is unexpectedly present at the original
+        # path -- restoring over it would destroy whatever is there.
+        if _exists(sock_factory, ip, port, path):
+            print(f"  FAIL   {path}: already present; refusing to overwrite on restore")
+            return 1
         _out, st = run(sock_factory, ip, port, f"mv {disabled} {path}")
         if st != 0 or not _exists(sock_factory, ip, port, path):
             print(f"  FAIL   {path}: restore did not take (status {st})")
             return 1
+        want = e.get("sha256")
+        if want:
+            got = _device_sha(sock_factory, ip, port, path)
+            if got != want:
+                print(
+                    f"  WARN   {path}: restored SHA-256 {(got or '?')[:16]} != recorded {want[:16]}"
+                )
         print(f"  restored  {disabled} -> {path}")
     print(f"\nAUDIT ota-unblock: restored from {manifest}")
     return 0
@@ -195,25 +255,48 @@ def selftest() -> int:
         if _SAFE_TARGET.match(bad_t):
             print(f"  FAIL unsafe target accepted: {bad_t}")
             bad += 1
-    # backup gate: a manifest without rootfs ok must raise
+    # backup gate: verifies the rootfs archive, not just the manifest text.
     import tempfile
 
+    payload = b"x" * 4096  # >= the 1 KiB floor
+    good_sha = hashlib.sha256(payload).hexdigest()
+
+    def _gate_raises(m: Path) -> bool:
+        try:
+            _backup_gate(m)
+            return False
+        except SystemExit:
+            return True
+
     with tempfile.TemporaryDirectory() as d:
-        m = Path(d) / "MANIFEST.txt"
-        m.write_text(
-            "# h\n/data ubifs size=1 entries=1 sha256=x ok-live\n", encoding="utf-8"
-        )
-        try:
-            _backup_gate(m)
-            print("  FAIL gate passed without rootfs")
+        dp = Path(d)
+        m = dp / "MANIFEST.txt"
+        # (1) no rootfs line -> raise
+        m.write_text("# h\n/data ubifs size=1 sha256=x ok-live\n", encoding="utf-8")
+        if not _gate_raises(m):
+            print("  FAIL gate passed without a rootfs line")
             bad += 1
-        except SystemExit:
-            pass
-        m.write_text("# h\n/ ubifs size=1 entries=1 sha256=x ok\n", encoding="utf-8")
-        try:
-            _backup_gate(m)
-        except SystemExit:
-            print("  FAIL gate rejected a valid rootfs manifest")
+        # (2) rootfs ok but no root.tar beside it -> raise
+        m.write_text(f"# h\n/ ubifs size=4096 sha256={good_sha} ok\n", encoding="utf-8")
+        if not _gate_raises(m):
+            print("  FAIL gate passed with no root.tar")
+            bad += 1
+        # (3) root.tar present but hash mismatch -> raise
+        (dp / "root.tar").write_bytes(b"y" * 4096)
+        if not _gate_raises(m):
+            print("  FAIL gate passed with a mismatched root.tar")
+            bad += 1
+        # (4) root.tar present and size+hash match -> pass (both ok and ok-live)
+        (dp / "root.tar").write_bytes(payload)
+        if _gate_raises(m):
+            print("  FAIL gate rejected a verified rootfs backup")
+            bad += 1
+        m.write_text(
+            f"# h\n/ rootfs size=4096 entries=3 sha256={good_sha} ok-live\n",
+            encoding="utf-8",
+        )
+        if _gate_raises(m):
+            print("  FAIL gate rejected a verified ok-live rootfs backup")
             bad += 1
 
     # run() must reassemble the marker + status even when TCP splits them: a fake
