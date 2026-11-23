@@ -17,10 +17,17 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
   password is read from a mode-600 file, never argv, and identifier fields are length-redacted
   on stdout.
 - `scripts/orbic-shell.py`: drives the upstream root shell (busybox `nc` on TCP 24) one command
-  at a time with per-command markers and exit status. It is read-only by policy -- a first-word
-  command classifier plus redirection/writer-form checks refuse anything that could modify the
-  device, so no recon run can write flash before the Sprint 1.3 backup. `scripts/recon/` holds
+  at a time with per-command markers and exit status. It is read-only by policy -- a fail-closed
+  allowlist of read commands (quote-aware, first-word) plus redirection/writer-form checks refuse
+  anything not a known reader, so no recon run can write flash before the Sprint 1.3 backup; there
+  is no write-enable override. `scripts/recon/` holds
   the inventory command lists.
+- `scripts/orbic-backup.py`: streams every NAND partition off the device with `nanddump` over
+  one persistent root-shell connection (sequential, marker-framed) and verifies each with a
+  two-pass SHA-256 and a size check against `/proc/mtd`. One connection by design: a
+  per-partition-connection version could leave a timed-out `nanddump` running, and several on
+  one NAND wedged the read path. It is the Sprint 1.3 backup tool (T-OR-015); the full capture
+  run is tracked separately.
 - Phase 1 Sprint 1.2 on-device recon (T-OR-013/T-OR-014) recorded in docs/DEVICE-PROFILE.md:
   kernel 3.18.48 and command line, the 17-partition MTD table and UBI layout, mounts and free
   space, the available backup tools (`nanddump`, `nandwrite`, `flash_erase`, `ubinfo`,

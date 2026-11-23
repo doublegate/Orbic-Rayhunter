@@ -132,6 +132,32 @@ def selftest() -> int:
         )
     for name in REFUSED:
         assert name not in READ_ENDPOINTS, name
+    # Redaction: known-sensitive keys, and identifier-shaped values in ANY field,
+    # are masked; ordinary status/version fields stay visible.
+    red = safe_view(
+        {
+            "imei": "490154203237518",
+            "softwareVersion": "ORB400L_V1.2.0_BVZRT",
+            "retcode": 0,
+            "note": "357812340123456",  # identifier shape, innocuous key
+            "lanMac": "02:00:00:00:00:01",
+            "deviceName": "RC400L",
+        }
+    )
+    assert isinstance(red, dict)
+    checks = [
+        red["imei"].startswith("<redacted"),
+        red["note"].startswith("<redacted"),
+        red["lanMac"].startswith("<redacted"),
+        red["softwareVersion"] == "ORB400L_V1.2.0_BVZRT",
+        red["retcode"] == 0,
+        red["deviceName"] == "RC400L",
+    ]
+    if not all(checks):
+        print(f"  FAIL  safe_view redaction: {red}")
+        bad += 1
+    else:
+        print("  ok    redaction masks identifiers (key denylist + value shape)")
     print(
         "all vectors match upstream"
         if not bad
@@ -184,8 +210,10 @@ class Session:
             raise SystemExit(
                 f"GetLoginInfo failed (HTTP {status}, retcode {info.get('retcode')})"
             )
+        if not isinstance(info, dict):
+            raise SystemExit("GetLoginInfo did not return a JSON object")
         parts = str(info.get("priKey", "")).split("x")
-        if len(parts) != 2:
+        if len(parts) != 2 or not all(re.fullmatch(r"[0-9A-Fa-f]+", p) for p in parts):
             raise SystemExit("GetLoginInfo returned an unexpected priKey format")
         secret, timestamp = parts
         start = int(time.time())
@@ -210,13 +238,31 @@ class Session:
         self.request("POST", "/action/logout", b"{}")
 
 
+# A value that LOOKS like a device identifier, redacted even when its key name is
+# not on the denylist (so an identifier in an unexpected field cannot leak): a
+# long digit run (IMEI/ICCID/MDN/MEID), a MAC, or a long hex/token string.
+IDENTIFIER_VALUE = re.compile(
+    r"^\s*(\d{10,}|([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|[0-9A-Za-z+/_-]{20,})\s*$"
+)
+
+
+def _is_sensitive(key: str, value: object) -> bool:
+    if value in ("", None):
+        return False
+    if SENSITIVE.search(key):
+        return True
+    return isinstance(value, str) and IDENTIFIER_VALUE.match(value) is not None
+
+
 def safe_view(obj: object) -> object:
-    """Field names kept; identifier and secret values replaced by their length."""
+    """Field names kept; a value is replaced by its length when its KEY is
+    sensitive or its VALUE looks like an identifier -- a denylist of key names
+    plus a value-shape backstop, so an identifier in an unknown field is caught."""
     if isinstance(obj, dict):
         return {
             k: (
                 f"<redacted, {len(str(v))} chars>"
-                if SENSITIVE.search(k) and v not in ("", None)
+                if _is_sensitive(k, v)
                 else safe_view(v)
             )
             for k, v in obj.items()

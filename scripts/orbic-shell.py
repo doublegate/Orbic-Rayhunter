@@ -29,85 +29,146 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import socket
 import sys
 import uuid
 from pathlib import Path
 
 # A command is refused if it matches any of these: this shell is for reading the
-# device, never writing it. The backup (Sprint 1.3) must precede any write. A
-# command is classified by its FIRST word (the program invoked) in each simple
-# command, so a writer name that only appears as an argument -- `cat /etc/passwd`,
-# `grep fota`, `ps w | grep ubiupdatevol` -- is not mistaken for the writer.
-WRITER_COMMANDS = {
-    "tee",
-    "nandwrite",
-    "flash_erase",
-    "flash_eraseall",
-    "ubiupdatevol",
-    "ubiformat",
-    "ubirsvol",
-    "ubirmvol",
-    "ubimkvol",
-    "mkfs",
-    "rm",
-    "rmdir",
-    "mv",
-    "cp",
-    "ln",
-    "touch",
-    "mknod",
-    "chmod",
-    "chown",
-    "chgrp",
-    "truncate",
-    "ddirectio",
-    "reboot",
-    "shutdown",
-    "halt",
-    "poweroff",
-    "kill",
-    "killall",
-    "pkill",
-    "passwd",
-    "setprop",
-    "telnetd",
-    "sshd",
+# device, never writing it. The backup (Sprint 1.3) must precede any write.
+#
+# The model is an ALLOWLIST that FAILS CLOSED: every simple command's program
+# must be a known pure reader, or the whole command is refused. A denylist of
+# writers would fail open -- an unlisted writer (`ubidetach`, `fw_setenv`,
+# `insmod`, a device-specific tool) would slip through. Classification is by the
+# FIRST word of each simple command, so a reader name that appears only as an
+# argument (`grep nandwrite`, `cat /etc/passwd`) is judged on the real program.
+READ_COMMANDS = {
+    "cat",
+    "ls",
+    "ps",
+    "df",
+    "free",
+    "mount",
+    "mountpoint",
+    "uname",
+    "hostname",
+    "head",
+    "tail",
+    "grep",
+    "egrep",
+    "fgrep",
+    "awk",
+    "nawk",
+    "gawk",
+    "sed",
+    "wc",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "cksum",
+    "cmp",
+    "diff",
+    "nanddump",
+    "dd",
+    "ubinfo",
+    "dmesg",
+    "netstat",
+    "ss",
+    "lsof",
+    "lsmod",
+    "id",
+    "whoami",
+    "groups",
+    "which",
+    "type",
+    "command",
+    "find",
+    "stat",
+    "readlink",
+    "realpath",
+    "file",
+    "od",
+    "hexdump",
+    "xxd",
+    "strings",
+    "env",
+    "printenv",
+    "getprop",
+    "echo",
+    "printf",
+    "test",
+    "true",
+    "false",
+    "date",
+    "basename",
+    "dirname",
+    "cut",
+    "sort",
+    "uniq",
+    "tr",
+    "du",
+    "pwd",
+    "tty",
+    "pgrep",
+    "busybox",
+    "expr",
+    "seq",
 }
-# `sed`, `busybox`, `dd` and `mount` are writers only in specific forms (a bare
-# `sed -n`, `mount` with no args, `dd ... | cat` are reads), so they are matched
-# by form here rather than by command name above.
+# Dual-use readers that become writers in a specific FORM; refused when they do.
 WRITER_SUBFORMS = re.compile(
-    r"\bsed\b[^|;&]*\s-i|"
-    r"\bbusybox\s+(nc|dd|nandwrite|flash_erase|rm|mv|cp|ln|touch|chmod|chown|mkfs|ubi\w+)\b|"
-    r"\bdd\b[^|;&]*\bof=|"
-    r"\bmount\b[^|;&]*\b(remount|[\s,]rw\b)|"
-    r"\bmount\b\s+(-o\s+)?\brw\b"
+    r"\bsed\b[^|;&]*\s-i|"  # sed -i (in-place)
+    r"\bdd\b[^|;&]*\bof=|"  # dd of=<file>
+    r"\bfind\b[^|;&]*\s-(delete|exec|execdir|fprint|fls|fprintf)\b|"  # find writers
+    r"\bdmesg\b[^|;&]*\s-(c|C|-clear|-read-clear)\b|"  # dmesg clears the ring buffer
+    r"\bsort\b[^|;&]*\s-o\b|"  # sort -o <file>
+    r"\bmount\b[^|;&]*\b(remount|[\s,]rw\b)|\bmount\b\s+(-o\s+)?\brw\b|"  # remount rw
+    r"\bbusybox\s+(nc|nandwrite|flash_erase\w*|ubi\w+|rm|rmdir|mv|cp|ln|touch|"
+    r"mknod|chmod|chown|chgrp|mkfs\w*|dd|tee|reboot|halt|poweroff|kill\w*|"
+    r"setprop|passwd|truncate|install|insmod|rmmod|fw_setenv)\b"
 )
 # Any redirection to a path other than /dev/null (so `2>/dev/null`, `2>&1` are fine).
 REDIRECT_TO_FILE = re.compile(r"(?<![0-9&])>>?\s*(?!&|/dev/null\b)")
 
 
+_ASSIGN_OR_WRAP = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*=|exec$|env$|nice$|time$)")
+
+
 def _first_words(command: str) -> list[str]:
-    """The leading program of each simple command, split on shell operators."""
-    simples = re.split(r"\||;|&&|\|\||\n|(?<!\d)&(?!&)", command)
-    words = []
-    for s in simples:
-        s = s.strip()
-        # skip a leading `exec`, a var assignment, or `env NAME=val`
-        s = re.sub(
-            r"^(exec\s+|env\s+|[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+", "", s
-        ).strip()
-        tok = s.split()
-        if tok:
-            words.append(tok[0].rsplit("/", 1)[-1])
+    """The leading program of each simple command. Tokenised with shlex so that a
+    pipe/semicolon INSIDE quotes (`grep 'a|b'`) is an argument, not an operator;
+    a lexing error (unbalanced quotes, exotic syntax) fails closed as []."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    words: list[str] = []
+    expect_command = True
+    for tok in tokens:
+        if tok in ("|", "||", "&&", ";", "&", "|&", ";;", "\n"):
+            expect_command = True
+            continue
+        if not expect_command:
+            continue
+        # skip leading wrappers and VAR=val assignments, then take the program
+        if _ASSIGN_OR_WRAP.match(tok):
+            continue
+        words.append(tok.rsplit("/", 1)[-1])
+        expect_command = False
     return words
 
 
 def is_read_only(command: str) -> bool:
+    """True only when every simple command is a known reader in a read form.
+    Fails closed: an unknown program, an unparseable fragment, a writer subform,
+    or a redirection to a file all return False."""
     if REDIRECT_TO_FILE.search(command) or WRITER_SUBFORMS.search(command):
         return False
-    return not any(w in WRITER_COMMANDS for w in _first_words(command))
+    words = _first_words(command)
+    return bool(words) and all(w in READ_COMMANDS for w in words)
 
 
 def run_one(
@@ -173,6 +234,16 @@ def selftest() -> int:
         "busybox nc -ll -p 23 -e /bin/sh",
         "mount -o remount,rw /",
         "echo hi >> /etc/passwd",
+        # writers an older denylist would have missed (fail-closed allowlist catches them):
+        "ubidetach -p /dev/mtd16",
+        "fw_setenv bootcmd x",
+        "insmod /lib/x.ko",
+        "ubiupdatevol /dev/ubi0_0 img",
+        "install -m0755 x /bin/y",
+        "find / -name x -delete",
+        "dmesg -c",
+        "cat /proc/mtd; nandwrite /dev/mtd0 x",  # a writer hiding after a reader
+        "&& rm -rf /",  # operator-only / unparseable fragment
     ]
     for c in reads:
         if not is_read_only(c):
@@ -201,7 +272,6 @@ def main(argv: list[str]) -> int:
         "--script", type=Path, help="run each non-comment line as a command"
     )
     ap.add_argument("--out-dir", type=Path, help="write NNN-<slug>.txt per command")
-    ap.add_argument("--allow-write", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
     if args.selftest:
@@ -215,24 +285,32 @@ def main(argv: list[str]) -> int:
     elif args.script:
         commands = [
             ln.rstrip()
-            for ln in args.script.read_text().splitlines()
+            for ln in args.script.read_text(encoding="utf-8").splitlines()
             if ln.strip() and not ln.lstrip().startswith("#")
         ]
     else:
         ap.error("use --selftest, --check, --command or --script")
 
-    if not args.allow_write:
-        refused = [c for c in commands if not is_read_only(c)]
-        if refused:
-            for c in refused:
-                print(f"refusing (not read-only): {c}", file=sys.stderr)
-            return 2
+    # Hard gate: this tool only ever sends read-only commands. There is no
+    # override flag -- a write path belongs in a separate, post-backup tool.
+    refused = [c for c in commands if not is_read_only(c)]
+    if refused:
+        for c in refused:
+            print(f"refusing (not read-only): {c}", file=sys.stderr)
+        return 2
 
     if args.out_dir:
         args.out_dir.mkdir(parents=True, exist_ok=True)
     rc = 0
     for n, command in enumerate(commands, 1):
-        output, status = run_one(tcp_connect, args.ip, args.port, command)
+        try:
+            output, status = run_one(tcp_connect, args.ip, args.port, command)
+        except OSError as e:
+            print(
+                f"error: shell connection to {args.ip}:{args.port} failed: {e}",
+                file=sys.stderr,
+            )
+            return 3
         header = f"$ {command}\n{output}"
         print(f"== [{status}] {command}")
         print(output)
