@@ -87,14 +87,20 @@ volumes. `scripts/orbic-backup.py` implements it; BACKUP-AND-RECOVERY.md is the 
       SHA-256 on the host
 - [x] T-OR-016: `root.tar`, `data.tar`, `usrdata.tar`, `firmware.tar`, `cache.tar` captured to
       `backups/2026-11-23-V1.2.0/fs/`; `root.tar` contains `./etc/init.d/misc-daemon` (baseline
-      SHA-256 `8f9bb4ce...fe3f1cf9`), the USB-composition files and the secret configs
-- [x] T-OR-017: two passes per filesystem (byte-identical for quiescent `/`, `/usrdata`,
-      `/firmware`, `/cache`; `/data` reads clean but differs between passes as a live fs); each
-      archive validated readable with a non-zero entry count; all mode 0600
+      SHA-256 `8f9bb4ce...fe3f1cf9`); the USB-composition files and secret configs live under
+      `/usrdata` and `/data`, so they are in `usrdata.tar` and `data.tar` (not `root.tar`, which
+      excludes those mounts)
+- [x] T-OR-017: two passes per filesystem with `tar`'s exit status captured and required zero;
+      byte-identical for quiescent `/`, `/usrdata`, `/firmware`, `/cache`; `/data` reads clean but
+      differs between passes as a live fs; each archive validated readable; all mode 0600
 - [ ] T-OR-017: encrypted off-repo copy on separate media; decrypt round-trip hash checked
+      (**remaining** -- needs offline media and a passphrase; the gate is not fully closed until
+      this is done)
 
-Acceptance criteria: every writable filesystem has a verified `ok`/`ok-live` archive and the
-BACKUP-AND-RECOVERY.md step 4 gate passes. This is the gate for every later device write.
+Acceptance criteria: every writable filesystem has a verified `ok`/`ok-live` archive AND the
+off-repo encrypted copy is verified -- i.e. the BACKUP-AND-RECOVERY.md step 4 gate passes in
+full. The on-device archives are captured and verified; the off-repo copy is the one open item.
+This is the gate for every later device write.
 
 Verification:
 

@@ -47,9 +47,11 @@ from pathlib import Path
 # (`grep nandwrite`, `cat /etc/passwd`) is judged on the real program.
 #
 # Deliberately EXCLUDED, though they can read: `awk`/`nawk`/`gawk` (`system()`,
-# `"cmd" | getline`), `command` (runs any program), `find` (`-exec`/`-delete`),
-# `sed` (`-i`, `w` writes), `dd`/`nanddump` (write with `of=`/`-f`), and `mount`.
-# The recon inventory needs none of them; arbitrary-execution tools have no place
+# `"cmd" | getline`), `command`/`env` (run any program), `find` (`-exec`/`-delete`),
+# `sed` (`-i`, `w` writes), `dd`/`nanddump` (write with `of=`/`-f`), `mount`, `xxd`
+# (`xxd a b` writes `b`), and the setters `sort` (`-o`), `date` (`-s`/operand),
+# `hostname <name>`. The recon inventory needs none of them; arbitrary-execution
+# or setter tools have no place
 # in a read-only gate guarding an unauthenticated root shell before a backup.
 READ_COMMANDS = {
     "cat",
@@ -59,7 +61,6 @@ READ_COMMANDS = {
     "free",
     "mountpoint",
     "uname",
-    "hostname",
     "head",
     "tail",
     "grep",
@@ -89,9 +90,7 @@ READ_COMMANDS = {
     "file",
     "od",
     "hexdump",
-    "xxd",
     "strings",
-    "env",
     "printenv",
     "getprop",
     "echo",
@@ -99,11 +98,9 @@ READ_COMMANDS = {
     "test",
     "true",
     "false",
-    "date",
     "basename",
     "dirname",
     "cut",
-    "sort",
     "uniq",
     "tr",
     "du",
@@ -119,24 +116,22 @@ READ_COMMANDS = {
 # `ls \`nandwrite ...\`` -- runs arbitrary code; a backslash can also confuse the
 # lexer. Refused outright; recon never needs them.
 _INJECTION = re.compile(r"\$\(|`|\\")
-# Programs that READ but take a setter/writer FORM via a specific flag; refused in
-# that form. Checked against shlex TOKENS (not the raw string), so quoting --
-# `dmesg '-c'`, `sort '-o' f` -- cannot hide the flag.
-_FORBIDDEN_FLAGS = {
-    "dmesg": {"-c", "-C", "--clear", "--read-clear"},  # clears the ring buffer
-    "sort": {"-o", "--output"},  # writes its output to a file
-    "date": {"-s", "--set", "--set-time"},  # sets the clock
-}
-# Read only with no positional operand; any bare operand makes them set state
-# (`hostname newname`), so a non-flag operand is refused.
-_NO_OPERAND = {"hostname"}
+# `dmesg` is the one dual-use reader kept (the inventory pipes it); its ring-buffer
+# CLEAR flags are refused. Matched as a token regex so bundled/attached forms
+# (`-rc`, `-cr`) and the long flags are all caught; the inventory uses no dmesg flag.
+_DMESG_CLEAR = re.compile(r"^-[a-zA-Z]*[cC]|^--(clear|read-clear)$")
 
-# Tokens shlex (punctuation_chars=True) emits for shell operators.
-_GROUPING = frozenset("(){}")  # subshell, brace group, process subst, function def
+# Operator tokens shlex (punctuation_chars=True) emits. With that mode a RUN of the
+# chars `();<>|&` is returned as one token, so a combined operator like `;>` or a
+# grouping token like `;(` is a token made ENTIRELY of these chars -- distinct from
+# a quoted argument such as `fota|update`, which also has letters. The rule below
+# rejects any all-operator token that is not an exact recognized operator.
+_OP_CHARS = frozenset("();<>|&{}")
 _CMD_SEP = {"|", "||", "&&", ";", "&", "|&", ";;"}
 _OUT_FILE = {">", ">>", ">|", "&>", "&>>"}  # target must be /dev/null
 _DUP = {">&", "<&"}  # target: a bare fd (2>&1) or /dev/null
 _IN = {"<", "<<", "<<<"}  # input redirect: reading, target not a write
+_KNOWN_OPS = _CMD_SEP | _OUT_FILE | _DUP | _IN | {"<>"}
 _ASSIGN_OR_WRAP = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*=|exec$|env$|nice$|time$)")
 _FD = re.compile(r"\d+")
 
@@ -177,12 +172,16 @@ def _split_simple(tokens: list[str]) -> list[list[str]] | None:
     return simples
 
 
-def _simple_ok(tokens: list[str]) -> bool:
+def _simple_ok(tokens: list[str], depth: int = 0) -> bool:
     """One simple command is read-only: its program is an allowed reader and it is
-    not in a setter/writer form."""
+    not in a setter/writer form. `busybox <applet> ...` is validated by recursing
+    on the applet, so `busybox sort -o f` or `busybox busybox rm` cannot smuggle a
+    writer past the `busybox`-level checks."""
+    if depth > 4:
+        return False  # busybox busybox busybox ... -> fail closed
     idx = 0
     while idx < len(tokens) - 1 and _ASSIGN_OR_WRAP.match(tokens[idx]):
-        idx += 1  # skip VAR=val and exec/env/nice/time wrappers (never the last)
+        idx += 1  # skip VAR=val and exec/nice/time wrappers (never the last token)
     if idx >= len(tokens):
         return False
     prog = tokens[idx].rsplit("/", 1)[-1]
@@ -190,21 +189,22 @@ def _simple_ok(tokens: list[str]) -> bool:
     if prog not in READ_COMMANDS:
         return False
     if prog == "busybox":
-        # only `--list`/`--help`, or an applet that is itself an allowed reader
-        applet = next((a for a in args if not a.startswith("-")), None)
-        if applet is not None and applet not in READ_COMMANDS:
+        applet_at = next((j for j, a in enumerate(args) if not a.startswith("-")), None)
+        if applet_at is None:
+            # no applet: only the read-only informational flags are allowed
+            # (`--install`/`--mkdir`/... write, so a bare flag is not assumed safe)
+            return all(a in ("--list", "--help") for a in args)
+        if any(a not in ("--list", "--help") for a in args[:applet_at]):
             return False
-    forbidden = _FORBIDDEN_FLAGS.get(prog)
-    if forbidden and any(a in forbidden for a in args):
-        return False
-    return not (prog in _NO_OPERAND and any(not a.startswith("-") for a in args))
+        return _simple_ok(args[applet_at:], depth + 1)  # validate the applet itself
+    return not (prog == "dmesg" and any(_DMESG_CLEAR.match(a) for a in args))
 
 
 def is_read_only(command: str) -> bool:
     """True only when every simple command is a known reader in a read form.
-    Fails closed: a control char (newline injection), command substitution, an
-    unknown or arbitrary-execution program, a writer flag, or an output
-    redirection to a file all return False."""
+    Fails closed: a control char (newline injection), command substitution, a
+    combined/grouping operator token, an unknown or arbitrary-execution program, a
+    writer flag, or an output redirection to a file all return False."""
     if any(c in command for c in ("\n", "\r", "\x00")) or _INJECTION.search(command):
         return False
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
@@ -213,11 +213,12 @@ def is_read_only(command: str) -> bool:
         tokens = list(lexer)
     except ValueError:
         return False  # unbalanced quotes / exotic syntax -> fail closed
-    # Reject shell grouping/definition syntax: a subshell `(reboot)`, process
-    # substitution `<(reboot)`, a brace group `{ reboot; }`, or a function
-    # definition `cat() (reboot)` would otherwise let a malicious command ride as
-    # an "argument" of an allowed program. Recon uses none of these.
-    if any(set(t) & _GROUPING for t in tokens):
+    # Reject any token made entirely of operator/grouping chars that is not an exact
+    # recognized operator: this catches combined operators (`;>`, `&&>`), subshells
+    # and process substitution (`;(`, `<(`), brace groups (`{`, `}`) and function
+    # definitions (`()`), each of which would otherwise ride as an argument. A
+    # quoted arg like `fota|update` is NOT all-operator-chars, so it is unaffected.
+    if any(t and set(t) <= _OP_CHARS and t not in _KNOWN_OPS for t in tokens):
         return False
     simples = _split_simple(tokens)
     if not simples:
@@ -291,7 +292,6 @@ def selftest() -> int:
         "ps w | grep -iE 'fota|update|ota'",
         "sha256sum /etc/init.d/misc-daemon",
         "netstat -tlnp",
-        "date +%s",  # date without a setter flag
         "ls -la /dev/*diag* 2>/dev/null",
         "grep -c '2>/etc/passwd' /proc/mtd",  # a quoted `>` is a search arg, not a redirect
     ]
@@ -336,14 +336,32 @@ def selftest() -> int:
         "find / -name x -delete",
         # setter FORMS of dual-use readers, caught on tokens despite quoting
         "dmesg '-c'",
-        "sort '-o' /etc/x /proc/mtd",
+        "dmesg -rc",  # bundled clear flag
+        # setters/writers now removed from the allowlist entirely
+        "sort -o /etc/passwd /proc/mtd",
+        "sort -o/etc/passwd x",
         "date -s '2020-01-01'",
+        "date 010100002020",  # busybox date sets the clock from a bare operand
         "hostname newname",
+        "xxd /proc/mtd /etc/passwd",  # xxd writes its second operand
+        "env rm -rf /",
+        "/usr/bin/env rm -rf /",
         # shell grouping/definition/substitution syntax riding on an allowed program
         "cat() (reboot); cat",
         "cat <(reboot)",
         "{ reboot; }",
         "cat >(nandwrite /dev/mtd0 x)",
+        "true ;(rm -rf /)",
+        # combined-operator tokens that must not fall through as arguments
+        "cat /proc/mtd;>/etc/passwd",
+        "echo x&&>/etc/passwd",
+        # busybox applet bypasses (validated by recursing on the applet)
+        "busybox sort -o /etc/passwd /proc/mtd",
+        "busybox busybox rm -rf /",
+        "busybox env rm -rf /",
+        "busybox --install",
+        "busybox dmesg -c",
+        "busybox date -s 2020-01-01",
     ]
     for c in reads:
         if not is_read_only(c):

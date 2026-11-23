@@ -128,24 +128,27 @@ class ShellTar:
         self.idle_timeout = idle_timeout
         self.deadline = deadline
 
-    def dump(self, command: str, dest: Path) -> tuple[int, str] | None:
-        """Stream `command`'s output (framed by a trailing marker) into `dest`,
-        hashing as it goes. Returns (bytes, sha256) on success, or None if the
-        marker never arrived (a truncated transfer -> the caller ABORTS rather
+    def dump(self, command: str, dest: Path) -> tuple[int, str, int] | None:
+        """Stream `command`'s output into `dest`, hashing as it goes. The command
+        is framed as `<cmd>; printf '<marker> %s.' "$?"`, so the bytes before the
+        marker are the archive and the digits between the marker and the `.` are
+        the command's exit status. Returns (bytes, sha256, exit_status), or None if
+        the marker never arrived (a truncated transfer -> the caller ABORTS rather
         than launching another tar while this one may still run on the device)."""
         marker = secrets.token_hex(16).encode()
         keep = (
             len(marker) - 1
-        )  # bytes held back so a marker spanning recv() boundaries is caught
+        )  # held back so a marker spanning recv() boundaries is caught
         sock = socket.create_connection((self.ip, self.port), timeout=10)
         sock.settimeout(self.idle_timeout)
         h = hashlib.sha256()
         total = 0
         pending = b""
         found = False
+        tail = b""  # bytes after the marker: ` <status>.`
         end = time.monotonic() + self.deadline
         try:
-            sock.sendall(command.encode() + f"; printf {marker.decode()}\n".encode())
+            sock.sendall(command.encode() + b"; printf '" + marker + b' %s.\' "$?"\n')
             # Owner-only from creation: the archive holds IMEI, Wi-Fi keys and other
             # identifiers, so the temp file must never exist world-readable.
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -158,6 +161,11 @@ class ShellTar:
                         break
                     if not chunk:
                         break
+                    if found:
+                        tail += chunk
+                        if b"." in tail:
+                            break
+                        continue
                     data = pending + chunk
                     idx = data.find(marker)
                     if idx >= 0:
@@ -165,8 +173,10 @@ class ShellTar:
                         h.update(data[:idx])
                         total += idx
                         found = True
-                        break
-                    if len(data) > keep:
+                        tail = data[idx + len(marker) :]
+                        if b"." in tail:
+                            break
+                    elif len(data) > keep:
                         emit, pending = data[:-keep], data[-keep:]
                         fh.write(emit)
                         h.update(emit)
@@ -175,7 +185,11 @@ class ShellTar:
                         pending = data
         finally:
             sock.close()
-        return (total, h.hexdigest()) if found else None
+        if not found:
+            return None
+        m = re.match(rb"\s*(\d+)\.", tail)
+        status = int(m.group(1)) if m else -1  # no clean status -> treat as failure
+        return (total, h.hexdigest(), status)
 
 
 def validate_tar(path: Path) -> int:
@@ -206,29 +220,40 @@ def backup_all(
         tmp2 = out_dir / f".{label}.pass2.tmp"
         final = out_dir / f"{label}.tar"
         p1 = session.dump(cmd, tmp1)
+        # A missing end marker means the transfer was cut off while tar may still be
+        # running on the device: abort the whole run rather than launch the next tar.
         if p1 is None:
             tmp1.unlink(missing_ok=True)
             print(
                 f"  ABORT  {mount_point}: transfer truncated (no end marker); device may be unhealthy"
             )
             results.append({"mount": mount_point, "fstype": fstype, "verdict": "ABORT"})
-            break  # do not launch another tar after a truncated transfer
+            break
+        size, digest, status1 = p1
         entries = validate_tar(tmp1)
-        # A complete, readable tar is a valid restore point. A SECOND pass is taken
-        # to catch transfer corruption: an identical hash proves the transfer AND a
-        # quiescent filesystem; a differing hash on a readable tar just means the
-        # live fs (e.g. /data logs) changed between passes -- still a good backup.
+        # A SECOND pass catches transfer corruption: an identical hash proves the
+        # transfer AND a quiescent filesystem; a differing hash on a readable tar
+        # just means a live fs (e.g. /data logs) changed between passes.
         p2 = session.dump(cmd, tmp2)
-        size, digest = p1
-        deterministic = p2 is not None and p1 == p2
-        ok = entries > 0  # readable, complete tar
+        if p2 is None:
+            tmp1.unlink(missing_ok=True)
+            tmp2.unlink(missing_ok=True)
+            print(
+                f"  ABORT  {mount_point}: pass-2 transfer truncated; device may be unhealthy"
+            )
+            results.append({"mount": mount_point, "fstype": fstype, "verdict": "ABORT"})
+            break
+        tmp2.unlink(missing_ok=True)
+        # `ok` requires a readable tar AND a zero exit on BOTH passes -- a non-zero
+        # `tar` exit (read/I/O error) is a failed backup even if the archive parses.
+        ok = entries > 0 and status1 == 0 and p2[2] == 0
+        deterministic = (p1[0], p1[1]) == (p2[0], p2[1])
         if ok:
             tmp1.replace(final)
             final.chmod(0o600)
         else:
             tmp1.unlink(missing_ok=True)
-        tmp2.unlink(missing_ok=True)
-        verdict = "ok" if ok and deterministic else "ok-live" if ok else "UNREADABLE"
+        verdict = "ok" if ok and deterministic else "ok-live" if ok else "FAIL"
         results.append(
             {
                 "mount": mount_point,
@@ -239,11 +264,12 @@ def backup_all(
                 "verdict": verdict,
             }
         )
-        mark = {"ok": "ok   ", "ok-live": "ok*  ", "UNREADABLE": "FAIL "}[verdict]
+        mark = {"ok": "ok   ", "ok-live": "ok*  ", "FAIL": "FAIL "}[verdict]
+        extra = "" if ok else f"  (tar exit {status1}/{p2[2]}, entries {entries})"
         note = (
-            ""
-            if deterministic or not ok
-            else "  (live fs: passes differ, tar readable)"
+            "  (live fs: passes differ, tar readable)"
+            if ok and not deterministic
+            else extra
         )
         print(
             f"  {mark} {mount_point}: {size} bytes, {entries} entries, sha256={digest[:16]}{note}"
@@ -352,7 +378,11 @@ def main(argv: list[str]) -> int:
     results = backup_all(session, mounts, targets, Path(args.out_dir))
 
     manifest = Path(args.out_dir) / "MANIFEST.txt"
-    with manifest.open("w", encoding="utf-8") as fh:
+    # The manifest lists each filesystem and its hash; create it owner-only from
+    # the start rather than chmod-ing after it has been written world-readable.
+    mfd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(mfd, 0o600)
+    with os.fdopen(mfd, "w", encoding="utf-8") as fh:
         fh.write(
             "# Orbic RC400L filesystem backup manifest (tar over the root shell)\n"
         )
@@ -364,7 +394,6 @@ def main(argv: list[str]) -> int:
                     f"{r['mount']} {r['fstype']} size={r['size']} entries={r['entries']} "
                     f"sha256={r['sha256']} {r['verdict']}\n"
                 )
-    manifest.chmod(0o600)
     failed = [r for r in results if r["verdict"] not in ("ok", "ok-live")]
     print(
         f"\n{len(results) - len(failed)}/{len(results)} filesystems backed up; manifest: {manifest}"

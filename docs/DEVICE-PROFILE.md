@@ -79,8 +79,8 @@ IMEI, ICCID, MDN, MEID, MAC) are redacted here.
   `/media/ram` are tmpfs.
 - **Backup tools present** (standalone in `/bin`/`/sbin`/`/usr/bin` and via busybox):
   `nanddump`, `nandwrite`, `flash_erase`, `ubinfo`, `ubiupdatevol`, `md5sum`, `sha256sum`,
-  `dd`, `tar`, `gzip`, `nc`. So Sprint 1.3 can use `nanddump` (NAND-aware, handles OOB and bad
-  blocks) rather than `dd`.
+  `dd`, `tar`, `gzip`, `nc`. **Do not use `nanddump`/`dd` on `/dev/mtd*`** -- they deadlock the
+  NAND (see the raw-NAND note below); Sprint 1.3 backs up with `tar` of the mounted filesystems.
 - **Listening sockets (`netstat -tlnp`):** `dnsmasq` on 53 (loopback + `192.168.1.1`);
   `goahead` on 80 and 443; **`busybox` on 24** -- the root shell this recon opened (pid changes
   per run). No other listeners.
