@@ -81,30 +81,43 @@ class ShellBackup:
     """One persistent connection to the port-24 root shell, read sequentially."""
 
     def __init__(self, ip: str, port: int, idle_timeout: float, deadline_per: float):
-        self.sock = socket.create_connection((ip, port), timeout=10)
-        self.sock.settimeout(idle_timeout)
+        self.ip = ip
+        self.port = port
+        self.idle_timeout = idle_timeout
         self.deadline_per = deadline_per
-        self.buf = b""  # bytes read past the previous partition's marker
 
     def dump(self, index: int) -> bytes:
+        """One FRESH connection per partition: busybox `nc -ll -e /bin/sh` forks a
+        new shell per connection, and nanddump produced output only as the first
+        command on a shell -- a reused connection returned nothing for every
+        partition after the first. A fresh shell each time, run sequentially (one
+        nanddump at a time), avoids both that desync and the concurrent-reader
+        wedge. The marker is read to completion before the socket is closed, so
+        nanddump has finished and cannot be orphaned."""
         marker_s = secrets.token_hex(16)
         marker = marker_s.encode()
-        self.sock.sendall((device_dump_command(index, marker_s) + "\n").encode())
-        image, self.buf = split_on_marker(self.buf, marker)
+        sock = socket.create_connection((self.ip, self.port), timeout=10)
+        sock.settimeout(self.idle_timeout)
+        buf = b""
+        image = None
         end = time.monotonic() + self.deadline_per
-        while image is None and time.monotonic() < end:
-            try:
-                chunk = self.sock.recv(1 << 16)
-            except TimeoutError:
-                break
-            if not chunk:
-                break
-            self.buf += chunk
-            image, self.buf = split_on_marker(self.buf, marker)
-        return image if image is not None else self.buf
+        try:
+            sock.sendall((device_dump_command(index, marker_s) + "\n").encode())
+            while image is None and time.monotonic() < end:
+                try:
+                    chunk = sock.recv(1 << 16)
+                except TimeoutError:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+                image, _ = split_on_marker(buf, marker)
+        finally:
+            sock.close()
+        return image if image is not None else buf
 
     def close(self) -> None:
-        self.sock.close()
+        pass
 
 
 def backup_all(
