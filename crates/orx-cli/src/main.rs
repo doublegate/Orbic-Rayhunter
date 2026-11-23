@@ -191,10 +191,11 @@ fn open_tmp(final_path: &Path) -> std::io::Result<(fs::File, std::path::PathBuf)
 /// `orx verify`: re-check a backup directory against its MANIFEST.txt.
 fn cmd_verify(dir: &Path) -> ExitCode {
     let manifest = dir.join("MANIFEST.txt");
-    let text = match fs::read_to_string(&manifest) {
+    // Hardened read: rejects a symlink/non-regular manifest and caps the size.
+    let text = match verify::read_manifest_text(&manifest) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("error: cannot read {}: {e}", manifest.display());
+            eprintln!("error: {e}");
             return ExitCode::from(2);
         }
     };

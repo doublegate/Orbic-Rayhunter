@@ -87,9 +87,10 @@ orx verify --dir <dir>    # T-OR-035 (v0.7.0): re-hash the archives; the backup 
 Every write command (`orx install`/`uninstall`, when added) refuses to run unless
 `verify::gate()` passes for the backup directory: a single rootfs `/` entry, state `ok`/`ok-live`,
 and a `root.tar` whose size and SHA-256 match the manifest. `orx verify --dir` reports that gate
-plus a per-filesystem result (`ok` / `MISSING` / `too small` / `size mismatch` / `SHA-256
-mismatch` / `no size=/sha256= in manifest`), and exits non-zero if any entry fails or the gate is
-not satisfied.
+plus a per-filesystem result (`ok` / `MISSING` / `not a regular file` / `too small` / `size
+mismatch` / `SHA-256 mismatch` / `no size=/sha256= in manifest` / `read error`), and exits
+non-zero if any entry fails or the gate is not satisfied. Exit codes: `0` verified, `1`
+verification/gate failure, `2` usage or an unreadable/malformed MANIFEST.txt.
 
 `orx backup`/`orx verify` automate this from v0.6.0/v0.7.0; the equivalent manual procedure is
 [BACKUP-AND-RECOVERY.md](BACKUP-AND-RECOVERY.md) steps 1-7. Do not continue until the

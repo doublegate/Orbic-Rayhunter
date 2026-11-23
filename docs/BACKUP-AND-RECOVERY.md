@@ -153,7 +153,8 @@ back from.
 
 **`orx verify --dir <dir>`** (T-OR-035, v0.7.0) automates this gate: it re-parses `MANIFEST.txt`,
 re-hashes each `<label>.tar`, and reports `ok` / `MISSING` / `too small` (< 1 KiB) / `size
-mismatch` / `SHA-256 mismatch` / `no size=/sha256= in manifest` per filesystem, failing if any
+mismatch` / `SHA-256 mismatch` / `not a regular file` / `read error` / `no size=/sha256= in
+manifest` per filesystem, failing if any
 entry's archive does not verify or its recorded state is not `ok`/`ok-live`. The shared
 `verify::gate()` -- the contract every write command must pass before touching the device --
 requires **exactly one** rootfs `/` entry, state `ok`/`ok-live`, and a `root.tar` whose size and

@@ -6,9 +6,7 @@
 //! be trusted as a rollback before any device write. No device access, so it is
 //! fully unit-tested.
 
-use std::collections::HashMap;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use crate::backup::archive_name;
@@ -47,8 +45,10 @@ pub fn parse_manifest(text: &str) -> Result<Vec<ManifestEntry>, String> {
         }
         // Parse key=val from the MIDDLE tokens only, so a row with no trailing
         // state cannot let its `sha256=` double as the state word. Every middle
-        // token must be a key=val, and size/sha256 must not repeat.
-        let mut toks: HashMap<&str, &str> = HashMap::new();
+        // token must be a non-empty key=val; `size`/`sha256` must not repeat and
+        // a `size=` that is not a u64 is an error (not silently dropped to None).
+        let mut size: Option<u64> = None;
+        let mut sha256: Option<String> = None;
         for tok in &f[2..f.len() - 1] {
             let Some((k, v)) = tok.split_once('=') else {
                 return Err(format!(
@@ -56,18 +56,36 @@ pub fn parse_manifest(text: &str) -> Result<Vec<ManifestEntry>, String> {
                     n + 1
                 ));
             };
-            if (k == "size" || k == "sha256") && toks.insert(k, v).is_some() {
-                return Err(format!("manifest line {}: duplicate {k}= key", n + 1));
+            if k.is_empty() {
+                return Err(format!(
+                    "manifest line {}: token {tok:?} has an empty key",
+                    n + 1
+                ));
             }
-            if k != "size" && k != "sha256" {
-                toks.insert(k, v);
+            match k {
+                "size" => {
+                    if size.is_some() {
+                        return Err(format!("manifest line {}: duplicate size= key", n + 1));
+                    }
+                    let parsed = v
+                        .parse::<u64>()
+                        .map_err(|_| format!("manifest line {}: size={v:?} is not a u64", n + 1))?;
+                    size = Some(parsed);
+                }
+                "sha256" => {
+                    if sha256.is_some() {
+                        return Err(format!("manifest line {}: duplicate sha256= key", n + 1));
+                    }
+                    sha256 = Some(v.to_string());
+                }
+                _ => {} // other keys (e.g. entries=) are recorded by neither field
             }
         }
         out.push(ManifestEntry {
             mountpoint: f[0].to_string(),
             fstype: f[1].to_string(),
-            size: toks.get("size").and_then(|v| v.parse().ok()),
-            sha256: toks.get("sha256").map(|v| (*v).to_string()),
+            size,
+            sha256,
             state: f[f.len() - 1].to_string(),
         });
     }
@@ -154,9 +172,6 @@ fn hash_reader(f: &mut std::fs::File) -> Result<(String, u64), String> {
     Ok((crate::sha256::hex_of(h), total))
 }
 
-/// O_NOFOLLOW (Linux): refuse to open a final-component symlink.
-const O_NOFOLLOW: i32 = 0o400000;
-
 /// Verify one manifest entry's archive on disk in `dir`.
 pub fn verify_entry(dir: &Path, entry: &ManifestEntry) -> Verdict {
     // A checksum is mandatory: without a valid size AND a valid 64-hex sha256
@@ -183,19 +198,20 @@ pub fn verify_entry(dir: &Path, entry: &ManifestEntry) -> Verdict {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Verdict::Missing,
         Err(e) => return Verdict::ReadError(e.to_string()),
     }
-    // Open once with O_NOFOLLOW (closes the symlink-swap TOCTOU after the check)
-    // and hash the handle; the byte count read is the authoritative size.
-    let mut f = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(O_NOFOLLOW)
-        .open(&path)
-    {
+    let mut f = match std::fs::File::open(&path) {
         Ok(f) => f,
-        // ELOOP: the path became a symlink between the check and the open.
-        Err(e) if e.raw_os_error() == Some(40) => return Verdict::NotRegularFile,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Verdict::Missing,
         Err(e) => return Verdict::ReadError(e.to_string()),
     };
+    // Re-check on the OPEN handle (portable, no arch-specific O_NOFOLLOW): if the
+    // path was swapped to a non-regular file between symlink_metadata and open,
+    // this catches it. A swap to a different REGULAR file just yields a hash that
+    // will not match -- still fail-closed.
+    match f.metadata() {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Verdict::NotRegularFile,
+        Err(e) => return Verdict::ReadError(e.to_string()),
+    }
     let (got, actual) = match hash_reader(&mut f) {
         Ok(x) => x,
         Err(e) => return Verdict::ReadError(e),
@@ -223,14 +239,10 @@ pub fn verify_all(dir: &Path, entries: &[ManifestEntry]) -> Vec<Verdict> {
 /// is `ok`/`ok-live` and whose archive verified. Both `gate` and `orx verify`
 /// call this, so the rule cannot drift between them.
 pub fn gate_from_verdicts(entries: &[ManifestEntry], verdicts: &[Verdict]) -> Result<(), String> {
-    let roots: Vec<usize> = (0..entries.len())
-        .filter(|&i| entries[i].mountpoint == "/")
-        .collect();
-    let i = match roots.as_slice() {
-        [] => return Err("manifest has no rootfs '/' entry".to_string()),
-        [i] => *i,
-        _ => return Err("manifest has multiple rootfs '/' entries (ambiguous)".to_string()),
-    };
+    if entries.len() != verdicts.len() {
+        return Err("internal error: entries/verdicts length mismatch".to_string());
+    }
+    let i = rootfs_index(entries)?;
     let e = &entries[i];
     if e.state != "ok" && e.state != "ok-live" {
         return Err(format!("rootfs '/' state is {:?}, not ok/ok-live", e.state));
@@ -244,17 +256,62 @@ pub fn gate_from_verdicts(entries: &[ManifestEntry], verdicts: &[Verdict]) -> Re
     }
 }
 
+/// The index of the one rootfs `/` entry, or an error for none/duplicates.
+fn rootfs_index(entries: &[ManifestEntry]) -> Result<usize, String> {
+    let roots: Vec<usize> = (0..entries.len())
+        .filter(|&i| entries[i].mountpoint == "/")
+        .collect();
+    match roots.as_slice() {
+        [] => Err("manifest has no rootfs '/' entry".to_string()),
+        [i] => Ok(*i),
+        _ => Err("manifest has multiple rootfs '/' entries (ambiguous)".to_string()),
+    }
+}
+
+/// Read a MANIFEST.txt that the backup directory does not fully control: reject a
+/// symlink / non-regular file and cap the size so a FIFO cannot hang the read and
+/// an oversized file cannot exhaust memory.
+pub fn read_manifest_text(manifest: &Path) -> Result<String, String> {
+    const MAX_MANIFEST: u64 = 1 << 20; // 1 MiB is enormous for a few-line manifest
+    match std::fs::symlink_metadata(manifest) {
+        Ok(m) if m.file_type().is_symlink() || !m.is_file() => {
+            return Err(format!("{} is not a regular file", manifest.display()));
+        }
+        Ok(m) if m.len() > MAX_MANIFEST => {
+            return Err(format!(
+                "{} is implausibly large ({} B)",
+                manifest.display(),
+                m.len()
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("cannot stat {}: {e}", manifest.display())),
+    }
+    std::fs::read_to_string(manifest)
+        .map_err(|e| format!("cannot read {}: {e}", manifest.display()))
+}
+
 /// The backup-gate for write commands: a directory holds a usable rollback only
 /// if its MANIFEST.txt parses, records rootfs `/` as `ok`/`ok-live`, and that
-/// archive verifies. The Rust counterpart of `orbic-ota-block.py`'s
-/// `_backup_gate`.
+/// archive verifies. Hashes ONLY the rootfs archive (the only one this gate
+/// requires). The Rust counterpart of `orbic-ota-block.py`'s `_backup_gate`.
 pub fn gate(dir: &Path) -> Result<(), String> {
-    let manifest = dir.join("MANIFEST.txt");
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
-    let entries = parse_manifest(&text)?;
-    let verdicts = verify_all(dir, &entries);
-    gate_from_verdicts(&entries, &verdicts)
+    let entries = parse_manifest(&read_manifest_text(&dir.join("MANIFEST.txt"))?)?;
+    let i = rootfs_index(&entries)?;
+    let root = &entries[i];
+    if root.state != "ok" && root.state != "ok-live" {
+        return Err(format!(
+            "rootfs '/' state is {:?}, not ok/ok-live",
+            root.state
+        ));
+    }
+    match verify_entry(dir, root) {
+        Verdict::Ok => Ok(()),
+        v => Err(format!(
+            "rootfs '/' archive does not verify: {}",
+            v.describe()
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -298,9 +355,11 @@ mod tests {
     #[test]
     fn parse_fails_closed_on_malformed_and_duplicates() {
         assert!(parse_manifest("/ ubifs").is_err()); // < 3 fields
-        assert!(parse_manifest("/ ubifs bareword sha256=deadbeef ok").is_err()); // middle token without =
+        assert!(parse_manifest("/ ubifs bareword sha256=deadbeef ok").is_err()); // token without =
         assert!(parse_manifest("/ ubifs size=1 size=2 ok").is_err()); // duplicate key
         assert!(parse_manifest("/ ubifs sha256=a sha256=b ok").is_err());
+        assert!(parse_manifest("/ ubifs size=corrupt ok").is_err()); // non-u64 size
+        assert!(parse_manifest("/ ubifs =val ok").is_err()); // empty key
     }
 
     #[test]
@@ -330,13 +389,17 @@ mod tests {
             ),
             Verdict::MissingMetadata
         );
-        assert_eq!(
-            verify_entry(
-                d.path(),
-                &parse("/ ubifs size=corrupt sha256=deadbeef ok")[0]
-            ),
-            Verdict::MissingMetadata
-        );
+    }
+
+    #[test]
+    fn verify_entry_rejects_symlink() {
+        let d = TempDir::new();
+        let payload = [7u8; 4096];
+        std::fs::write(d.path().join("real.bin"), payload).unwrap();
+        std::os::unix::fs::symlink(d.path().join("real.bin"), d.path().join("root.tar")).unwrap();
+        let sha = crate::sha256::hex(&payload);
+        let e = parse(&format!("/ ubifs size=4096 sha256={sha} ok"));
+        assert_eq!(verify_entry(d.path(), &e[0]), Verdict::NotRegularFile);
     }
 
     #[test]

@@ -56,10 +56,10 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 106 minted; 23 done (T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-035, T-OR-106; 0x11EB-empirical deferred) | [ROADMAP.md](ROADMAP.md) |
+| Tickets | 106 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-035, T-OR-106 (0x11EB-empirical part of T-OR-019 deferred) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 0 | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
-| Host unit tests | 40 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
+| Host unit tests | 43 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
 | Latest release | v0.6.0 (2026-11-23); v0.7.0 in PR #5 (tagged on merge) | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |
