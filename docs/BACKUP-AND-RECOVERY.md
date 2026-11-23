@@ -59,11 +59,15 @@ interactive `orbic-shell` is the same exploit plus a terminal. Do not use `orbic
 writes `/bin/rootshell` and changes the USB composition.
 
 ```sh
+read -rs ORX_ADMIN_PW            # bash; fish: read -s ORX_ADMIN_PW
 ./installer util orbic-start-telnet --admin-password "$ORX_ADMIN_PW"   # or: orbic-shell
+unset ORX_ADMIN_PW
 ```
 
-The password appears in the host process list while the installer runs; the scripts read it from
-a mode-600 file instead of the command line. Measured on this unit (2026-11-23): the port-24
+The password appears in the host process list while the installer runs. The Python tools in
+this repo (`orbic-shell.py`, `orbic-ui-read.py`, `orbic-backup.py`) avoid that by reading it from
+a mode-600 file (`~/.claude-secrets/orbic-admin.txt`) rather than the command line; only the
+upstream `installer` above takes it as an argument. Measured on this unit (2026-11-23): the port-24
 listener is a backgrounded process and **does not survive a reboot** (`nmap -Pn -p 24
 192.168.1.1` shows it closed after boot); re-run the command to reopen it. The exploit persists
 exactly one config change, `GetRemoteAccessCfg.telnetd` 1 -> 0, which **does** survive a reboot.
@@ -83,9 +87,10 @@ scripts/orbic-shell.py --script scripts/recon/phase1-inventory.sh --out-dir back
 scripts/orbic-shell.py --command 'cat /proc/mounts' --out-dir backups/<date>-V1.2.0/layout
 ```
 
-The second invocation writes `001-cat-proc-mounts.txt`; pass that file to the backup tool's
-`--proc-mounts` (its `$ ...` / `# exit=` transcript lines are not mount entries, so the mount
-parser ignores them). This unit's writable `ubifs` volumes are `/`
+The second invocation is a one-command run, so it writes `001-cat-proc-mounts.txt` (distinct
+from the `phase1-inventory.sh` run, whose first file is `001-cat-proc-mtd.txt`); pass that file
+to the backup tool's `--proc-mounts` in step 3. Its `$ ...` / `# exit=` transcript lines are not
+mount entries, so the mount parser ignores them. This unit's writable `ubifs` volumes are `/`
 (rootfs), `/data` (usrfs, the install target), `/usrdata`, `/cache`; `/firmware` is read-only
 modem data. The 17 raw MTD partitions are recorded in `/proc/mtd` for reference, but are not
 imaged (see the note on raw images below).
@@ -100,11 +105,15 @@ host"), and verifies it:
 
 ```sh
 scripts/orbic-backup.py \
-  --proc-mounts backups/<date>-V1.2.0/layout/010-cat-proc-mounts.txt \
-  --out-dir     backups/<date>-V1.2.0/fs
+  --proc-mounts backups/<date>-V1.2.0/layout/001-cat-proc-mounts.txt \
+  --out-dir     backups/<date>-V1.2.0/fs \
+  --allow-live  /data            # /data is live; its two passes may differ
 ```
 
-For each filesystem the tool streams the archive to a temp file while computing a rolling
+`--allow-live /data` is required because `/data` is written while the device runs, so its two
+passes are not byte-identical; every other filesystem (including read-only `/firmware` and the
+quiescent rootfs) must match byte-for-byte or the tool FAILs it. For each filesystem the tool
+streams the archive to a temp file while computing a rolling
 SHA-256, takes a second independent pass, and promotes the archive to `<label>.tar` (mode 0600)
 only when it is a complete, readable tar. For `/` it passes `tar --exclude` for every nested
 mount so `/proc`, `/sys`, `/dev` and the other volumes are not traversed. A filesystem whose two

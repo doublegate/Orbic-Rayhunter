@@ -65,24 +65,27 @@ _SKIP_FSTYPES = {
 }
 
 
-def parse_mounts(text: str) -> list[tuple[str, str]]:
-    """[(mount_point, fstype), ...] for EVERY mount in /proc/mounts, in order, one
-    entry per mount point (the kernel lists `/` twice -- rootfs then the real fs;
-    the first wins). Virtual filesystems are kept here because a parent's tar must
-    still EXCLUDE them; `backup_targets` decides what is actually archived."""
-    out: list[tuple[str, str]] = []
+def parse_mounts(text: str) -> list[tuple[str, str, str]]:
+    """[(mount_point, fstype, "ro"|"rw"), ...] for EVERY mount in /proc/mounts, in
+    order, one entry per mount point (the kernel lists `/` twice -- rootfs then the
+    real fs; the first wins). Virtual filesystems are kept here because a parent's
+    tar must still EXCLUDE them; `backup_targets` decides what is archived. The
+    ro/rw flag gates the integrity verdict: a read-only mount's two passes MUST be
+    byte-identical (it cannot legitimately change)."""
+    out: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) >= 3 and parts[1].startswith("/") and parts[1] not in seen:
+        if len(parts) >= 4 and parts[1].startswith("/") and parts[1] not in seen:
             seen.add(parts[1])
-            out.append((parts[1], parts[2]))
+            opts = parts[3].split(",")
+            out.append((parts[1], parts[2], "ro" if "ro" in opts else "rw"))
     return out
 
 
-def backup_targets(mounts: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def backup_targets(mounts: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
     """The real filesystems worth archiving (virtual/ephemeral ones skipped)."""
-    return [(mp, fs) for mp, fs in mounts if fs not in _SKIP_FSTYPES]
+    return [m for m in mounts if m[1] not in _SKIP_FSTYPES]
 
 
 def excludes_for(mount_point: str, all_mounts: list[str]) -> list[str]:
@@ -203,51 +206,66 @@ def validate_tar(path: Path) -> int:
 
 def backup_all(
     session: ShellTar,
-    mounts: list[tuple[str, str]],
-    targets: list[tuple[str, str]],
+    mounts: list[tuple[str, str, str]],
+    targets: list[tuple[str, str, str]],
     out_dir: Path,
+    allow_live: set[str],
 ) -> list[dict]:
     # Excludes are computed against EVERY mount (including virtual /proc, /sys,
     # /dev), not just the archived ones, or tar at `/` would descend into them.
-    all_mps = [mp for mp, _ in mounts]
+    all_mps = [mp for mp, _, _ in mounts]
     results = []
-    for mount_point, fstype in targets:
+    for mount_point, fstype, mode in targets:
         label = _label(mount_point)
-        print(f"backing up {mount_point} ({fstype}) -> {label}.tar ...", flush=True)
+        print(
+            f"backing up {mount_point} ({fstype},{mode}) -> {label}.tar ...", flush=True
+        )
         cmd = tar_command(mount_point, excludes_for(mount_point, all_mps))
         out_dir.mkdir(parents=True, exist_ok=True)
         tmp1 = out_dir / f".{label}.pass1.tmp"
         tmp2 = out_dir / f".{label}.pass2.tmp"
         final = out_dir / f"{label}.tar"
-        p1 = session.dump(cmd, tmp1)
-        # A missing end marker means the transfer was cut off while tar may still be
-        # running on the device: abort the whole run rather than launch the next tar.
-        if p1 is None:
-            tmp1.unlink(missing_ok=True)
-            print(
-                f"  ABORT  {mount_point}: transfer truncated (no end marker); device may be unhealthy"
-            )
-            results.append({"mount": mount_point, "fstype": fstype, "verdict": "ABORT"})
-            break
-        size, digest, status1 = p1
-        entries = validate_tar(tmp1)
-        # A SECOND pass catches transfer corruption: an identical hash proves the
-        # transfer AND a quiescent filesystem; a differing hash on a readable tar
-        # just means a live fs (e.g. /data logs) changed between passes.
-        p2 = session.dump(cmd, tmp2)
-        if p2 is None:
+
+        # A missing end marker (or a dropped connection) means the transfer was cut
+        # off while tar may still be running on the device: abort the whole run
+        # rather than launch the next tar.
+        reason = ""
+        p1 = p2 = None
+        size = status1 = entries1 = 0
+        digest = ""
+        try:
+            p1 = session.dump(cmd, tmp1)
+            if p1 is None:
+                reason = "transfer truncated (no end marker)"
+            else:
+                size, digest, status1 = p1
+                entries1 = validate_tar(tmp1)
+                p2 = session.dump(cmd, tmp2)
+                if p2 is None:
+                    reason = "pass-2 transfer truncated"
+        except OSError as e:
+            reason = f"connection error ({e})"
+        if reason:
             tmp1.unlink(missing_ok=True)
             tmp2.unlink(missing_ok=True)
-            print(
-                f"  ABORT  {mount_point}: pass-2 transfer truncated; device may be unhealthy"
-            )
+            print(f"  ABORT  {mount_point}: {reason}; device may be unhealthy")
             results.append({"mount": mount_point, "fstype": fstype, "verdict": "ABORT"})
             break
+        assert p1 is not None and p2 is not None  # guaranteed: `reason` was empty
+        entries2 = validate_tar(tmp2)
         tmp2.unlink(missing_ok=True)
-        # `ok` requires a readable tar AND a zero exit on BOTH passes -- a non-zero
-        # `tar` exit (read/I/O error) is a failed backup even if the archive parses.
-        ok = entries > 0 and status1 == 0 and p2[2] == 0
+
+        # Both passes must be readable tars with a zero `tar` exit...
+        readable = entries1 > 0 and entries2 > 0 and status1 == 0 and p2[2] == 0
         deterministic = (p1[0], p1[1]) == (p2[0], p2[1])
+        # ...and the two passes must be byte-identical, UNLESS this is a read-write
+        # mount the operator explicitly allowed to differ between passes (a live fs
+        # such as /data). A read-only mount can never legitimately differ, so a
+        # mismatch there is corruption and always FAILs. tar headers carry no
+        # payload checksum, so the pass comparison is the only guard against a torn
+        # read -- hence it must be able to fail.
+        live_ok = mount_point in allow_live and mode == "rw"
+        ok = readable and (deterministic or live_ok)
         if ok:
             tmp1.replace(final)
             final.chmod(0o600)
@@ -260,19 +278,24 @@ def backup_all(
                 "fstype": fstype,
                 "size": size,
                 "sha256": digest,
-                "entries": entries,
+                "entries": entries1,
                 "verdict": verdict,
             }
         )
         mark = {"ok": "ok   ", "ok-live": "ok*  ", "FAIL": "FAIL "}[verdict]
-        extra = "" if ok else f"  (tar exit {status1}/{p2[2]}, entries {entries})"
-        note = (
-            "  (live fs: passes differ, tar readable)"
-            if ok and not deterministic
-            else extra
-        )
+        if verdict == "ok-live":
+            note = "  (live fs, passes differ, both readable -- allowed)"
+        elif ok:
+            note = ""
+        else:
+            why = (
+                "hash mismatch"
+                if readable
+                else f"tar exit {status1}/{p2[2]}, entries {entries1}/{entries2}"
+            )
+            note = f"  ({why})"
         print(
-            f"  {mark} {mount_point}: {size} bytes, {entries} entries, sha256={digest[:16]}{note}"
+            f"  {mark} {mount_point}: {size} bytes, {entries1} entries, sha256={digest[:16]}{note}"
         )
     return results
 
@@ -295,21 +318,25 @@ def selftest() -> int:
     check(
         mounts
         == [
-            ("/", "rootfs"),
-            ("/proc", "proc"),
-            ("/dev", "tmpfs"),
-            ("/data", "ubifs"),
-            ("/firmware", "ubifs"),
+            ("/", "rootfs", "rw"),
+            ("/proc", "proc", "rw"),
+            ("/dev", "tmpfs", "rw"),
+            ("/data", "ubifs", "rw"),
+            ("/firmware", "ubifs", "ro"),
         ],
-        f"parse_mounts keeps all, dedups /: {mounts}",
+        f"parse_mounts keeps all with ro/rw, dedups /: {mounts}",
     )
     check(
         backup_targets(mounts)
-        == [("/", "rootfs"), ("/data", "ubifs"), ("/firmware", "ubifs")],
+        == [
+            ("/", "rootfs", "rw"),
+            ("/data", "ubifs", "rw"),
+            ("/firmware", "ubifs", "ro"),
+        ],
         "backup_targets skips virtual fs",
     )
     check(
-        excludes_for("/", [mp for mp, _ in mounts])
+        excludes_for("/", [mp for mp, _, _ in mounts])
         == ["data", "dev", "firmware", "proc"],
         "excludes_for includes virtual mounts",
     )
@@ -359,6 +386,11 @@ def main(argv: list[str]) -> int:
     ap.add_argument(
         "--only", help="comma-separated mount points to back up (e.g. /,/data)"
     )
+    ap.add_argument(
+        "--allow-live",
+        help="comma-separated rw mount points whose two passes MAY differ "
+        "(a live fs such as /data); any other mount must be byte-identical",
+    )
     args = ap.parse_args(argv)
 
     if args.selftest:
@@ -368,9 +400,9 @@ def main(argv: list[str]) -> int:
 
     mounts = parse_mounts(args.proc_mounts.read_text(encoding="utf-8"))
     targets = backup_targets(mounts)
+    known = {mp for mp, _, _ in targets}
     if args.only:
         want = {m.strip() for m in args.only.split(",")}
-        known = {mp for mp, _ in targets}
         unknown = want - known
         if unknown:  # a typo must fail loudly, not silently back up nothing
             ap.error(
@@ -380,9 +412,17 @@ def main(argv: list[str]) -> int:
         targets = [m for m in targets if m[0] in want]
     if not targets:
         ap.error("no filesystems selected")
+    allow_live = (
+        {m.strip() for m in args.allow_live.split(",")} if args.allow_live else set()
+    )
+    unknown_live = allow_live - known
+    if unknown_live:
+        ap.error(
+            f"--allow-live names unknown mount(s): {', '.join(sorted(unknown_live))}"
+        )
 
     session = ShellTar(args.ip, args.shell_port, args.idle_timeout, args.timeout)
-    results = backup_all(session, mounts, targets, Path(args.out_dir))
+    results = backup_all(session, mounts, targets, Path(args.out_dir), allow_live)
 
     def manifest_line(r: dict) -> str:
         if r["verdict"] == "ABORT":
@@ -404,13 +444,16 @@ def main(argv: list[str]) -> int:
                 records[ln.split()[0]] = ln
     for r in results:
         records[r["mount"]] = manifest_line(r)
-    # Owner-only from creation: the manifest lists each filesystem and its hash.
-    mfd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Write atomically via a temp file + os.replace so an interrupted write cannot
+    # truncate an existing manifest; owner-only from creation (it lists each hash).
+    tmp = manifest.with_suffix(".txt.tmp")
+    mfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.fchmod(mfd, 0o600)
     with os.fdopen(mfd, "w", encoding="utf-8") as fh:
         fh.write(header + "\n")
         for mp in sorted(records):
             fh.write(records[mp] + "\n")
+    os.replace(tmp, manifest)
     failed = [r for r in results if r["verdict"] not in ("ok", "ok-live")]
     print(
         f"\n{len(results) - len(failed)}/{len(results)} filesystems backed up; manifest: {manifest}"
