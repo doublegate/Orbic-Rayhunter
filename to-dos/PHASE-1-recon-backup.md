@@ -120,9 +120,12 @@ age -d /media/<offline-disk>/orbic-<date>.tar.age | sha256sum
 
 ## Sprint 1.4: OTA block, SIM, 0x11EB
 
-- [ ] T-OR-018: identify the FOTA client (process, init link, config path, update hosts)
-- [ ] T-OR-018: block it reversibly (stop, rename the init link; record original name, path,
-      hash); DNS block of update hosts if identified
+- [x] T-OR-018: identify the FOTA client -- done by RE of the backup
+      ([re/notes/ota-mechanism.md](../re/notes/ota-mechanism.md)): auto-FOTA already off
+      (`fota_cfg.xml`), no boot daemon, on-demand `oma_dm`/`dmclient`/`mdm-daemon`, triggers are
+      the UI `Fota*` goform actions + carrier OMA-DM push; no static update host to DNS-block
+- [ ] T-OR-018: block it reversibly (DEVICE WRITE, after a go-ahead): rename
+      `/usr/bin/oma_dm`+`dmclient`+`mdm-daemon`, record originals; preserve `autocheck=0`
 - [ ] T-OR-018: verify across a reboot without the SIM, then with the active SIM inserted
 - [ ] T-OR-012 (moved here from Sprint 1.1): read the firmware string as the stock UI reports it.
       It is shown only after the admin login, and the UI's page load calls the FOTA client, so it
@@ -130,8 +133,11 @@ age -d /media/<offline-disk>/orbic-<date>.tar.age | sha256sum
 - [ ] T-OR-019: run the 0x11EB procedure in [docs/TESTING.md](../docs/TESTING.md) with the
       upstream release daemon run manually (not installed persistently), then remove it
 - [ ] T-OR-019: record the result in DEVICE-PROFILE.md; delete the capture
-- [ ] T-OR-020: `re/notes/` entries for `goahead` endpoints, the FOTA client and the stock vs
-      upstream `misc-daemon` diff
+- [x] T-OR-020: `re/notes/` entries for the FOTA client + `goahead` `Fota*` endpoints
+      ([ota-mechanism.md](../re/notes/ota-mechanism.md)) and the stock vs upstream `misc-daemon`
+      diff ([install-footprint.md](../re/notes/install-footprint.md)); the install hooks
+      `rayhunter_daemon` start/stop into `misc-daemon` and adds files under `/data` -- fully
+      file-level reversible
 
 Acceptance criteria: FOTA client not running after reboot with the active SIM; firmware string
 unchanged; 0x11EB answer recorded with evidence; RE notes follow the RE-METHODOLOGY template.

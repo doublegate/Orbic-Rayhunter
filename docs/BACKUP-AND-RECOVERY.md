@@ -170,20 +170,29 @@ Verizon publishes newer builds than ours, up to `ORB400L_V1.3.2_BVZRT` ("System 
 unknown, and a forced 1.3.0 update was reported to remove root on one USB-era install
 ([ref-docs/orbic-firmware-v1.2.0.md](../ref-docs/orbic-firmware-v1.2.0.md) sections 1-2,
 [ref-docs/community-installs.md](../ref-docs/community-installs.md) section 2). An OTA is not
-reversible with any known tooling. Until the update mechanism is measured:
+reversible with any known tooling.
 
-1. Never start an update from the device menu or the Verizon Windows tool.
-2. Keep the active SIM out of the unit until the block below is verified. The OTA is reported to
-   need Verizon network contact (#163).
-3. Identify the client: `ps w`, `ls -l /etc/init.d /etc/rc*.d`, and RE of the candidate binary
-   (T-OR-020). Process name, config path and update hosts are TBD (on-device); #163 names a
-   `dmclient`.
-4. Block, after the verified backup: stop the client and disable its init link (rename, not
-   delete), recording the original name, path and hash so the change can be reversed exactly. If
-   the update hosts are identified, a DNS block is an additional layer. Permanent suppression with
-   a full reversal procedure is T-OR-096.
-5. Verify: reboot with the SIM inserted; the client is not running; the firmware string is
-   unchanged; repeat the check after several days.
+The mechanism is now measured from the backed-up firmware (T-OR-020, full detail in
+[re/notes/ota-mechanism.md](../re/notes/ota-mechanism.md)): **auto-FOTA is already off** on this
+unit (`/etc/xml/fota/fota_cfg.xml`: `autocheck`/`autodown`/`autoinstall` all `0`, server URLs
+empty), there is **no FOTA daemon at boot**, and the updater (`/usr/bin/oma_dm`, `dmclient`,
+`mdm-daemon`) runs only on demand. No static update hostname exists to DNS-block (the server is
+provisioned dynamically via carrier OMA-DM). Two triggers remain: the stock UI's `goahead`
+`/goform/Fota*` actions, and a carrier-pushed OMA-DM session (needs the SIM + Verizon network,
+#163). The block therefore is:
+
+1. Never start an update from the device menu, the stock web UI (its page load calls
+   `FotaGetVersionInfo`), or the Verizon Windows tool. `orbic-ui-read.py` refuses the `Fota*`
+   endpoints.
+2. Keep the active SIM out of the unit until the block is verified (no network -> no carrier push).
+3. Preserve the `autocheck=0`/`autodown=0`/`autoinstall=0` policy; record `fota_cfg.xml`'s
+   baseline SHA-256 and re-check it after any device work.
+4. Block, after the verified backup: reversibly neutralize the on-demand updater -- rename
+   `/usr/bin/oma_dm`, `/usr/bin/dmclient`, `/usr/bin/mdm-daemon` (or clear their exec bit),
+   recording each original name, path and hash so the change reverses exactly (rename, not
+   delete). Permanent suppression with a full reversal procedure is T-OR-096.
+5. Verify: reboot with the SIM inserted; none of those updater processes run; `fota_cfg.xml` and
+   the firmware string are unchanged; repeat the check after several days.
 
 Rayhunter's own `auto_check_updates` only queries GitHub releases and is unrelated to Verizon OTA
 ([ref-docs/rayhunter-upstream-overview.md](../ref-docs/rayhunter-upstream-overview.md) section 6).

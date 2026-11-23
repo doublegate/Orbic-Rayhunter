@@ -48,7 +48,18 @@ READ_ENDPOINTS = {
     "GetSimlockStatus": "/action/GetSimlockStatus",
 }
 # Named explicitly so that a future edit cannot add it by accident.
-REFUSED = {"FotaGetVersionInfo": "asks the device to check for an OTA update"}
+# Endpoints that look like reads (Get*) but drive the OTA/FOTA flow on this unit
+# (served by goahead's /goform/Fota* handlers, per RE in re/notes/). Refused with a
+# clear reason so they are never mistaken for a safe read; the write-shaped ones
+# (FotaDownload, FotaUpgrade, FotaCheckNewVersion) are already refused by the
+# allowlist. See docs/DEVICE-PROFILE.md "OTA/FOTA mechanism".
+_OTA = "drives the device's OTA/FOTA update flow"
+REFUSED = {
+    "FotaGetVersionInfo": "asks the device to check for an OTA update",
+    "FotaGetCheckVersionInfo": _OTA,
+    "FotaGetDownloadStatus": _OTA,
+    "FotaGetUpgradeStatus": _OTA,
+}
 
 # Credential-class tokens matched as a SUBSTRING anywhere in the key -- a key with
 # no camelCase/underscore boundary (`wifikey`, `WPAKEY`, `wlanssid`, `simpin`) must

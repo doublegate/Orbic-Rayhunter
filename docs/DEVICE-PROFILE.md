@@ -164,7 +164,7 @@ rayhunter:  192.168.1.1:8080 not running / not installed
 | Listening sockets | `netstat -tlnup` (or `netstat -tln` if `-p` is unsupported) | measured 2026-11-23 |
 | Init layout | `ls -l /etc/init.d /etc/rc*.d` | measured 2026-11-23 |
 | Stock `misc-daemon` hash | `sha256sum /etc/init.d/misc-daemon` | measured 2026-11-23 |
-| FOTA/OTA client | `ps w \| grep -i -E "fota\|dm\|ota\|update"; ls /etc/init.d \| grep -i -E "fota\|dm\|ota"` | measured 2026-11-23: no persistent FOTA/OTA daemon and no matching `/etc/init.d` link; the OTA check is the stock UI's `FotaGetVersionInfo` request on page load, which is why `orbic-ui-read.py` refuses that endpoint |
+| FOTA/OTA client | `ps w \| grep -i -E "fota\|dm\|ota\|update"; ls /etc/init.d` + RE (T-OR-020) | measured 2026-11-23: no persistent FOTA/OTA daemon and no matching `/etc/init.d` link. RE of the backed-up firmware ([re/notes/ota-mechanism.md](../re/notes/ota-mechanism.md)): auto-FOTA is **off** (`/etc/xml/fota/fota_cfg.xml` autocheck/autodown/autoinstall = 0, server URLs empty); the on-demand updater is `/usr/bin/oma_dm` + `dmclient` + `mdm-daemon`; triggers are the stock UI's `goahead` `/goform/Fota*` actions and a carrier-pushed OMA-DM session (needs SIM). `orbic-ui-read.py` refuses the `Fota*` read endpoints |
 | QCMAP config present | `ls -l /usrdata/data/qcmap/` (do not print `mobileap_cfg.xml` into this file) | measured 2026-11-23 |
 | USB mode | `cat /usrdata/mode.cfg /usrdata/mode_tmp.cfg /data/usb/boot_hsusb_composition 2>&1` | measured 2026-11-23 |
 | AT forwarder | `ps w \| grep atfwd_daemon` | measured 2026-11-23: `atfwd_daemon` running (started by `misc-daemon`) |

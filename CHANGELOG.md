@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `re/notes/ota-mechanism.md` and `re/notes/install-footprint.md`: read-only RE of the backed-up
+  firmware (T-OR-020). Auto-FOTA is off on this unit, there is no boot-time update daemon, and
+  the on-demand updater (`oma_dm`/`dmclient`/`mdm-daemon`) is triggered only by the stock UI's
+  `goahead` `/goform/Fota*` actions or a carrier-pushed OMA-DM session. The upstream install
+  footprint is a `misc-daemon` hook plus files under `/data`, fully file-level reversible.
+
+### Changed
+
+- `scripts/orbic-ui-read.py` refuses all read-shaped `Fota*` endpoints (not only
+  `FotaGetVersionInfo`), since each drives the device OTA flow.
+- `docs/DEVICE-PROFILE.md` and `docs/BACKUP-AND-RECOVERY.md` record the measured OTA mechanism
+  and the refined, evidence-based OTA-block plan (T-OR-018).
+
 ## [0.1.0] - 2026-11-23
 
 Foundation plus Phase 1 on-device reconnaissance and a verified pre-write backup. The repository,
