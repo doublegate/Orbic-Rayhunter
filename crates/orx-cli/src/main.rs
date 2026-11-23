@@ -283,8 +283,15 @@ fn cmd_install(backup: &Path, dist: &Path, daemon: &Path, ip: &str, apply: bool)
 /// `orx uninstall`: reverse the install (restore stock misc-daemon, remove our
 /// files), dry-run unless --apply.
 fn cmd_uninstall(backup: &Path, ip: &str, apply: bool) -> ExitCode {
-    // The true stock misc-daemon comes from the verified backup, not the device
-    // (which may carry the hooked script).
+    // Gate FIRST, before touching root.tar: a tampered/corrupt archive must be
+    // refused by the backup gate, not handed to `tar`. (execute re-checks the
+    // gate; the extra rootfs hash on this rare op is acceptable.)
+    if let Err(e) = verify::gate(backup) {
+        eprintln!("error: backup gate not satisfied, refusing to uninstall: {e}");
+        return ExitCode::from(1);
+    }
+    // The true stock misc-daemon comes from the (now verified) backup, not the
+    // device (which may carry the hooked script).
     let stock = match install::stock_misc_daemon(backup) {
         Ok(b) => b,
         Err(e) => {

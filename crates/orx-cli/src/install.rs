@@ -194,13 +194,17 @@ pub fn install_plan(
 /// regardless of the device's current (possibly hooked) state.
 pub fn stock_misc_daemon(backup_dir: &Path) -> Result<Vec<u8>, String> {
     let tar = backup_dir.join("root.tar");
-    if !tar.is_file() {
-        return Err(format!("{} not found", tar.display()));
-    }
+    // Open in Rust and feed the archive on stdin to `tar -xO` (no `-f`): portable
+    // across GNU/BSD tar and immune to a `--dir` containing `:` (which GNU tar
+    // would treat as a remote `host:file` and invoke rsh) or a leading `-`.
+    let file =
+        std::fs::File::open(&tar).map_err(|e| format!("cannot open {}: {e}", tar.display()))?;
     let out = std::process::Command::new("tar")
-        .arg("-xOf")
-        .arg(&tar)
+        .arg("-xO")
         .arg("./etc/init.d/misc-daemon")
+        .stdin(std::process::Stdio::from(file))
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
         .output()
         .map_err(|e| format!("running tar on {}: {e}", tar.display()))?;
     if !out.status.success() {
@@ -211,6 +215,21 @@ pub fn stock_misc_daemon(backup_dir: &Path) -> Result<Vec<u8>, String> {
         ));
     }
     check_init_script(&out.stdout, "stock misc-daemon from backup")?;
+    // The backup may have been taken AFTER Phase 2 (upstream already installed),
+    // in which case its misc-daemon is the HOOKED one -- restoring that would
+    // leave a dangling hook after we remove rayhunter_daemon. Only a genuinely
+    // stock (unhooked) script is a valid restore target.
+    if out
+        .stdout
+        .windows(b"rayhunter_daemon".len())
+        .any(|w| w == b"rayhunter_daemon")
+    {
+        return Err(
+            "misc-daemon in the backup is already hooked for rayhunter (backup taken after install); \
+             supply a stock backup to uninstall"
+                .to_string(),
+        );
+    }
     Ok(out.stdout)
 }
 
@@ -413,6 +432,39 @@ mod tests {
         );
         assert!(sh.fs.contains_key("/etc/init.d/misc-daemon.orx-new"));
         assert!(sh.fs.contains_key("/data/rayhunter/config.toml.orx-new"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stock_misc_daemon_extracts_and_rejects_hooked() {
+        let d = tmp();
+        // Build a root.tar containing ./etc/init.d/misc-daemon via host tar.
+        let make_tar = |body: &str| {
+            let root = d.join("tarroot");
+            let p = root.join("etc/init.d");
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("misc-daemon"), body).unwrap();
+            let status = std::process::Command::new("tar")
+                .arg("-cf")
+                .arg(d.join("root.tar"))
+                .arg("-C")
+                .arg(&root)
+                .arg("./etc/init.d/misc-daemon")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let _ = std::fs::remove_dir_all(&root);
+        };
+        // Stock (unhooked) -> extracted.
+        make_tar("#!/bin/sh\nstart() { echo hi; }\n");
+        assert!(stock_misc_daemon(&d).unwrap().starts_with(b"#!/bin/sh"));
+        // Hooked (references rayhunter_daemon) -> rejected.
+        make_tar("#!/bin/sh\nstart() { /etc/init.d/rayhunter_daemon start; }\n");
+        assert!(
+            stock_misc_daemon(&d)
+                .unwrap_err()
+                .contains("already hooked")
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

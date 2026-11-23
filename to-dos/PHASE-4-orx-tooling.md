@@ -112,11 +112,11 @@ cargo run -p orx-cli -- verify
 
 - [ ] T-OR-038: list via `/api/qmdl-manifest`; download QMDL, ndjson and GPS files; host
       manifest with SHA-256; skip already-pulled entries
-- [x] T-OR-039: `orx uninstall --dir <backup> [--apply]` (v0.8.0) restores the stock misc-daemon
-      from the stash `orx install` saves (`/data/rayhunter/misc-daemon.orig`) and removes our
-      files, leaving `/data/rayhunter-data` recordings; dry-run unless `--apply`, backup-gated
-- [ ] T-OR-039: `orx uninstall`/`orx restore <file>` falling back to the backup's `root.tar` when
-      the install stash is absent -- follow-up
+- [x] T-OR-039: `orx uninstall --dir <backup> [--apply]` (v0.8.0) restores the true stock
+      misc-daemon extracted from the verified backup's `root.tar` (gated before extract; refuses an
+      already-hooked script), atomically, and removes our files, leaving `/data/rayhunter-data`
+      recordings; dry-run unless `--apply`, backup-gated
+- [ ] T-OR-039: `orx restore <file>` for arbitrary single stock files from the backup -- follow-up
 
 Acceptance criteria: uninstall on the real unit leaves `misc-daemon` byte-identical to the backup
 and no Rayhunter files; reinstall afterwards passes `orx verify`.
