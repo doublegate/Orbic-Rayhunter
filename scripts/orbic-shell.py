@@ -230,13 +230,17 @@ def run_one(
     try:
         conn.sendall(payload.encode("utf-8", "surrogateescape"))
         chunks: list[bytes] = []
-        needle = marker.encode()
+        # The status arrives AFTER the marker (`printf '\n<marker> %s\n' "$?"`), so
+        # stop only once the COMPLETE `<marker> <status>\n` line is present -- not on
+        # the bare marker, which may split from its status across TCP reads -- or on
+        # EOF (the trailing `exit` closes the shell).
+        done = re.compile(re.escape(marker).encode() + rb" -?\d+\n")
         while True:
             data = conn.recv(4096)
             if not data:
                 break
             chunks.append(data)
-            if needle in b"".join(chunks[-2:]):
+            if done.search(b"".join(chunks[-2:])):
                 break
     finally:
         conn.close()
