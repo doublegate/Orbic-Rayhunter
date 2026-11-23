@@ -5,4 +5,5 @@
 //! (see `to-dos/`).
 
 pub mod probe;
+pub mod sha256;
 pub mod usb;

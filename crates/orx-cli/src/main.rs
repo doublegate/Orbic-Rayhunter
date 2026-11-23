@@ -38,6 +38,16 @@ fn opt_json(v: Option<&str>) -> String {
     v.map_or_else(|| "null".to_string(), |s| format!("\"{}\"", json_escape(s)))
 }
 
+/// A device-reported version is trusted only if it is a plain version token:
+/// 1-64 chars of `[0-9A-Za-z.+-]`. Anything else (control chars, escape
+/// sequences, overlong input) is dropped rather than printed.
+fn sane_version(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 64
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
+}
+
 fn doctor(ip: &str, json: bool) -> ExitCode {
     let (stock, rh) = match (
         probe::socket(ip, probe::STOCK_UI_PORT),
@@ -67,6 +77,10 @@ fn doctor(ip: &str, json: bool) -> ExitCode {
         probe::http_get(rh, "/api/system-stats", t)
             .ok()
             .and_then(|b| probe::json_str_field(&b, "rayhunter_version"))
+            // The version is attacker-influenceable (a compromised daemon or a
+            // MITM on the local link), so reject anything that is not a plain
+            // version token before it reaches a terminal or JSON output.
+            .filter(|v| sane_version(v))
     } else {
         None
     };

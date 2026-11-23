@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Default address of the Orbic on its RNDIS / Wi-Fi network.
 pub const DEFAULT_DEVICE_IP: &str = "192.168.1.1";
@@ -31,9 +31,12 @@ pub fn socket(ip: &str, port: u16) -> Result<SocketAddr, String> {
 /// broken peer cannot stream unboundedly into memory.
 pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> Result<String, String> {
     const MAX_BODY: usize = 256 * 1024;
+    // A single total deadline bounds the whole exchange. A per-read timeout alone
+    // lets a slow-drip peer hold the connection open forever (every read resets
+    // the clock), so each read's timeout is the time REMAINING to the deadline.
+    let deadline = Instant::now() + timeout;
     let mut stream =
         TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
-    stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
     let req =
         format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\nAccept: */*\r\n\r\n");
@@ -43,6 +46,11 @@ pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> Result<Strin
     let mut raw = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("read: deadline exceeded".to_string());
+        }
+        stream.set_read_timeout(Some(remaining)).ok();
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {

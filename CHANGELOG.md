@@ -2,6 +2,14 @@
 
 ### Added
 
+- `orx-cli` `sha256` module: a std-only, streaming SHA-256 (no dependency added) for verifying
+  device transfers against a device-side `sha256sum`, validated against the FIPS 180-4 known
+  vectors (incl. the one-million-'a' case). Foundation for the Sprint 4.1 transport (T-OR-033).
+- Hardening (from the automated security review of doctor v2): `probe::http_get` now enforces a
+  single total deadline across all reads (a per-read timeout let a slow-drip peer stall
+  indefinitely), and `orx doctor` validates the device-reported Rayhunter version against a
+  strict `[0-9A-Za-z.+-]{1,64}` token before printing it (a compromised daemon or local MITM
+  could otherwise inject terminal escape sequences).
 - `orx doctor` v2 (T-OR-032, Sprint 4.1): `--json` machine-readable output, the running
   Rayhunter version read from `/api/system-stats` when `:8080` answers, and documented exit
   codes (0 found, 1 nothing found, 2 usage/host error). A minimal std-only HTTP/1.0 client and a
