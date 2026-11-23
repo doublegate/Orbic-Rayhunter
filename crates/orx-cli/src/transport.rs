@@ -109,7 +109,13 @@ pub trait Shell {
     /// fit. The end marker and trailing status are stripped from `sink`.
     fn run_to(&mut self, command: &str, sink: &mut dyn Write) -> Result<i32, String>;
 
-    /// Transfer raw `bytes` to `remote` with NO verification.
+    /// Transfer raw `bytes` to `remote` with NO content verification (callers use
+    /// `send_file` for that). The transfer is ATOMIC on the device: `remote` is
+    /// replaced only on a complete, exact-length transfer, and is left untouched
+    /// on any failure. `remote` is (re)created, so a caller passing an existing
+    /// path gets a new file with default permissions, not the old mode bits --
+    /// callers that need a specific mode set it afterward (as `install::execute`
+    /// does with `chmod`).
     fn put(&mut self, remote: &str, bytes: &[u8]) -> Result<(), String>;
 
     /// Adjust the per-command timeout (e.g. a short bound for `reboot`, which
@@ -147,11 +153,18 @@ pub trait Shell {
 pub struct TcpShell {
     pub addr: SocketAddr,
     pub timeout: Duration,
+    /// Port the one-shot `put` data listener binds on the device (8081, as the
+    /// upstream installer uses). Overridable for loopback tests.
+    pub data_port: u16,
 }
 
 impl TcpShell {
     pub fn new(addr: SocketAddr, timeout: Duration) -> Self {
-        Self { addr, timeout }
+        Self {
+            addr,
+            timeout,
+            data_port: 8081,
+        }
     }
 
     fn connect(&self) -> Result<TcpStream, String> {
@@ -211,6 +224,37 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
+}
+
+/// Build the device-side shell command that receives one file on `data_port` and
+/// atomically commits it to `remote`. Factored out so a test can run it through
+/// `/bin/sh`. Properties, all exercised on the device:
+/// - stages into a per-transfer temp (`{remote}.{marker}.ncpart`, so concurrent
+///   or retried transfers to the same `remote` cannot clobber each other's temp);
+/// - commits `remote` only when `nc` exited cleanly AND the received byte count
+///   equals `len` AND the `mv` succeeds; otherwise `remote` is left untouched;
+/// - a watchdog (stdio detached so it never holds the control shell's socket)
+///   kills the listener after `listen_secs`. Its `TERM` trap is registered BEFORE
+///   `sleep` is spawned and guarded by `[ -n "$s" ]`, so an immediate cancel
+///   cannot leave `sleep` orphaned;
+/// - reports the committing step's exit status in run()'s `{marker} <status>.`
+///   framing.
+fn listener_command(
+    data_port: u16,
+    remote: &str,
+    marker: &str,
+    len: usize,
+    listen_secs: u64,
+) -> String {
+    let part = format!("{remote}.{marker}.ncpart");
+    format!(
+        "nc -l -p {data_port} > {part} & p=$!; \
+         (s=''; trap '[ -n \"$s\" ] && kill $s 2>/dev/null; exit' TERM; sleep {listen_secs} & s=$!; wait $s; kill $p 2>/dev/null) </dev/null >/dev/null 2>&1 & w=$!; \
+         wait $p; st=$?; kill $w 2>/dev/null; ok=0; \
+         if [ $st -eq 0 ] && [ \"$(wc -c < {part} 2>/dev/null | tr -d ' ')\" = \"{len}\" ]; then mv {part} {remote} && ok=1; fi; \
+         [ $ok -eq 1 ] || rm -f {part}; [ $ok -eq 1 ] && st=0 || st=1; \
+         printf '{marker} %s.' \"$st\"\n"
+    )
 }
 
 impl Shell for TcpShell {
@@ -283,33 +327,147 @@ impl Shell for TcpShell {
         if !safe_remote(remote) {
             return Err(format!("unsafe remote path: {remote:?}"));
         }
-        let mut stream = self.connect()?;
-        // `cat > remote` then stream bytes; closing the write half is EOF to cat.
-        stream
-            .write_all(format!("cat > {remote}\n").as_bytes())
-            .map_err(|e| format!("write cmd: {e}"))?;
-        stream
-            .write_all(bytes)
-            .map_err(|e| format!("write data: {e}"))?;
-        stream
-            .shutdown(Shutdown::Write)
-            .map_err(|e| format!("shutdown: {e}"))?;
-        // Drain until the device closes, bounded by the timeout, so the write lands.
-        let deadline = Instant::now() + self.timeout;
-        let mut sink = [0u8; 4096];
+        // The control channel is `nc -ll -e /bin/sh`; streaming a bulk payload
+        // through `cat > file` is LOSSY -- the device nc drops bytes when its
+        // pipe to the shell backs up (verified: a 4 KiB payload arrived as
+        // ~3 KiB, independent of encoding). Instead use a one-shot device-side
+        // listener (upstream's installer mechanism): the data path is
+        // socket -> file with no shell pipe in it, which is lossless. send_file
+        // still verifies the device-side sha256 afterward, so any residual race
+        // (stale listener, port in use) fails closed rather than writing garbage.
+        let data_port = self.data_port;
+        let data_addr = SocketAddr::new(self.addr.ip(), data_port);
+        let marker = make_marker();
+        let mut ctl = self.connect()?;
+        // Build a self-bounding, atomic, cleaned-up listener command:
+        //  - write into an internal `.ncpart`, and `mv` onto `{remote}` ONLY on a
+        //    clean transfer, so a bind failure never truncates `{remote}` (which
+        //    matters because Shell::put is a public primitive: a caller may pass an
+        //    existing file, not a disposable temp);
+        //  - a watchdog kills the listener after LISTEN_SECS so a transfer that is
+        //    never completed (we fail to connect, or a peer grabs and holds it)
+        //    cannot leave `nc -l` orphaned in accept() on the device;
+        //  - commit `{remote}` ONLY when nc exited cleanly AND the received byte
+        //    count exactly equals what we sent AND the `mv` itself succeeded;
+        //    otherwise `{remote}` is left untouched. This single size gate defeats
+        //    a mid-transfer failure, a premature peer close, and a zero-byte
+        //    connect -- none can commit a truncated or empty file (a same-length
+        //    wrong payload is still caught by send_file's device-side sha256);
+        //  - report the committing step's exit status in run()'s framing.
+        // Bound the listener to the caller's own timeout (clamped), not a fixed
+        // wall clock: too short kills an active transfer of the large daemon on a
+        // slow link; too long leaves the port bound after a failed connect.
+        let listen_secs = self.timeout.as_secs().clamp(30, 1800);
+        let len = bytes.len();
+        ctl.write_all(listener_command(data_port, remote, &marker, len, listen_secs).as_bytes())
+            .map_err(|e| format!("start device listener: {e}"))?;
+
+        // Peek the control channel BEFORE connecting: a healthy listener is silent
+        // (nc blocks in accept(), nothing is printed until the transfer ends), so
+        // ANY output now is an error state -- most importantly the completion
+        // marker, which means the listener exited immediately (e.g. a stale
+        // listener already holds the port). Fail closed in every such case so we
+        // never stream this file's bytes into a listener bound to another path.
+        ctl.set_read_timeout(Some(Duration::from_millis(300))).ok();
+        let mut pbuf = [0u8; 256];
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            stream.set_read_timeout(Some(remaining)).ok();
-            match stream.read(&mut sink) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => break,
+            match ctl.read(&mut pbuf) {
+                Ok(0) => return Err("device control channel closed before transfer".to_string()),
+                Ok(n) => {
+                    // Surface the device's own words: it may be a stale listener
+                    // (EADDRINUSE), or the shell failing to open `{part}` (EROFS,
+                    // ENOSPC, missing dir) before `nc` even ran.
+                    let said = String::from_utf8_lossy(&pbuf[..n]);
+                    let said = said.replace(|c: char| c.is_control(), " ");
+                    return Err(format!(
+                        "device listener on port {data_port} produced output before any transfer \
+                         (did not bind -- stale listener, or the target could not be opened); aborted before sending: {}",
+                        said.trim()
+                    ));
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
+                Err(e) => return Err(format!("device control channel: {e}")),
             }
         }
-        Ok(())
+
+        // Connect the data channel; retry briefly while the listener binds.
+        // Give up connecting after the caller's timeout, capped at 10 s (the
+        // listener binds within a second or two; no need to retry for minutes).
+        let connect_deadline = Instant::now() + self.timeout.min(Duration::from_secs(10));
+        let data = loop {
+            // Never let a single connect attempt overrun the deadline.
+            let budget = connect_deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(1));
+            match TcpStream::connect_timeout(&data_addr, budget.max(Duration::from_millis(50))) {
+                Ok(s) => break Some(s),
+                Err(_) if Instant::now() < connect_deadline => {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                Err(_) => break None,
+            }
+        };
+        let mut data = match data {
+            Some(s) => s,
+            None => {
+                // Do NOT poke the port: a zero-byte connect would give the listener
+                // a clean EOF, and only the device-side size gate (received !=
+                // {len}) stops that from committing an empty file. Leave the
+                // watchdog to reap the orphaned listener after LISTEN_SECS.
+                return Err(format!("could not connect to device data port {data_port}"));
+            }
+        };
+        data.set_write_timeout(Some(self.timeout)).ok();
+        data.write_all(bytes)
+            .map_err(|e| format!("write data: {e}"))?;
+        data.shutdown(Shutdown::Write)
+            .map_err(|e| format!("data shutdown: {e}"))?;
+        drop(data); // EOF -> device nc writes the file and exits
+
+        // Read the listener's completion: wait for the full `{marker} <status>.`
+        // (the trailing '.' guarantees the status is complete even if TCP split it).
+        let deadline = Instant::now() + self.timeout;
+        let end = format!("{marker} ");
+        let mut raw: Vec<u8> = Vec::new(); // the peek consumed nothing on the healthy path
+        let mut rbuf = [0u8; 256];
+        loop {
+            if let Some(at) = find_sub(&raw, end.as_bytes()) {
+                let tail = &raw[at + end.len()..];
+                if let Some(dot) = tail.iter().position(|&b| b == b'.') {
+                    let status: i32 = std::str::from_utf8(&tail[..dot])
+                        .ok()
+                        .and_then(|d| d.trim().parse().ok())
+                        .ok_or_else(|| "could not parse device listener status".to_string())?;
+                    return if status == 0 {
+                        Ok(())
+                    } else {
+                        Err(format!("device listener exited with status {status}"))
+                    };
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("device listener did not report completion".to_string());
+            }
+            ctl.set_read_timeout(Some(remaining)).ok();
+            match ctl.read(&mut rbuf) {
+                Ok(0) => return Err("device control channel closed before status".to_string()),
+                Ok(n) => {
+                    raw.extend_from_slice(&rbuf[..n]);
+                    // The completion line is tiny; a flood of unexpected output is
+                    // a malfunction, not a status we will ever parse.
+                    if raw.len() > 64 * 1024 {
+                        return Err("device control channel produced unexpected output".to_string());
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {} // retry
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Err("device listener did not report completion".to_string());
+                }
+                Err(e) => return Err(format!("device control channel: {e}")),
+            }
+        }
     }
 }
 
@@ -474,6 +632,186 @@ mod tests {
         let r = sh.run("whatever").unwrap();
         assert_eq!(r.output, "line1\nline2");
         assert_eq!(r.status, 3);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn tcpshell_put_uses_device_listener_losslessly() {
+        use std::net::TcpListener;
+        // Control channel (stands in for :24) and a free data port (for :8081).
+        let ctl = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ctl_addr = ctl.local_addr().unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").unwrap();
+        let data_port = data.local_addr().unwrap().port();
+        // A payload with the full byte range (the real bug ate bytes over the
+        // shell pipe); the device-listener path must deliver it exactly.
+        let payload: Vec<u8> = (0..6000u32).map(|i| (i % 256) as u8).collect();
+        let expect = payload.clone();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = ctl.accept().unwrap();
+            // Read the listener command line.
+            let mut cmd = Vec::new();
+            let mut b = [0u8; 1];
+            while c.read(&mut b).unwrap() == 1 {
+                cmd.push(b[0]);
+                if b[0] == b'\n' {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&cmd);
+            assert!(line.contains(&format!("nc -l -p {data_port}")));
+            let marker = line
+                .split("printf '")
+                .nth(1)
+                .and_then(|r| r.split(' ').next())
+                .unwrap()
+                .to_string();
+            // Accept the data connection and read the whole payload (no shell pipe).
+            let (mut d, _) = data.accept().unwrap();
+            let mut got = Vec::new();
+            d.read_to_end(&mut got).unwrap();
+            // Report the listener finished with status 0.
+            c.write_all(format!("{marker} 0.").as_bytes()).unwrap();
+            got
+        });
+        let mut sh = TcpShell::new(ctl_addr, Duration::from_secs(5));
+        sh.data_port = data_port;
+        sh.put("/data/rayhunter/x", &payload).unwrap();
+        let got = server.join().unwrap();
+        assert_eq!(got, expect, "device-listener put must be byte-exact");
+    }
+
+    /// Read one command line from the control socket and return the chosen marker.
+    fn read_cmd_marker(c: &mut TcpStream) -> String {
+        let mut cmd = Vec::new();
+        let mut b = [0u8; 1];
+        while c.read(&mut b).map(|n| n == 1).unwrap_or(false) {
+            cmd.push(b[0]);
+            if b[0] == b'\n' {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&cmd)
+            .split("printf '")
+            .nth(1)
+            .and_then(|r| r.split(' ').next())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn tcpshell_put_fails_closed_when_listener_outputs_before_transfer() {
+        use std::net::TcpListener;
+        // The control channel speaks BEFORE any data connection -> the listener
+        // did not bind (e.g. a stale listener). put must abort without connecting.
+        let ctl = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ctl_addr = ctl.local_addr().unwrap();
+        // A data port nothing listens on: if put wrongly connected it would hang.
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = ctl.accept().unwrap();
+            let marker = read_cmd_marker(&mut c);
+            c.write_all(format!("{marker} 1.").as_bytes()).unwrap(); // immediate failure
+        });
+        let mut sh = TcpShell::new(ctl_addr, Duration::from_secs(5));
+        sh.data_port = 1; // unbound; must never be reached
+        let err = sh.put("/data/rayhunter/x", b"payload").unwrap_err();
+        assert!(err.contains("before any transfer"), "got: {err}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn tcpshell_put_reports_nonzero_listener_status() {
+        use std::net::TcpListener;
+        let ctl = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ctl_addr = ctl.local_addr().unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").unwrap();
+        let data_port = data.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = ctl.accept().unwrap();
+            let marker = read_cmd_marker(&mut c); // silent during the peek
+            let (mut d, _) = data.accept().unwrap();
+            let mut got = Vec::new();
+            d.read_to_end(&mut got).unwrap();
+            c.write_all(format!("{marker} 1.").as_bytes()).unwrap(); // device-side failure
+        });
+        let mut sh = TcpShell::new(ctl_addr, Duration::from_secs(5));
+        sh.data_port = data_port;
+        let err = sh.put("/data/rayhunter/x", b"payload").unwrap_err();
+        assert!(err.contains("status 1"), "got: {err}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn tcpshell_put_errors_on_control_eof_before_status() {
+        use std::net::TcpListener;
+        let ctl = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ctl_addr = ctl.local_addr().unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").unwrap();
+        let data_port = data.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = ctl.accept().unwrap();
+            let _ = read_cmd_marker(&mut c);
+            let (mut d, _) = data.accept().unwrap();
+            let mut got = Vec::new();
+            d.read_to_end(&mut got).unwrap();
+            drop(c); // close without ever sending the marker
+        });
+        let mut sh = TcpShell::new(ctl_addr, Duration::from_secs(5));
+        sh.data_port = data_port;
+        assert!(sh.put("/data/rayhunter/x", b"payload").is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn listener_command_is_valid_posix_sh() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let cmd = listener_command(8081, "/data/rayhunter/x.orx-new", "__orx_test__", 6000, 45);
+        // The emitted command must be syntactically valid sh (catches a quoting or
+        // syntax regression that the mocked loopback tests cannot).
+        let mut child = Command::new("sh")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(cmd.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "sh -n rejected the command: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The per-transfer temp carries the marker; the size gate and atomic mv
+        // reference the same temp.
+        assert!(cmd.contains("nc -l -p 8081 > /data/rayhunter/x.orx-new.__orx_test__.ncpart"));
+        assert!(cmd.contains("wc -c < /data/rayhunter/x.orx-new.__orx_test__.ncpart"));
+        assert!(cmd.contains(
+            "mv /data/rayhunter/x.orx-new.__orx_test__.ncpart /data/rayhunter/x.orx-new"
+        ));
+        assert!(cmd.contains("printf '__orx_test__ %s.'"));
+    }
+
+    #[test]
+    fn tcpshell_put_errors_when_data_port_unreachable() {
+        use std::net::TcpListener;
+        let ctl = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ctl_addr = ctl.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = ctl.accept().unwrap();
+            let _ = read_cmd_marker(&mut c); // stays silent; data port never opens
+            std::thread::sleep(Duration::from_secs(1));
+        });
+        // Short timeout so the connect-retry loop gives up quickly.
+        let mut sh = TcpShell::new(ctl_addr, Duration::from_millis(400));
+        sh.data_port = 1; // unbound -> connect refused
+        let err = sh.put("/data/rayhunter/x", b"payload").unwrap_err();
+        assert!(err.contains("data port"), "got: {err}");
         server.join().unwrap();
     }
 

@@ -191,6 +191,10 @@ With `--apply` it, in order:
      `/data/rayhunter/config.toml` (0644). Values and reasons: [CONFIGURATION.md](CONFIGURATION.md);
    - `rayhunter_daemon` -> `/etc/init.d/rayhunter_daemon` (0755);
    - the hooked `misc-daemon` -> `/etc/init.d/misc-daemon` (0755), last before reboot.
+
+   Each transfer streams over a one-shot device-side `nc -l` listener on TCP 8081 (the data path is
+   socket -> file, no shell pipe): the control shell on TCP 24 drops bytes on a bulk `cat >` write,
+   so this is required for a lossless binary transfer. The device re-hashes each file before the `mv`.
 3. Runs `sync`, then reboots.
 
 The daemon binary and both init scripts are validated before any write: the daemon must be a
@@ -231,7 +235,9 @@ orx uninstall --dir <backup-dir>           # T-OR-039 (v0.8.0): DRY RUN
 orx uninstall --dir <backup-dir> --apply   # execute
 ```
 
-`orx uninstall` is **dry-run by default** and **backup-gated** like install. With `--apply` it
+`orx uninstall` needs the root shell on TCP 24, which is **not reboot-persistent** on this unit, so
+it is absent after an install reboot -- re-establish it first (the Phase 1 method). `orx uninstall`
+is **dry-run by default** and **backup-gated** like install. With `--apply` it
 restores the **true stock** `/etc/init.d/misc-daemon` -- extracted from the verified backup's
 `root.tar` (piped to `tar -xO -f -`), NOT copied from the device, because the device may already carry the
 hooked script -- atomically (`<path>.orx-new` -> `chmod 755` -> `mv`), then removes

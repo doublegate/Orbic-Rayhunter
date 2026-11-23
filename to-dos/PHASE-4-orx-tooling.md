@@ -197,3 +197,8 @@ command is backup-gated, dry-run-first, atomic, and validates payloads; these ma
       retention/free-space thresholds) instead of bare upstream `config.toml.in`; ties to T-OR-040.
 - [ ] T-OR-036c: `/data` (and `/`) free-space preflight before staging a second copy of the daemon,
       or stop `rayhunter_daemon` first (unlinked-but-open blocks hold space until reboot; #1192).
+- [ ] T-OR-036d: bound the `orx install` data listener's lifetime and exposure (busybox `nc -w`
+      idle-timeout and/or a `timeout` wrapper, and `-s` bind to the USB-side address if supported)
+      -- needs on-device verification of the available busybox nc flags; the one-shot listener +
+      device-side hash check already bound the risk, and the pre-connect peek fails closed on a
+      stale listener.

@@ -11,7 +11,7 @@
 <p align="center">
 <a href="https://github.com/doublegate/Orbic-Rayhunter/actions/workflows/ci.yml"><img src="https://github.com/doublegate/Orbic-Rayhunter/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="https://github.com/doublegate/Orbic-Rayhunter/actions/workflows/docs.yml"><img src="https://github.com/doublegate/Orbic-Rayhunter/actions/workflows/docs.yml/badge.svg" alt="Docs"></a> <a href="https://github.com/doublegate/Orbic-Rayhunter/actions/workflows/security.yml"><img src="https://github.com/doublegate/Orbic-Rayhunter/actions/workflows/security.yml/badge.svg" alt="Security"></a> <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.98.0-f97316.svg?logo=rust" alt="Rust 1.98.0"></a> <a href="Cargo.toml"><img src="https://img.shields.io/badge/unsafe__code-forbid-16a34a.svg" alt="unsafe_code: forbid"></a><br/>
 <a href="#support-matrix"><img src="https://img.shields.io/badge/device-Orbic%20RC400L%20(MDM9207)-475569.svg" alt="Device: Orbic RC400L (MDM9207)"></a> <a href="docs/BUILD.md"><img src="https://img.shields.io/badge/target-armv7%20musleabihf-64748b.svg" alt="Target: armv7 musleabihf"></a> <a href="https://github.com/EFForg/rayhunter/releases/tag/v0.13.0"><img src="https://img.shields.io/badge/upstream-Rayhunter%20v0.13.0-0ea5e9.svg" alt="Upstream: Rayhunter v0.13.0"></a><br/>
-<a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg" alt="License: GPL-3.0-or-later"></a> <a href="#scope-and-legal"><img src="https://img.shields.io/badge/detection-passive%20%2F%20receive--only-22c55e.svg" alt="Detection: passive, receive-only"></a> <a href="PROJECT-STATUS.md"><img src="https://img.shields.io/badge/status-v0.8.0%20(Phase%204%3A%20orx%20install)-f59e0b.svg" alt="Status: v0.8.0 (Phase 4: orx install)"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg" alt="License: GPL-3.0-or-later"></a> <a href="#scope-and-legal"><img src="https://img.shields.io/badge/detection-passive%20%2F%20receive--only-22c55e.svg" alt="Detection: passive, receive-only"></a> <a href="PROJECT-STATUS.md"><img src="https://img.shields.io/badge/status-v1.0.0%20(stable%3A%20installed%20on%20device)-3fb950.svg" alt="Status: v1.0.0 (stable: installed on device)"></a>
 </p>
 
 Install, harden and extend [EFF Rayhunter](https://github.com/EFForg/rayhunter), a passive
@@ -22,10 +22,11 @@ submodule, and this project adds a patch series, host tooling, device configurat
 engineering notes and documentation on top. Generic improvements are written to be submitted
 back to EFForg/rayhunter.
 
-> Status: **v0.8.0 (Phase 4: the full `orx` ops -- doctor, backup, verify, install, uninstall;
-> install/uninstall are dry-run-first + backup-gated).** Next: v1.0.0 (baseline + the device install). Use the upstream release and the
-> [official Orbic guide](https://efforg.github.io/rayhunter/orbic.html) until v1.0.0. Current
-> state: [PROJECT-STATUS.md](PROJECT-STATUS.md).
+> Status: **v1.0.0 -- stable baseline.** Our reproducible build is installed and running on the
+> real ORB400L_V1.2.0_BVZRT (reboot-persistent, capturing); the full `orx` tooling (doctor, backup,
+> verify, install, uninstall) is backup-gated; the install milestone is done. Phase 4 follow-ups
+> (`orx pull-logs`/`check`/`purge`) and Phase 5 (alerting, analyzers) are next. Current state:
+> [PROJECT-STATUS.md](PROJECT-STATUS.md).
 
 ## Support matrix
 
@@ -33,7 +34,7 @@ back to EFForg/rayhunter.
 |---|---|---|---|
 | Orbic Speed RC400L (Verizon), Qualcomm MDM9207 | `ORB400L_V1.2.0_BVZRT` | v0.13.0 | in development |
 
-Other firmware builds and other Rayhunter-supported devices are out of scope until v1.0.0.
+Other firmware builds and other Rayhunter-supported devices are out of scope for the v1.x baseline.
 
 ## What the research established
 

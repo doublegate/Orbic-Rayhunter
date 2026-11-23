@@ -4,6 +4,39 @@
 
 - (nothing yet)
 
+## [1.0.0] - 2026-11-23
+
+First stable release: a documented, reproducible, reversible install of our Rayhunter build,
+**validated on the real Orbic RC400L** (`ORB400L_V1.2.0_BVZRT`). The core `orx` host tooling is
+in place -- `doctor`, `backup`, `verify`, `install`, `uninstall` -- all zero-dependency and
+unit-tested (64 orx-cli tests), with every device write gated on a verified rootfs backup.
+(`orx pull-logs`/`check`/`purge` remain as Phase 4 follow-ups.)
+
+### Added
+
+- **On-device install of our build (T-OR-022 / T-OR-036).** `orx install --apply` deployed our
+  reproducible firmware daemon (`scripts/build.sh firmware`, 6,109,892 B) to the unit, replacing
+  upstream v0.13.0. Each file's device-side SHA-256 was verified against our build before the
+  atomic `mv`; after reboot the hooked `misc-daemon` auto-started the daemon (reboot-persistent)
+  and an active capture was confirmed via `/api/qmdl-manifest`.
+
+### Fixed
+
+- **File transfer to the device is now lossless (critical).** The busybox `nc -ll -e /bin/sh`
+  control channel drops bytes when its pipe to the shell backs up, so the previous `cat > file`
+  bulk write silently corrupted binaries (a 4 KiB payload arrived as ~3 KiB, independent of
+  encoding; the 6 MB daemon failed its hash check). `TcpShell::put` now uses a one-shot device-side
+  `nc -l` listener (the data path is socket -> file, no shell pipe), the mechanism upstream's
+  installer uses -- verified byte-exact on the unit and by a loopback unit test. `send_file` still
+  verifies the device-side hash afterward, so any residual race fails closed.
+
+### Notes
+
+- The unauthenticated root shell on TCP 24 used by `orx` to deploy is NOT reboot-persistent on this
+  unit (it is the pre-Rayhunter listener, not part of the install), so it is absent after an install
+  reboot; re-establish it before `orx uninstall`. Hardening it off entirely is Phase 6
+  (T-OR-081/082).
+
 ## [0.8.0] - 2026-11-23
 
 Adds `orx install` and `orx uninstall` -- the device-write operations that complete the orx tooling. Both are DRY-RUN by default (print the exact step plan) and `--apply` executes; both refuse unless `verify::gate()` passes for the backup directory, so a device write is impossible without a verified rootfs backup to roll back to. The deployed file set and paths mirror upstream's network installer and the install-footprint RE, but deploy OUR firmware build; uninstall restores the true stock misc-daemon extracted from the verified backup's `root.tar` and removes our files (leaving recordings). orx-cli stays zero-dependency; 58 unit tests, dry-run validated on the unit against the verified Sprint 1.3 backup.
