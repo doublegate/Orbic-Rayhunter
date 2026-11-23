@@ -1,5 +1,31 @@
 ## [Unreleased]
 
+### Added
+
+- (nothing yet)
+
+## [0.7.0] - 2026-11-23
+
+Adds `orx verify` and the shared backup-gate, so a backup can be proven as a rollback before a device write. Also the first release routed through a pull request (CI, docs, security and the Antigravity reviewer all gate it), and it carries the agy-review fixes below. orx-cli stays zero-dependency.
+
+### Added
+
+- `orx verify --dir <dir>` (T-OR-035, Sprint 4.3): re-reads a backup directory's `MANIFEST.txt`
+  and re-hashes each `<fs>.tar`, reporting ok / missing / too-small / size-mismatch / hash-mismatch
+  per filesystem, then a gate line. The shared `verify::gate()` (the Rust counterpart of
+  `orbic-ota-block.py`'s `_backup_gate`) requires rootfs `/` to be `ok`/`ok-live` AND its archive
+  to verify, and is what the upcoming `orx install`/`uninstall` will call before any device write.
+  Manifest parsing reads tokens by key, so both the Python and Rust manifest layouts verify. No
+  device access; fully unit-tested (43 orx-cli tests). It fails closed throughout: `parse_manifest`
+  errors on a malformed row (< 3 fields, a non-`key=value` token, an empty key, a non-`u64` `size=`,
+  a non-64-hex `sha256=`, a duplicate `size=`/`sha256=`, or any control character);
+  a row without a valid `size=` + 64-hex `sha256=` is rejected unchecked; a recorded state other
+  than `ok`/`ok-live` fails the entry; a duplicate rootfs `/` row is ambiguous; an archive that is
+  a symlink or non-regular file is rejected (checked before open and re-checked on the open handle,
+  portably -- no arch-specific flag); and `orx verify` + `verify::gate()` share one gate policy over
+  verdicts computed once (the ~87 MB rootfs is hashed once). Hardening from the PR's Codex +
+  Antigravity review.
+
 ### Fixed
 
 Address all eight findings from an adversarial `agy` (Antigravity) review of the v0.1.0-v0.6.0

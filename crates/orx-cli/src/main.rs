@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, probe, transport, usb};
+use orx_cli::{backup, probe, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -15,6 +15,7 @@ USAGE:
     orx doctor [--ip <addr>] [--json]    Detect the Orbic over USB and probe its web UIs
     orx backup --out <dir> [--ip <addr>] [--allow-live]
                                          Archive each writable device filesystem (tar+SHA-256)
+    orx verify --dir <dir>               Re-hash a backup dir against its MANIFEST.txt
     orx --version
     orx --help
 
@@ -185,6 +186,70 @@ fn open_tmp(final_path: &Path) -> std::io::Result<(fs::File, std::path::PathBuf)
         .mode(0o600)
         .open(&tmp)?;
     Ok((f, tmp))
+}
+
+/// `orx verify`: re-check a backup directory against its MANIFEST.txt.
+fn cmd_verify(dir: &Path) -> ExitCode {
+    let manifest = dir.join("MANIFEST.txt");
+    // Hardened read: rejects a symlink/non-regular manifest and caps the size.
+    let text = match verify::read_manifest_text(&manifest) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // A manifest that does not parse is itself a failed-closed integrity signal.
+    let entries = match verify::parse_manifest(&text) {
+        Ok(e) if !e.is_empty() => e,
+        Ok(_) => {
+            eprintln!("error: {} has no filesystem entries", manifest.display());
+            return ExitCode::from(2);
+        }
+        Err(e) => {
+            eprintln!("error: {} is malformed: {e}", manifest.display());
+            return ExitCode::from(2);
+        }
+    };
+    // Hash every archive once, then share the single gate policy (no re-hash).
+    let verdicts = verify::verify_all(dir, &entries);
+    let mut bad = false;
+    for (e, v) in entries.iter().zip(&verdicts) {
+        let state_ok = e.state == "ok" || e.state == "ok-live";
+        // An entry passes only if its archive verifies AND its recorded state is
+        // ok/ok-live: a `failed`/`ABORT` entry is never a backup, even if a stale
+        // archive still hashes.
+        if !v.is_ok() || !state_ok {
+            bad = true;
+        }
+        let note = if state_ok {
+            ""
+        } else {
+            "  <-- state not ok/ok-live"
+        };
+        println!(
+            "  {:14} {} [{}]{}",
+            v.describe(),
+            e.mountpoint,
+            e.state,
+            note
+        );
+    }
+    let gate = verify::gate_from_verdicts(&entries, &verdicts);
+    match (&gate, bad) {
+        (Ok(()), false) => println!("gate: all archives verified -- device writes may proceed"),
+        // The rootfs gate can pass while a non-root archive failed; say so plainly
+        // rather than printing "may proceed" next to a non-zero exit.
+        (Ok(()), true) => println!(
+            "gate: rootfs gate satisfied, but some archives failed above -- NOT a complete backup"
+        ),
+        (Err(why), _) => println!("gate: NOT satisfied -- {why}"),
+    }
+    if bad || gate.is_err() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// Escape a string for embedding in the compact JSON `--json` output.
@@ -367,6 +432,41 @@ fn main() -> ExitCode {
                 Some(dir) => cmd_backup(&ip, Path::new(&dir), allow_live),
                 None => {
                     eprintln!("error: backup needs --out <dir>\n\n{USAGE}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("verify") => {
+            let mut dir: Option<String> = None;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--dir" => match rest.next() {
+                        Some(v) if dir.is_some() => {
+                            let _ = v;
+                            eprintln!("error: --dir given more than once\n\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                        Some(v) if v.is_empty() => {
+                            eprintln!("error: --dir value is empty\n\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                        Some(v) => dir = Some(v.clone()),
+                        None => {
+                            eprintln!("error: --dir needs a value\n\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                    },
+                    other => {
+                        eprintln!("error: unexpected argument {other:?}\n\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            match dir {
+                Some(d) => cmd_verify(Path::new(&d)),
+                None => {
+                    eprintln!("error: verify needs --dir <dir>\n\n{USAGE}");
                     ExitCode::from(2)
                 }
             }

@@ -54,9 +54,13 @@ cargo run -p orx-cli -- doctor --json
       `ubifs` is the correct backup, per Sprint 1.3), streaming to `0600` `<fs>.tar` while hashing
       inline, and writes a gate-compatible `MANIFEST.txt`. Validated on the unit (root.tar
       86.7 MB, data/usrdata/cache `ok`; inline SHA-256 == independent `sha256sum`)
-- [ ] T-OR-035: `orx verify`: re-check a MANIFEST (sizes, re-hash, off-repo-copy marker) -- Sprint 4.3
-- [ ] T-OR-035: backup-gate library fn (reads a MANIFEST, requires rootfs ok/ok-live) used by every
-      write subcommand -- Sprint 4.3, before `orx install`
+- [x] T-OR-035: `orx verify --dir <dir>` re-reads MANIFEST.txt and re-hashes each archive
+      (ok/missing/too-small/size-mismatch/hash-mismatch); both manifest layouts parse
+- [x] T-OR-035: `verify::gate()` requires rootfs `/` ok/ok-live AND its archive to verify;
+      `orbic-ota-block.py` `_backup_gate` hardened to match. `orx install`/`uninstall` will call it
+- [ ] T-OR-035 follow-up: `orx verify` does not yet check the off-repo-copy marker (the encrypted
+      copy on separate media, BACKUP-AND-RECOVERY.md step 5). Tracked for a later sprint; the gate
+      covers the on-disk archives, not the off-repo copy
 
 Acceptance criteria: `orx backup` on the real unit archives every writable filesystem with a
 verified inline hash and a gate-compatible manifest. MET (validated end-to-end 2026-11-23).
