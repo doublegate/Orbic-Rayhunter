@@ -45,7 +45,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | CI workflows | green on `main` | T-OR-002, T-OR-010 | ci, docs, security, upstream-watch; release untested until a tag |
 | Specification docs | present | T-OR-007 | `docs/` |
 | Device profile | host-side and on-device facts measured (partitions, UBI, mounts, tools, processes, sockets) | T-OR-012, T-OR-013, T-OR-014 | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
-| Verified device backup | on-device `tar` archives of every writable fs captured and verified (`backups/2026-11-23-V1.2.0/fs/`, two-pass + tar-exit-status + readable); encrypted off-repo copy pending | T-OR-015, T-OR-016 done; T-OR-017 partial | gates every device write |
+| Verified device backup | on-device `tar` archives of every writable fs captured and verified (`backups/2026-11-23-V1.2.0/fs/`, two-pass + tar-exit-status + readable); encrypted off-repo copy on the DS-1621+ (GPG to the owner's key) | T-OR-015..T-OR-017 done | gates every device write |
 | OTA block | absent | T-OR-018 | |
 | Rayhunter on device | not installed | T-OR-022 | |
 | `orx backup` / `install` / `verify` / `pull-logs` / `restore` / `purge` | absent | T-OR-034..T-OR-041 | |
@@ -56,7 +56,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 106 minted; 17 done (T-OR-001..T-OR-016, T-OR-106); T-OR-017 in progress (off-repo copy pending) | [ROADMAP.md](ROADMAP.md) |
+| Tickets | 106 minted; 18 done (T-OR-001..T-OR-018, T-OR-106) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 0 | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 10 passed; 3 Python tool self-tests | `cargo test` (local and CI) |

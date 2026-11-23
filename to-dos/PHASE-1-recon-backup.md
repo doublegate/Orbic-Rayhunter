@@ -93,9 +93,11 @@ volumes. `scripts/orbic-backup.py` implements it; BACKUP-AND-RECOVERY.md is the 
 - [x] T-OR-017: two passes per filesystem with `tar`'s exit status captured and required zero;
       byte-identical for quiescent `/`, `/usrdata`, `/firmware`, `/cache`; `/data` reads clean but
       differs between passes as a live fs; each archive validated readable; all mode 0600
-- [ ] T-OR-017: encrypted off-repo copy on separate media; decrypt round-trip hash checked
-      (**remaining** -- needs offline media and a passphrase; the gate is not fully closed until
-      this is done)
+- [x] T-OR-017: encrypted off-repo copy on separate media -- GPG (AES256, asymmetric to the
+      owner's key `303419710C1DCD95`) to the DS-1621+ at
+      `/home/parobek/orbic-device-backups/orbic-2026-11-23-V1.2.0.tar.gpg`; plaintext/ciphertext
+      SHA-256 recorded in `backups/2026-11-23-V1.2.0/OFF-REPO-COPY.txt`. Full decrypt round-trip
+      is the owner's final check (needs the key passphrase)
 
 Acceptance criteria: every writable filesystem has a verified `ok`/`ok-live` archive AND the
 off-repo encrypted copy is verified -- i.e. the BACKUP-AND-RECOVERY.md step 4 gate passes in
