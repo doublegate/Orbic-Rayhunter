@@ -71,16 +71,16 @@ def parse_mounts(text: str) -> list[tuple[str, str, str]]:
     real fs; the first wins). Virtual filesystems are kept here because a parent's
     tar must still EXCLUDE them; `backup_targets` decides what is archived. The
     ro/rw flag gates the integrity verdict: a read-only mount's two passes MUST be
-    byte-identical (it cannot legitimately change)."""
-    out: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
+    byte-identical (it cannot legitimately change). When a mount point appears more
+    than once (the kernel lists `/` twice, and an overmount shadows an earlier
+    one), the LAST entry wins -- that is the filesystem actually visible there."""
+    by_mp: dict[str, tuple[str, str, str]] = {}
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) >= 4 and parts[1].startswith("/") and parts[1] not in seen:
-            seen.add(parts[1])
+        if len(parts) >= 4 and parts[1].startswith("/"):
             opts = parts[3].split(",")
-            out.append((parts[1], parts[2], "ro" if "ro" in opts else "rw"))
-    return out
+            by_mp[parts[1]] = (parts[1], parts[2], "ro" if "ro" in opts else "rw")
+    return list(by_mp.values())
 
 
 def backup_targets(mounts: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
@@ -318,18 +318,18 @@ def selftest() -> int:
     check(
         mounts
         == [
-            ("/", "rootfs", "rw"),
+            ("/", "ubifs", "rw"),  # last entry wins: active ubifs, not rootfs
             ("/proc", "proc", "rw"),
             ("/dev", "tmpfs", "rw"),
             ("/data", "ubifs", "rw"),
             ("/firmware", "ubifs", "ro"),
         ],
-        f"parse_mounts keeps all with ro/rw, dedups /: {mounts}",
+        f"parse_mounts keeps all with ro/rw, last-wins on dup /: {mounts}",
     )
     check(
         backup_targets(mounts)
         == [
-            ("/", "rootfs", "rw"),
+            ("/", "ubifs", "rw"),
             ("/data", "ubifs", "rw"),
             ("/firmware", "ubifs", "ro"),
         ],

@@ -55,17 +55,17 @@ REFUSED = {"FotaGetVersionInfo": "asks the device to check for an OTA update"}
 # still be caught, and over-redaction (e.g. "monkey") beats leaking a secret.
 SENSITIVE = re.compile(
     r"imei|iccid|mdn|meid|imsi|msisdn|bssid|serial|esn|passw|pwd|secret|token|"
-    r"apn|gateway|key|ssid|psk|phone|mac|addr|pin|puk|dns|ipv4|ipv6|"
-    # location-bearing cellular identifiers GetWanStatusInfo can return
-    r"cellid|earfcn|\blac\b|\btac\b|\bpci\b|\benb\b",
+    r"apn|gateway|key|ssid|psk|phone|mac|addr|pin|puk|dns|ipv4|ipv6",
     re.IGNORECASE,
 )
-# Only the genuinely ambiguous SHORT tokens use whole-WORD matching (`ip` is in
-# "description"/"script"/"zip", `sn` in many words), after splitting the key on
-# snake_case, camelCase, an uppercase-ACRONYM boundary (`DNSServer` -> DNS/Server)
-# and digit boundaries -- so `wanIp` matches but `description` does not. `ipv4`/
-# `ipv6` are substring-matched above because the digit split would break them.
-_SENSITIVE_WORDS = {"ip", "sn", "cell"}
+# Short tokens use whole-WORD matching after splitting the key on snake_case,
+# camelCase, an uppercase-ACRONYM boundary (`DNSServer` -> DNS/Server) and digit
+# boundaries -- so `wanIp`/`servingLac`/`cellPci` match but `description`,
+# `capacity` and `stack` do not. Includes the genuinely ambiguous ones (`ip`,
+# `sn`) and the location-bearing cellular IDs, which must match on camelCase keys
+# (`\blac\b` as a substring would miss `cellLac`). `ipv4`/`ipv6` stay substring
+# above because the digit split would break them.
+_SENSITIVE_WORDS = {"ip", "sn", "cell", "cellid", "lac", "tac", "pci", "enb", "earfcn"}
 _KEY_SPLIT = re.compile(
     r"[_\-\s]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"
     r"|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])"
