@@ -310,14 +310,22 @@ impl Shell for TcpShell {
         //  - a watchdog kills the listener after LISTEN_SECS so a transfer that is
         //    never completed (we fail to connect, or a peer grabs and holds it)
         //    cannot leave `nc -l` orphaned in accept() on the device;
-        //  - report the listener's exit status in run()'s framing.
+        //  - commit `{remote}` ONLY when nc exited cleanly AND the received byte
+        //    count exactly equals what we sent AND the `mv` itself succeeded;
+        //    otherwise `{remote}` is left untouched. This single size gate defeats
+        //    a mid-transfer failure, a premature peer close, and a zero-byte
+        //    connect -- none can commit a truncated or empty file (a same-length
+        //    wrong payload is still caught by send_file's device-side sha256);
+        //  - report the committing step's exit status in run()'s framing.
         const LISTEN_SECS: u32 = 45;
         let part = format!("{remote}.ncpart");
+        let len = bytes.len();
         ctl.write_all(
             format!(
                 "nc -l -p {data_port} > {part} & p=$!; (sleep {LISTEN_SECS}; kill $p 2>/dev/null) & w=$!; \
-                 wait $p; st=$?; kill $w 2>/dev/null; \
-                 if [ $st -eq 0 ]; then mv {part} {remote}; else rm -f {part}; fi; \
+                 wait $p; st=$?; kill $w 2>/dev/null; ok=0; \
+                 if [ $st -eq 0 ] && [ \"$(wc -c < {part} 2>/dev/null)\" = \"{len}\" ]; then mv {part} {remote} && ok=1; fi; \
+                 [ $ok -eq 1 ] || rm -f {part}; [ $ok -eq 1 ] && st=0 || st=1; \
                  printf '{marker} %s.' \"$st\"\n"
             )
             .as_bytes(),
@@ -358,13 +366,10 @@ impl Shell for TcpShell {
         let mut data = match data {
             Some(s) => s,
             None => {
-                // We never connected but the listener is up and orphaned, ready to
-                // overwrite `remote` with whatever connects next. Release it with a
-                // zero-byte connect (nc writes an empty file and exits); the empty
-                // file fails send_file's hash check and is cleaned up by execute.
-                if let Ok(s) = TcpStream::connect_timeout(&data_addr, Duration::from_secs(1)) {
-                    let _ = s.shutdown(Shutdown::Both);
-                }
+                // Do NOT poke the port: a zero-byte connect would give the listener
+                // a clean EOF, and only the device-side size gate (received !=
+                // {len}) stops that from committing an empty file. Leave the
+                // watchdog to reap the orphaned listener after LISTEN_SECS.
                 return Err(format!("could not connect to device data port {data_port}"));
             }
         };
