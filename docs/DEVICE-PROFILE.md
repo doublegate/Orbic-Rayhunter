@@ -67,10 +67,18 @@ may not print a prompt; run one command at a time and wait for output. Never run
 |---|---|---|
 | Full USB descriptors, normal mode | `lsusb -v -d 05c6:f626` | measured 2026-11-23 |
 | Interface classes per function | `for i in /sys/bus/usb/devices/*:1.*; do echo "$i $(cat $i/bInterfaceClass $i/bInterfaceSubClass $i/bInterfaceProtocol 2>/dev/null)"; done` | measured 2026-11-23 |
-| Doctor transcript | `cargo run -p orx-cli -- doctor` | measured (see above) |
+| Doctor transcript | `cargo run -p orx-cli -- doctor` | measured 2026-11-23 (transcript below, serial redacted) |
 | Host link | `ip -br addr` and `ip route` | measured 2026-11-23 |
 | Stock UI headers | `curl -sI http://192.168.1.1/` | measured 2026-11-23 |
 | Listening ports from the host side | `nmap -Pn -p 1-1024,5555,8080,8081 192.168.1.1` (ports 24 and 8081 should be closed before T-OR-013) | measured 2026-11-23 (`-sT`, no root) |
+
+`orx doctor` on the unit, 2026-11-23 (serial redacted):
+
+```text
+usb:        1-1 05c6:f626 MDM9207-MTP serial=<redacted> mode=normal (RNDIS + CDC data, stock composition)
+stock ui:   192.168.1.1:80 reachable
+rayhunter:  192.168.1.1:8080 not running / not installed
+```
 
 ### Identity and kernel (T-OR-014)
 
