@@ -5,6 +5,7 @@
 //! (see `to-dos/`).
 
 pub mod backup;
+pub mod install;
 pub mod probe;
 pub mod sha256;
 pub mod transport;

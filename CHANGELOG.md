@@ -4,6 +4,19 @@
 
 - (nothing yet)
 
+## [0.8.0] - 2026-11-23
+
+Adds `orx install` and `orx uninstall` -- the device-write operations that complete the orx tooling. Both are DRY-RUN by default (print the exact step plan) and `--apply` executes; both refuse unless `verify::gate()` passes for the backup directory, so a device write is impossible without a verified rootfs backup to roll back to. The deployed file set and paths mirror upstream's network installer and the install-footprint RE, but deploy OUR firmware build; uninstall restores the stock misc-daemon from a stash the install makes and removes our files (leaving recordings). orx-cli stays zero-dependency; 49 unit tests, dry-run validated on the unit against the verified Sprint 1.3 backup.
+
+### Added
+
+- `orx install --dir <backup> [--dist <d>] [--daemon <f>] [--apply]` (T-OR-036/T-OR-039): deploys
+  the daemon + rendered `config.toml` + `rayhunter_daemon` init + the hooked `misc-daemon`, chmods
+  them, and reboots -- the same footprint as the upstream installer, with our build. Dry-run unless
+  `--apply`; always backup-gated; each transfer is SHA-256-verified by the device.
+- `orx uninstall --dir <backup> [--apply]` (T-OR-041): restores the stock `misc-daemon` from the
+  stash `orx install` saved and removes our files; dry-run unless `--apply`; backup-gated.
+
 ## [0.7.0] - 2026-11-23
 
 Adds `orx verify` and the shared backup-gate, so a backup can be proven as a rollback before a device write. Also the first release routed through a pull request (CI, docs, security and the Antigravity reviewer all gate it), and it carries the agy-review fixes below. orx-cli stays zero-dependency.

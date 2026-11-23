@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, probe, transport, usb, verify};
+use orx_cli::{backup, install, probe, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -16,10 +16,17 @@ USAGE:
     orx backup --out <dir> [--ip <addr>] [--allow-live]
                                          Archive each writable device filesystem (tar+SHA-256)
     orx verify --dir <dir>               Re-hash a backup dir against its MANIFEST.txt
+    orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>] [--apply]
+                                         Deploy our firmware build (dry-run unless --apply)
+    orx uninstall --dir <backup> [--ip <addr>] [--apply]
+                                         Reverse the install (dry-run unless --apply)
     orx --version
     orx --help
 
 Notes:
+    install/uninstall WRITE to the device and reboot it; they are dry-run unless --apply,
+    and always refuse unless `orx verify --dir <backup>` would pass. --dist defaults to
+    build/rayhunter/dist, --daemon to dist/rayhunter-daemon.
     backup needs the device root shell open on TCP 24 (see docs/BACKUP-AND-RECOVERY.md).
     It writes <dir>/<fs>.tar (0600) and <dir>/MANIFEST.txt; a live rw filesystem whose
     tar exits non-zero is only accepted with --allow-live (recorded as ok-live).
@@ -252,6 +259,63 @@ fn cmd_verify(dir: &Path) -> ExitCode {
     }
 }
 
+/// Print a usage error and return exit code 2.
+fn usage_err(msg: &str) -> ExitCode {
+    eprintln!("error: {msg}\n\n{USAGE}");
+    ExitCode::from(2)
+}
+
+/// `orx install`: deploy our firmware build to the device (dry-run unless --apply).
+fn cmd_install(backup: &Path, dist: &Path, daemon: &Path, ip: &str, apply: bool) -> ExitCode {
+    let init = dist.join("scripts/rayhunter_daemon");
+    let misc = dist.join("scripts/misc-daemon");
+    let config = dist.join("config.toml.in");
+    let steps = match install::install_plan(daemon, &init, &misc, &config) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    run_plan(&steps, backup, ip, apply, "install")
+}
+
+/// `orx uninstall`: reverse the install (restore stock misc-daemon, remove our
+/// files), dry-run unless --apply.
+fn cmd_uninstall(backup: &Path, ip: &str, apply: bool) -> ExitCode {
+    run_plan(&install::uninstall_plan(), backup, ip, apply, "uninstall")
+}
+
+fn run_plan(steps: &[install::Step], backup: &Path, ip: &str, apply: bool, what: &str) -> ExitCode {
+    let addr = match probe::socket(ip, 24) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut shell = transport::TcpShell::new(addr, Duration::from_secs(600));
+    if apply {
+        println!("APPLYING {what} (device will be written to and rebooted):");
+    } else {
+        println!("DRY RUN of {what} (pass --apply to execute); the backup gate is still checked:");
+    }
+    match install::execute(&mut shell, steps, || verify::gate(backup), apply) {
+        Ok(()) => {
+            if apply {
+                println!("{what} applied.");
+            } else {
+                println!("(dry run complete; backup gate satisfied)");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 /// Escape a string for embedding in the compact JSON `--json` output.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -469,6 +533,51 @@ fn main() -> ExitCode {
                     eprintln!("error: verify needs --dir <dir>\n\n{USAGE}");
                     ExitCode::from(2)
                 }
+            }
+        }
+        Some(cmd @ ("install" | "uninstall")) => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut backup: Option<String> = None;
+            let mut dist = "build/rayhunter/dist".to_string();
+            let mut daemon = "dist/rayhunter-daemon".to_string();
+            let mut apply = false;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                let need = |o: Option<&String>| -> Result<String, ()> { o.cloned().ok_or(()) };
+                match arg.as_str() {
+                    "--apply" => apply = true,
+                    "--ip" => match need(rest.next()) {
+                        Ok(v) => ip = v,
+                        Err(()) => return usage_err("--ip needs a value"),
+                    },
+                    "--dir" => match need(rest.next()) {
+                        Ok(v) => backup = Some(v),
+                        Err(()) => return usage_err("--dir needs a value"),
+                    },
+                    "--dist" if cmd == "install" => match need(rest.next()) {
+                        Ok(v) => dist = v,
+                        Err(()) => return usage_err("--dist needs a value"),
+                    },
+                    "--daemon" if cmd == "install" => match need(rest.next()) {
+                        Ok(v) => daemon = v,
+                        Err(()) => return usage_err("--daemon needs a value"),
+                    },
+                    other => return usage_err(&format!("unexpected argument {other:?}")),
+                }
+            }
+            let Some(backup) = backup else {
+                return usage_err(&format!("{cmd} needs --dir <backup-dir>"));
+            };
+            if cmd == "install" {
+                cmd_install(
+                    Path::new(&backup),
+                    Path::new(&dist),
+                    Path::new(&daemon),
+                    &ip,
+                    apply,
+                )
+            } else {
+                cmd_uninstall(Path::new(&backup), &ip, apply)
             }
         }
         Some("--version" | "-V") => {
