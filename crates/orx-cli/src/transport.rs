@@ -775,7 +775,12 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn sh");
-        child.stdin.take().unwrap().write_all(cmd.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(cmd.as_bytes())
+            .unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(
             out.status.success(),
