@@ -92,8 +92,17 @@ IMEI, ICCID, MDN, MEID, MAC) are redacted here.
   `8f9bb4ce79eb878af49b366af2f784a44127736a62cce7992e4ab1c8fe3f1cf9`.
 - **Remote-access config change from the exploit:** `GetRemoteAccessCfg` read `telnetd: 1`
   before and `telnetd: 0` after (`sshd: 1`, `telnetStatus: 0` unchanged). This is the one
-  persisted device change from opening the shell; the port-24 listener itself is a backgrounded
-  `busybox nc`, not a service, and is expected to die on reboot (verified under T-OR-013).
+  persisted device change from opening the shell, and it **survives a reboot** (the config is
+  persistent; measured 2026-11-23). The port-24 listener itself is a backgrounded `busybox nc`,
+  not a service, and **does not survive a reboot**: `nmap -Pn -p 24 192.168.1.1` shows it closed
+  after boot, so the exploit must be re-run to reopen it (measured 2026-11-23, T-OR-013).
+- **Raw NAND reads deadlock the device.** `nanddump`/`dd` of `/dev/mtd*` reads the first partition
+  fine, then the second hangs: raw MTD access contends with the live UBI backing the mounted
+  filesystems and wedges the NAND into unkillable D-state reads that a `kill -9` cannot clear,
+  needing a power-cycle (reproduced three times, 2026-11-23). The pre-write backup therefore uses
+  `tar` of the mounted `ubifs` volumes through the VFS, which cannot wedge (see
+  [BACKUP-AND-RECOVERY.md](BACKUP-AND-RECOVERY.md)). A raw partition image is deferred to the
+  aggressive tier (T-OR-098, EDL).
 
 ## TBD (on-device) checklist
 
@@ -142,7 +151,7 @@ rayhunter:  192.168.1.1:8080 not running / not installed
 | MTD table | `cat /proc/mtd` | measured 2026-11-23 |
 | MTD and UBI nodes | `ls -l /dev/mtd* /dev/mtdblock* /dev/ubi*` | measured 2026-11-23 |
 | UBI volumes | `ubinfo -a` (if present) | measured 2026-11-23 |
-| NAND geometry | `dmesg \| grep -i -E "nand\|ubi\|mtd"` | TBD (on-device) |
+| NAND geometry | `dmesg \| grep -i -E "nand\|ubi\|mtd"` | measured 2026-11-23: 17 partitions, erase size 0x40000 (256 KiB) per `/proc/mtd`; rootfs `ubi0` on mtd16 (`ubi.mtd=16` in cmdline) |
 | Mounts | `cat /proc/mounts` | measured 2026-11-23 |
 | Free space | `df -h` (record `/`, `/data`, `/usrdata`, `/tmp`) | measured 2026-11-23 |
 | Map mtd index to partition name | derived from `/proc/mtd` names | measured 2026-11-23 |
@@ -155,10 +164,10 @@ rayhunter:  192.168.1.1:8080 not running / not installed
 | Listening sockets | `netstat -tlnup` (or `netstat -tln` if `-p` is unsupported) | measured 2026-11-23 |
 | Init layout | `ls -l /etc/init.d /etc/rc*.d` | measured 2026-11-23 |
 | Stock `misc-daemon` hash | `sha256sum /etc/init.d/misc-daemon` | measured 2026-11-23 |
-| FOTA/OTA client | `ps w \| grep -i -E "fota\|dm\|ota\|update"; ls /etc/init.d \| grep -i -E "fota\|dm\|ota"` | TBD (on-device) |
+| FOTA/OTA client | `ps w \| grep -i -E "fota\|dm\|ota\|update"; ls /etc/init.d \| grep -i -E "fota\|dm\|ota"` | measured 2026-11-23: no persistent FOTA/OTA daemon and no matching `/etc/init.d` link; the OTA check is the stock UI's `FotaGetVersionInfo` request on page load, which is why `orbic-ui-read.py` refuses that endpoint |
 | QCMAP config present | `ls -l /usrdata/data/qcmap/` (do not print `mobileap_cfg.xml` into this file) | measured 2026-11-23 |
 | USB mode | `cat /usrdata/mode.cfg /usrdata/mode_tmp.cfg /data/usb/boot_hsusb_composition 2>&1` | measured 2026-11-23 |
-| AT forwarder | `ps w \| grep atfwd_daemon` | TBD (on-device) |
+| AT forwarder | `ps w \| grep atfwd_daemon` | measured 2026-11-23: `atfwd_daemon` running (started by `misc-daemon`) |
 
 ### DIAG and peripherals (T-OR-014, T-OR-019)
 
@@ -178,7 +187,7 @@ rayhunter:  192.168.1.1:8080 not running / not installed
 | Question | How to answer | Status |
 |---|---|---|
 | Does `SetRemoteAccessCfg` persist anything to flash? | diff `/usrdata` file listing and hashes before and after T-OR-013 (`find /usrdata -type f -exec md5sum {} +`) | TBD (on-device) |
-| Does the port 24 listener survive a reboot? | after reboot, `nmap -Pn -p 24 192.168.1.1` from the host | TBD (on-device) |
+| Does the port 24 listener survive a reboot? | after reboot, `nmap -Pn -p 24 192.168.1.1` from the host | measured 2026-11-23: no -- closed after boot; re-run the exploit to reopen. (`telnetd: 0` in the config does persist.) |
 | Does the stock `misc-daemon` match upstream's replacement? | `diff` the backed-up stock file against `upstream/dist/scripts/misc-daemon` on the host | TBD (on-device) |
 | Is `mount -o remount,rw /dev/ubi0_0 /` harmless here (#693)? | observe during T-OR-022 install log | TBD (on-device) |
 | Does the network installer work on V1.2.0 over the RNDIS link (no Wi-Fi)? | T-OR-022 | TBD (on-device) |

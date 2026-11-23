@@ -3,9 +3,19 @@
 There is no software unbrick path for the RC400L. EDL (`05c6:9008`) is reachable only through a
 hardware test point, and no working firehose programmer is known for this device
 ([ref-docs/orbic-rc400l-hardware.md](../ref-docs/orbic-rc400l-hardware.md) section 4). A
-verified, pre-write backup of every flash partition is therefore the only recovery asset this
-project can count on. This file is the procedure behind tickets T-OR-015, T-OR-016, T-OR-017
-and T-OR-018 ([ROADMAP.md](../ROADMAP.md)); `orx backup` (T-OR-034) automates it from v0.6.0.
+verified, pre-write backup is therefore the only recovery asset this project can count on.
+
+The backup is a `tar` archive of every writable filesystem, not a raw NAND image. Raw
+`nanddump`/`dd` of `/dev/mtd*` DEADLOCKS this device: raw MTD access contends with the live UBI
+that backs the mounted filesystems and wedges the NAND into unkillable D-state reads that need a
+power-cycle (measured 2026-11-23: the first partition reads, the second hangs). `tar` reads
+through the kernel VFS, the path the device uses constantly, so it cannot wedge -- and it is the
+right backup for this project's writes, which only ever touch the mounted `ubifs` volumes (a
+Rayhunter install adds a daemon under `/data` and an init link on `/`). A bit-exact image of the
+static bootloader/modem regions would need EDL, which has no proven loader, and is deferred to
+the aggressive tier (T-OR-098). This file is the procedure behind tickets T-OR-015, T-OR-016,
+T-OR-017 and T-OR-018 ([ROADMAP.md](../ROADMAP.md)); `orx backup` (T-OR-034) automates it from
+v0.6.0, wrapping `scripts/orbic-backup.py`.
 
 ## Rules
 
@@ -40,125 +50,92 @@ Variables used below: device `192.168.1.1`, host `192.168.1.112` (the measured R
 
 ### 1. Obtain a shell (the one pre-backup action)
 
-A root shell is required to read the flash, so the first device action cannot be preceded by a
-backup. Use the least invasive path: upstream's network shell, which authenticates to the stock
-web admin and starts a temporary `nc` listener on port 24 through `/action/SetRemoteAccessCfg`
-([ref-docs/rayhunter-install-orbic.md](../ref-docs/rayhunter-install-orbic.md) section 3.4).
-Do not use `orbic-usb` here: it writes `/bin/rootshell` and changes the USB composition.
+A root shell is required, so the first device action cannot be preceded by a backup. Use the
+least invasive path: upstream's network shell, which authenticates to the stock web admin and
+starts a temporary `busybox nc -ll -p 24 -e /bin/sh` listener through `/action/SetRemoteAccessCfg`
+([ref-docs/rayhunter-install-orbic.md](../ref-docs/rayhunter-install-orbic.md) section 3.4). The
+scripts use the non-interactive variant `orbic-start-telnet`, which only starts the listener; the
+interactive `orbic-shell` is the same exploit plus a terminal. Do not use `orbic-usb` here: it
+writes `/bin/rootshell` and changes the USB composition.
 
 ```sh
-read -rs ORX_ADMIN_PW            # bash; fish: read -s ORX_ADMIN_PW
-                                 # value: the 2.4 GHz Wi-Fi password on Verizon units
-./installer util orbic-shell --admin-password "$ORX_ADMIN_PW"
-unset ORX_ADMIN_PW
+./installer util orbic-start-telnet --admin-password "$ORX_ADMIN_PW"   # or: orbic-shell
 ```
 
-The password still appears in the host process list while the installer runs. Before running,
-note the stock UI's remote-access settings page; afterwards check it again. Whether the request
-persists anything to `/usrdata` is TBD (on-device) and is answered offline by RE of the
-backed-up `goahead` binary (T-OR-020). Whether the port 24 listener survives a reboot is TBD
-(on-device); check with `nmap -Pn -p 24 192.168.1.1` after the next reboot.
+The password appears in the host process list while the installer runs; the scripts read it from
+a mode-600 file instead of the command line. Measured on this unit (2026-11-23): the port-24
+listener is a backgrounded process and **does not survive a reboot** (`nmap -Pn -p 24
+192.168.1.1` shows it closed after boot); re-run the command to reopen it. The exploit persists
+exactly one config change, `GetRemoteAccessCfg.telnetd` 1 -> 0, which **does** survive a reboot.
+Whether the request writes anything else to `/usrdata` is answered offline by RE of the
+backed-up `goahead` binary (T-OR-020).
 
 ### 2. Record the layout
 
-On the device, capture each output to the host (copy from the terminal, or stream with `nc` as
-in step 3):
+Capture the layout to `layout/*.txt` in the backup directory with the read-only driver (it
+refuses any writer, so nothing touches flash):
 
 ```sh
-cat /proc/mtd
-cat /proc/mounts
-df -h
-ls -l /dev/mtd* /dev/mtdblock* /dev/ubi*
-ubinfo -a
-dmesg | grep -i -E "nand|ubi|mtd"
-command -v nanddump nandwrite flash_erase ubiupdatevol sha256sum md5sum tar
+scripts/orbic-shell.py --script scripts/recon/phase1-inventory.sh > backups/<date>-V1.2.0/layout/inventory.txt
+scripts/orbic-shell.py --command 'cat /proc/mounts' > backups/<date>-V1.2.0/layout/010-cat-proc-mounts.txt
 ```
 
-Save these as `layout/*.txt` in the backup directory. The partition list expected from prior
-research is `sbl, mibib, efs2, dynamic_nv, efs2_bak, tz, rpm, aboot, boot, scrub, modem, misc,
-recovery, usrdata, recoveryfs, sec, system`; the authoritative list is this unit's `/proc/mtd`.
+`/proc/mounts` is the input the backup tool needs. This unit's writable `ubifs` volumes are `/`
+(rootfs), `/data` (usrfs, the install target), `/usrdata`, `/cache`; `/firmware` is read-only
+modem data. The 17 raw MTD partitions are recorded in `/proc/mtd` for reference, but are not
+imaged (see the note on raw images below).
 
-### 3. Raw partition images (T-OR-015)
+### 3. Back up and verify the writable filesystems (T-OR-015..T-OR-017)
 
-Nothing should be writing flash: Rayhunter is not installed, no host is connected to the Wi-Fi
-AP, and no web admin session is open other than the shell. For each index `N` in `/proc/mtd`:
+Nothing should be writing the filesystems: Rayhunter is not installed, no host is on the Wi-Fi
+AP, and no web admin session is open other than the shell. Run the backup tool, which archives
+each mounted filesystem with `tar` on the device, streams it to the host over the **same port-24
+shell channel** (the device firewall blocks a connect-back `nc` to a LAN host -- "No route to
+host"), and verifies it:
 
 ```sh
-# host: listen and write the image
-nc -l 9000 > backups/<date>-V1.2.0/mtdN-<name>.img        # OpenBSD netcat syntax
-
-# device: stream the partition
-dd if=/dev/mtdblockN bs=4096 | busybox nc 192.168.1.112 9000
+scripts/orbic-backup.py \
+  --proc-mounts backups/<date>-V1.2.0/layout/010-cat-proc-mounts.txt \
+  --out-dir     backups/<date>-V1.2.0/fs
 ```
 
-If the device side does not exit at end of stream, add busybox's `-w` timeout option (which
-`nc` options this busybox supports is TBD (on-device)). Preferred over `dd` when available:
-`nanddump` to stdout, which can include OOB data; whether `nanddump` exists on V1.2.0 is
-TBD (on-device). `mtdblock` reads return ECC-corrected page data without OOB: adequate for
-archival, diffing and file recovery, not for a bit-exact NAND restore.
+For each filesystem the tool streams the archive to a temp file while computing a rolling
+SHA-256, takes a second independent pass, and promotes the archive to `<label>.tar` (mode 0600)
+only when it is a complete, readable tar. For `/` it passes `tar --exclude` for every nested
+mount so `/proc`, `/sys`, `/dev` and the other volumes are not traversed. A filesystem whose two
+passes are byte-identical is marked `ok` (quiescent); a live filesystem such as `/data` whose
+passes differ but which reads cleanly is marked `ok-live` (still a valid restore point). The
+`MANIFEST.txt` records each filesystem, size, entry count, SHA-256 and verdict.
 
-Hash both ends:
-
-```sh
-# device
-sha256sum /dev/mtdblockN        # fall back to md5sum if sha256sum is absent
-# host
-sha256sum backups/<date>-V1.2.0/mtdN-<name>.img
-```
-
-Append both values to `MANIFEST.sha256` (host format) and `device-hashes.txt`.
-
-### 4. File-level archives and stock files (T-OR-016)
-
-UBI volumes are easier to inspect and to restore piecewise at file level:
-
-```sh
-# host
-nc -l 9001 > backups/<date>-V1.2.0/rootfs.tar
-# device (directories, not "/", so /proc, /sys, /dev and /tmp are not traversed)
-cd / && tar -cf - etc bin sbin usr lib data usrdata | busybox nc 192.168.1.112 9001
-```
-
-Which `tar` options this busybox supports is TBD (on-device). Separately, take byte copies with
-hashes of every file Rayhunter or this project may replace or touch:
+Separately confirm the stock files Rayhunter or this project may replace are inside the archives,
+and record the baseline hash of the one the installer overwrites:
 
 | File | Why |
 |---|---|
-| `/etc/init.d/misc-daemon` | overwritten by upstream's installer; must be restorable byte for byte ([ref-docs/orbic-firmware-v1.2.0.md](../ref-docs/orbic-firmware-v1.2.0.md) section 5) |
-| `/etc/init.d/*` and `/etc/rc*.d/` listing | boot order and the FOTA client's init link |
-| `/usrdata/mode.cfg`, `/usrdata/mode_tmp.cfg`, `/data/usb/boot_hsusb_composition` | USB composition state |
-| `/usrdata/data/usr/wlan/wlan_conf_6174.xml` | hotspot AP configuration (secret) |
-| `/usrdata/data/qcmap/mobileap_cfg.xml` | QCMAP configuration incl. real APN (secret) |
+| `/etc/init.d/misc-daemon` | overwritten by upstream's installer; must be restorable byte for byte. Baseline SHA-256 on this unit: `8f9bb4ce79eb878af49b366af2f784a44127736a62cce7992e4ab1c8fe3f1cf9` |
+| `/etc/init.d/*` and `/etc/rc*.d/` | boot order and the FOTA/update client's init link (inside `root.tar`) |
+| `/usrdata/mode.cfg`, `/usrdata/mode_tmp.cfg`, `/data/usb/boot_hsusb_composition` | USB composition state (inside `usrdata.tar` / `data.tar`) |
+| `/usrdata/data/usr/wlan/wlan_conf_6174.xml` | hotspot AP configuration (secret; inside `usrdata.tar`) |
+| `/usrdata/data/qcmap/mobileap_cfg.xml` | QCMAP configuration incl. real APN (secret; inside `usrdata.tar`) |
 
-Record `sha256sum` of each on the device and on the host.
-
-### 5. Second pass
-
-Repeat step 3 for every partition into a separate directory (`pass2/`) and compare manifests.
-Partitions that are not mounted writable must be byte-identical across passes. A writable,
-mounted UBI partition (`usrdata`, possibly `system`) may legitimately differ between passes; if it
-does, record which and rely on the file-level archive for those contents. Which partitions are
-stable is TBD (on-device).
-
-### 6. Verification gate (T-OR-017)
+### 4. Verification gate (T-OR-017)
 
 The backup is verified only when all of these hold:
 
-- [ ] Every `/proc/mtd` entry has an image whose host SHA-256 equals the device SHA-256.
-- [ ] Image sizes equal the sizes in `/proc/mtd`.
-- [ ] Pass 1 and pass 2 hashes match for every partition not mounted writable; differences are
-      listed with the reason.
-- [ ] `rootfs.tar` lists cleanly (`tar -tf rootfs.tar > /dev/null`) and contains
-      `etc/init.d/misc-daemon` with the recorded hash.
-- [ ] An encrypted copy exists on separate media (step 7) and its decrypted hash was checked.
-- [ ] The restore-tool inventory from step 2 is recorded (which of `nandwrite`, `flash_erase`,
-      `ubiupdatevol` exist on the device).
+- [ ] Every writable filesystem in `/proc/mounts` has a `<label>.tar` with verdict `ok` or
+      `ok-live` in `MANIFEST.txt` (a truncated transfer reports `ABORT` and stops the run).
+- [ ] Each archive reads cleanly on the host (`tar -tf <label>.tar > /dev/null`) with a non-zero
+      entry count.
+- [ ] `root.tar` contains `./etc/init.d/misc-daemon`, and its extracted copy matches the baseline
+      hash above.
+- [ ] Every `*.tar` is mode 0600 and under the gitignored `backups/` tree.
+- [ ] An encrypted copy exists on separate media (step 5) and its decrypted hash was checked.
 
-```sh
-cd backups/<date>-V1.2.0 && sha256sum -c MANIFEST.sha256
-```
+A bit-exact restore of a raw NAND partition is explicitly out of scope here (it would need the
+unproven EDL path, T-OR-098); the file-level archive is what this project's writes can be rolled
+back from.
 
-### 7. Off-repo copy
+### 5. Off-repo copy
 
 Encrypt before the data leaves this machine, then verify the round trip:
 

@@ -56,10 +56,10 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 106 minted; 11 done (T-OR-001..T-OR-010, T-OR-106) | [ROADMAP.md](ROADMAP.md) |
+| Tickets | 106 minted; 16 done (T-OR-001..T-OR-010, T-OR-013..T-OR-017, T-OR-106) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 0 | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
-| Host unit tests | 10 passed; 2 Python tool self-tests | `cargo test` (local and CI) |
+| Host unit tests | 10 passed; 3 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
 | Latest release | none | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |
