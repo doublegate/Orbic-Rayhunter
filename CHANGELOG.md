@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `scripts/orbic-ota-block.py`: reversibly disables the on-demand OTA/FOTA updater
+  (`oma_dm`/`dmclient`/`mdm-daemon`) by renaming them to `.orx-disabled`. The first tool that
+  writes to the device: a fixed target allowlist (no arbitrary paths), a verified-backup gate,
+  an undo manifest and `--undo`, and an audit line. Status (read-only) is the default; `--apply`
+  requires `--backup-manifest`. Applied on this unit (T-OR-018).
+
 - `re/notes/ota-mechanism.md` and `re/notes/install-footprint.md`: read-only RE of the backed-up
   firmware (T-OR-020). Auto-FOTA is off on this unit, there is no boot-time update daemon, and
   the on-demand updater (`oma_dm`/`dmclient`/`mdm-daemon`) is triggered only by the stock UI's

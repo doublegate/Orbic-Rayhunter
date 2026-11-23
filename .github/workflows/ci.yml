@@ -151,6 +151,7 @@ jobs:
           python scripts/orbic-ui-read.py --selftest
           python scripts/orbic-shell.py --selftest
           python scripts/orbic-backup.py --selftest
+          python scripts/orbic-ota-block.py --selftest
 
   patched-upstream:
     name: patch series + armv7 daemon build

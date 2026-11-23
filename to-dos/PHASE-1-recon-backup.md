@@ -124,9 +124,13 @@ age -d /media/<offline-disk>/orbic-<date>.tar.age | sha256sum
       ([re/notes/ota-mechanism.md](../re/notes/ota-mechanism.md)): auto-FOTA already off
       (`fota_cfg.xml`), no boot daemon, on-demand `oma_dm`/`dmclient`/`mdm-daemon`, triggers are
       the UI `Fota*` goform actions + carrier OMA-DM push; no static update host to DNS-block
-- [ ] T-OR-018: block it reversibly (DEVICE WRITE, after a go-ahead): rename
-      `/usr/bin/oma_dm`+`dmclient`+`mdm-daemon`, record originals; preserve `autocheck=0`
+- [x] T-OR-018: block it reversibly -- `scripts/orbic-ota-block.py --apply` renamed
+      `/usr/bin/oma_dm`+`dmclient`+`mdm-daemon` to `.orx-disabled` (2026-11-23, backup-gated,
+      undo manifest under `backups/`, SHA-256s match the RE); `fota_cfg.xml` autocheck/autodown/
+      autoinstall still 0
 - [ ] T-OR-018: verify across a reboot without the SIM, then with the active SIM inserted
+      (the `.orx-disabled` renames persist on rootfs; re-open the shell after reboot and confirm
+      no updater runs)
 - [ ] T-OR-012 (moved here from Sprint 1.1): read the firmware string as the stock UI reports it.
       It is shown only after the admin login, and the UI's page load calls the FOTA client, so it
       is read only once the FOTA client is blocked
