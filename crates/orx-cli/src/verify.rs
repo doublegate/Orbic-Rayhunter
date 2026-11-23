@@ -7,6 +7,7 @@
 //! fully unit-tested.
 
 use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use crate::backup::archive_name;
@@ -206,24 +207,24 @@ pub fn verify_entry(dir: &Path, entry: &ManifestEntry) -> Verdict {
     }
     let path = dir.join(format!("{name}.tar"));
     // Reject a symlink or non-regular file before opening (the backup dir is
-    // untrusted); `symlink_metadata` does not follow the final symlink.
-    match std::fs::symlink_metadata(&path) {
+    // untrusted); `symlink_metadata` does not follow the final symlink. Keep the
+    // (dev, ino) identity to detect a swap after the check.
+    let pre = match std::fs::symlink_metadata(&path) {
         Ok(m) if m.file_type().is_symlink() || !m.is_file() => return Verdict::NotRegularFile,
-        Ok(_) => {}
+        Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Verdict::Missing,
         Err(e) => return Verdict::ReadError(e.to_string()),
-    }
+    };
     let mut f = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Verdict::Missing,
         Err(e) => return Verdict::ReadError(e.to_string()),
     };
-    // Re-check on the OPEN handle (portable, no arch-specific O_NOFOLLOW): if the
-    // path was swapped to a non-regular file between symlink_metadata and open,
-    // this catches it. A swap to a different REGULAR file just yields a hash that
-    // will not match -- still fail-closed.
+    // The OPEN handle must still be the SAME regular file: a swap between the
+    // check and the open -- even to another regular file via a symlink -- changes
+    // (dev, ino). Portable, no arch-specific O_NOFOLLOW.
     match f.metadata() {
-        Ok(m) if m.is_file() => {}
+        Ok(m) if m.is_file() && m.dev() == pre.dev() && m.ino() == pre.ino() => {}
         Ok(_) => return Verdict::NotRegularFile,
         Err(e) => return Verdict::ReadError(e.to_string()),
     }
@@ -296,24 +297,26 @@ fn rootfs_index(entries: &[ManifestEntry]) -> Result<usize, String> {
 /// an oversized file cannot exhaust memory.
 pub fn read_manifest_text(manifest: &Path) -> Result<String, String> {
     const MAX_MANIFEST: u64 = 1 << 20; // 1 MiB is enormous for a few-line manifest
-    // Pre-check rejects an obvious symlink/non-regular file...
-    match std::fs::symlink_metadata(manifest) {
+    // Pre-check rejects an obvious symlink/non-regular file; keep (dev, ino).
+    let pre = match std::fs::symlink_metadata(manifest) {
         Ok(m) if m.file_type().is_symlink() || !m.is_file() => {
             return Err(format!("{} is not a regular file", manifest.display()));
         }
-        Ok(_) => {}
+        Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(format!("{} not found", manifest.display()));
         }
         Err(e) => return Err(format!("cannot stat {}: {e}", manifest.display())),
-    }
-    // ...and the OPEN handle is re-checked and the read is bounded, so a
-    // symlink/type swap after the pre-check or a growing/virtual file cannot
-    // slip past (same discipline as verify_entry).
+    };
+    // The OPEN handle must be the SAME regular file (matching dev/ino), so a
+    // symlink/type swap after the pre-check cannot slip past; the read is bounded
+    // so a growing or virtual file cannot exceed the cap. (A swap to a FIFO can
+    // still block inside File::open -- a self-inflicted hang in one's own backup
+    // directory, not an integrity bypass.)
     let f = std::fs::File::open(manifest)
         .map_err(|e| format!("cannot open {}: {e}", manifest.display()))?;
     match f.metadata() {
-        Ok(m) if m.is_file() => {}
+        Ok(m) if m.is_file() && m.dev() == pre.dev() && m.ino() == pre.ino() => {}
         Ok(_) => return Err(format!("{} is not a regular file", manifest.display())),
         Err(e) => return Err(format!("cannot stat {}: {e}", manifest.display())),
     }
@@ -384,12 +387,20 @@ mod tests {
 
     #[test]
     fn parse_fails_closed_on_malformed_and_duplicates() {
-        assert!(parse_manifest("/ ubifs").is_err()); // < 3 fields
-        assert!(parse_manifest("/ ubifs bareword sha256=deadbeef ok").is_err()); // token without =
-        assert!(parse_manifest("/ ubifs size=1 size=2 ok").is_err()); // duplicate key
-        assert!(parse_manifest("/ ubifs sha256=a sha256=b ok").is_err());
-        assert!(parse_manifest("/ ubifs size=corrupt ok").is_err()); // non-u64 size
-        assert!(parse_manifest("/ ubifs =val ok").is_err()); // empty key
+        let hex = "a".repeat(64);
+        let hex2 = "b".repeat(64);
+        let err = |t: &str| parse_manifest(t).unwrap_err();
+        assert!(err("/ ubifs").contains("< 3 fields"));
+        assert!(err("/ ubifs bareword=x sha256=zz ok").contains("not 64 hex")); // bad hex
+        assert!(err("/ ubifs notakeyval token ok").contains("not key=value"));
+        // Duplicate keys reach the duplicate branch (valid values each).
+        assert!(err("/ ubifs size=1 size=2 ok").contains("duplicate size="));
+        assert!(
+            err(&format!("/ ubifs sha256={hex} sha256={hex2} ok")).contains("duplicate sha256=")
+        );
+        assert!(err("/ ubifs size=corrupt ok").contains("not a u64"));
+        assert!(err("/ ubifs =val ok").contains("empty key"));
+        assert!(err("/ ubifs \x1b[31m ok").contains("control character"));
     }
 
     #[test]
