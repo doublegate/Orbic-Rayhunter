@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Phase 2: upstream Rayhunter v0.13.0 installed and validated on the device (T-OR-021/T-OR-022).
+  The network installer deployed the daemon + `config.toml` + `rayhunter_daemon` init + the
+  hooked `misc-daemon`, as the install-footprint RE predicted; after reboot the web UI/API answer
+  on :8080, the daemon records, and the OTA-block renames persisted. A live QMDL (1282 messages)
+  analyzed clean by `rayhunter-check` (0 warnings), with an `EMM Attach Reject` confirming the
+  inactive SIM reaches towers -- end-to-end capture + analysis without an active plan.
+
 - `ref-docs/running-without-active-service-2026-11-23.md`: research synthesis on running
   Rayhunter without an active plan. An inactive SIM (the built-in Verizon SIM here) captures
   broadcast control-plane only (SIB1/Paging) -- enough for the broadcast heuristics and to

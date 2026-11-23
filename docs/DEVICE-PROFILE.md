@@ -104,6 +104,14 @@ IMEI, ICCID, MDN, MEID, MAC) are redacted here.
   [BACKUP-AND-RECOVERY.md](BACKUP-AND-RECOVERY.md)). A raw partition image is deferred to the
   aggressive tier (T-OR-098, EDL).
 
+- **Capture path validated end-to-end (2026-11-23, Phase 2).** After the upstream v0.13.0
+  install, the daemon records real DIAG with the inactive built-in Verizon SIM: a ~90 s capture
+  held 1282 messages including an `EMM Attach Reject (EPSServicesAndNonEPSServicesNotAllowed)` --
+  the signature of the unactivated SIM (the modem reaches Verizon towers but attach is refused).
+  `rayhunter-check 0.13.0` analyzed it with 0 warnings (benign environment). This confirms
+  install + capture + offline analysis without an active plan; the connection-based heuristics
+  need a successful attach (active plan) to fire. The capture (real identifiers) was deleted.
+
 ## TBD (on-device) checklist
 
 Every command below is read-only. Host-side commands need no device access beyond USB

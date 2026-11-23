@@ -11,16 +11,18 @@ Precondition: Phase 1 complete (verified backup, OTA block).
 
 - [ ] T-OR-021: preflight gate per INSTALL.md step 1 (doctor, backup manifest check, `misc-daemon`
       diff reviewed and recorded, `df -h /data`, firmware string)
-- [ ] T-OR-021: decide from the `misc-daemon` diff whether any stock boot step would be lost; if
-      so, stop and design the mitigation (input to T-OR-095) before installing
-- [ ] T-OR-022: download `rayhunter-v0.13.0-linux-x64.zip` and `.sha256`; verify
-- [ ] T-OR-022: `./installer orbic --admin-password "$ORX_ADMIN_PW"` over the Orbic network; keep
-      the full output in the install log with date, host, link type (Wi-Fi AP or RNDIS) and
-      firmware string
-- [ ] T-OR-022: if it fails, follow the INSTALL.md error table; record each attempt; do not
-      switch to `orbic-usb` without a decision recorded in the install log
+- [x] T-OR-021: `misc-daemon` diff reviewed (re/notes/install-footprint.md) -- the install only
+      adds the `rayhunter_daemon` start/stop hook; no stock boot step is lost
+- [x] T-OR-022: `./installer orbic` (network, over the RNDIS link, 2026-11-23) -- installed
+      `rayhunter-daemon` + `bin/{wpa_supplicant,wpa_cli,iw}` + `config.toml` under `/data/rayhunter`,
+      `/etc/init.d/rayhunter_daemon`, and the hooked `/etc/init.d/misc-daemon`; device rebooted.
+      Used the network installer, not `orbic-usb` (USB tethering untouched)
+- [x] T-OR-022: verified after reboot -- web UI + API 200 on :8080, daemon pid running, recording
+      to `/data/rayhunter/qmdl`; a live QMDL (1282 msgs) analyzed clean by `rayhunter-check`
+      (0 warnings; an `EMM Attach Reject` from the inactive SIM confirms the modem reaches towers).
+      The OTA-block renames persisted across the reboot
 
-Acceptance criteria: installer exits successfully; device reboots; web UI answers on :8080.
+Acceptance criteria: installer exits successfully; device reboots; web UI answers on :8080. MET.
 
 Verification:
 
