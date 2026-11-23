@@ -41,15 +41,15 @@ nmap -Pn -p 1-1024,5555,8080,8081 192.168.1.1
 
 ## Sprint 1.2: Shell and read-only inventory
 
-- [ ] T-OR-013: open the network shell with `installer util orbic-shell` (upstream v0.13.0
+- [x] T-OR-013: open the network shell with `installer util orbic-shell` (upstream v0.13.0
       release binary, zip SHA-256 verified); record exactly what was sent
-- [ ] T-OR-013: note the stock remote-access settings before and after; after the next reboot
+- [x] T-OR-013: note the stock remote-access settings before and after; after the next reboot
       check whether port 24 still listens
-- [ ] T-OR-014: run every command in the DEVICE-PROFILE.md checklist (identity, kernel, memory,
+- [x] T-OR-014: run every command in the DEVICE-PROFILE.md checklist (identity, kernel, memory,
       storage, processes, sockets, init layout, USB mode, DIAG node, peripherals)
-- [ ] T-OR-014: copy outputs to `backups/<date>-V1.2.0/layout/`; summarize redacted values in
+- [x] T-OR-014: copy outputs to `backups/<date>-V1.2.0/layout/`; summarize redacted values in
       DEVICE-PROFILE.md
-- [ ] T-OR-014: inventory restore tools on the device (`nanddump`, `nandwrite`, `flash_erase`,
+- [x] T-OR-014: inventory restore tools on the device (`nanddump`, `nandwrite`, `flash_erase`,
       `ubiupdatevol`, `sha256sum`, `tar`, `nc` options)
 
 Acceptance criteria: every DEVICE-PROFILE.md on-device row filled or deferred with a reason; no

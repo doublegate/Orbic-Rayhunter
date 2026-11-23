@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Read-only client for the RC400L stock web UI (GoAhead, ORB400L_V1.2.0_BVZRT).
+
+Logs in exactly as upstream's installer does (`installer/src/orbic_auth.rs`,
+`orbic_network.rs`: GetLoginInfo -> login with the encoded password), calls only
+the allowlisted read endpoints below, then logs out. It never runs the UI's
+JavaScript, and it refuses `/action/FotaGetVersionInfo`: the stock UI calls that
+on every page load, which asks the device to check for an OTA update
+(docs/DEVICE-PROFILE.md).
+
+Usage:
+    scripts/orbic-ui-read.py --selftest
+    scripts/orbic-ui-read.py [--ip 192.168.1.1] [--password-file PATH] \
+        [--out-dir DIR] ENDPOINT [ENDPOINT ...]
+
+The admin password is read from --password-file (default
+~/.claude-secrets/orbic-admin.txt, which must be mode 600), never from argv, and
+is never printed. Raw JSON responses are written only with --out-dir, as
+<endpoint>.json with mode 600; keep that under the gitignored backups/. Standard
+output shows every field name, but the value of any identifier or secret field
+(IMEI, ICCID, MDN, MEID, IMSI, MAC, serial, password, key, token) is replaced by
+its length, so it can be pasted into a document.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import http.client
+import json
+import os
+import re
+import stat
+import sys
+import time
+from pathlib import Path
+
+# Read endpoints this tool may call. Each is a query the stock UI itself issues;
+# none of them changes device state. Nothing outside this set is ever requested.
+READ_ENDPOINTS = {
+    "GetDeviceInfo": "/action/GetDeviceInfo",
+    "GetRemoteAccessCfg": "/action/GetRemoteAccessCfg",
+    "GetSimInfo": "/action/GetSimInfo",
+    "GetLanCfgInfo": "/action/GetLanCfgInfo",
+    "GetWanStatusInfo": "/action/GetWanStatusInfo",
+    "GetBatteryInfo": "/action/GetBatteryInfo",
+    "GetSimlockStatus": "/action/GetSimlockStatus",
+}
+# Named explicitly so that a future edit cannot add it by accident.
+REFUSED = {"FotaGetVersionInfo": "asks the device to check for an OTA update"}
+
+SENSITIVE = re.compile(
+    r"imei|iccid|mdn|meid|imsi|msisdn|mac|serial|passw|pwd|key|token|secret|ssid|phone",
+    re.IGNORECASE,
+)
+
+DEFAULT_PASSWORD_FILE = Path.home() / ".claude-secrets" / "orbic-admin.txt"
+
+
+def swap_chars(text: str, pos1: int, pos2: int) -> str:
+    chars = list(text)
+    if pos1 < len(chars) and pos2 < len(chars):
+        chars[pos1], chars[pos2] = chars[pos2], chars[pos1]
+    return "".join(chars)
+
+
+def apply_secret_swapping(text: str, secret_num: int) -> str:
+    for i in range(4):
+        byte = (secret_num >> (i * 8)) & 0xFF
+        text = swap_chars(text, byte % len(text), i % len(text))
+    return text
+
+
+def encode_password(
+    password: str, secret: str, timestamp: str, timestamp_start: int, now: int
+) -> str:
+    """Port of upstream `encode_password` (installer/src/orbic_auth.rs, v0.13.0).
+
+    `now - timestamp_start` is the time elapsed since GetLoginInfo; upstream reads
+    the clock for `now`, and the u32 addition wraps as it does in a release build.
+    """
+    spliced = "a7" + hashlib.md5(password.encode("utf-8")).hexdigest()
+    secret_num = int(secret, 16)
+    spliced = apply_secret_swapping(spliced, secret_num)
+    time_delta = (int(timestamp, 16) + (now - timestamp_start)) & 0xFFFFFFFF
+    message = f"6137x{time_delta:x}:{spliced}"
+    result = base64.b64encode(message.encode("utf-8")).decode("ascii")
+    return apply_secret_swapping(result, secret_num)
+
+
+# Reference vectors produced by upstream's own `encode_password` (built from
+# orbic_auth.rs with md5 0.7.0 and base64_light 0.1.5, current time = start).
+SELFTEST_VECTORS = [
+    (
+        "hunter22",
+        "1a2b3c4d",
+        "00ff00ff",
+        "mMzEN3hmZjAwZNY6YTVhNzk1MDz1YzQzNmZlOTc2ZWIEOGU0NTRiNTM3MjAzjg==",
+    ),
+    (
+        "correct-horse",
+        "0",
+        "5f5e1000",
+        "zNjEN3g1ZjVlMTAwMDplYTcyYjYyZDE3MWJhODQ5MWRiNDk2MDgxYThiMjQ3Mzhh",
+    ),
+    (
+        "x",
+        "9f8e7d6c",
+        "deadbeef",
+        "N2VxN3hkZWFkYmElZjplNmE3ZDQ5NDYzMjY4YzgwMzRmNWM4NWQ0ZTE1NWM2NjE2",
+    ),
+    (
+        "pässwörd",
+        "ffffffff",
+        "1",
+        "yNjEN3gxOmZhNzE4NDFlNGJhNWUzN2QzMmJmYzc4NDU4YzY3MTRhZGU=",
+    ),
+]
+
+
+def selftest() -> int:
+    bad = 0
+    for n, (password, secret, ts, want) in enumerate(SELFTEST_VECTORS, 1):
+        got = encode_password(password, secret, ts, 1_700_000_000, 1_700_000_000)
+        ok = got == want
+        bad += not ok
+        # Only the vector number is printed: the inputs are fixtures, but nothing here
+        # should print anything shaped like a credential.
+        print(
+            f"  {'ok  ' if ok else 'FAIL'}  encode_password matches upstream (vector {n})"
+        )
+    for name in REFUSED:
+        assert name not in READ_ENDPOINTS, name
+    print(
+        "all vectors match upstream"
+        if not bad
+        else f"{bad} vector(s) differ from upstream"
+    )
+    return 1 if bad else 0
+
+
+def read_password(path: Path) -> str:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        raise SystemExit(
+            f"refusing {path}: mode {mode:o} lets others read it (chmod 600)"
+        )
+    password = path.read_text(encoding="utf-8").rstrip("\r\n")
+    if not password:
+        raise SystemExit(f"{path} is empty")
+    return password
+
+
+class Session:
+    """One HTTP connection per request: the GoAhead server mishandles keep-alive."""
+
+    def __init__(self, ip: str) -> None:
+        self.ip = ip
+        self.cookie = ""
+
+    def request(
+        self, method: str, path: str, body: bytes | None = None
+    ) -> tuple[int, dict]:
+        conn = http.client.HTTPConnection(self.ip, 80, timeout=15)
+        headers = {"Content-Type": "application/json", "Connection": "close"}
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        conn.request(method, path, body=body, headers=headers)
+        resp = conn.getresponse()
+        set_cookie = resp.getheader("Set-Cookie")
+        if set_cookie:
+            self.cookie = set_cookie.split(";", 1)[0]
+        raw = resp.read()
+        conn.close()
+        try:
+            return resp.status, json.loads(raw.decode("utf-8", "replace") or "{}")
+        except json.JSONDecodeError:
+            return resp.status, {"_non_json_bytes": len(raw)}
+
+    def login(self, username: str, password: str) -> None:
+        status, info = self.request("GET", "/goform/GetLoginInfo")
+        if status != 200 or info.get("retcode") != 0:
+            raise SystemExit(
+                f"GetLoginInfo failed (HTTP {status}, retcode {info.get('retcode')})"
+            )
+        parts = str(info.get("priKey", "")).split("x")
+        if len(parts) != 2:
+            raise SystemExit("GetLoginInfo returned an unexpected priKey format")
+        secret, timestamp = parts
+        start = int(time.time())
+        body = json.dumps(
+            {
+                "username": hashlib.md5(username.encode("utf-8")).hexdigest(),
+                "password": encode_password(
+                    password, secret, timestamp, start, int(time.time())
+                ),
+            }
+        ).encode("utf-8")
+        status, result = self.request("POST", "/goform/login", body)
+        if result.get("retcode") != 0:
+            code = result.get("retcode")
+            raise SystemExit(
+                "login failed: incorrect password"
+                if code == 201
+                else f"login failed (retcode {code})"
+            )
+
+    def logout(self) -> None:
+        self.request("POST", "/action/logout", b"{}")
+
+
+def safe_view(obj: object) -> object:
+    """Field names kept; identifier and secret values replaced by their length."""
+    if isinstance(obj, dict):
+        return {
+            k: (
+                f"<redacted, {len(str(v))} chars>"
+                if SENSITIVE.search(k) and v not in ("", None)
+                else safe_view(v)
+            )
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [safe_view(v) for v in obj]
+    return obj
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        description="Read-only client for the RC400L stock web UI."
+    )
+    ap.add_argument(
+        "--selftest",
+        action="store_true",
+        help="check the password encoding against upstream vectors",
+    )
+    ap.add_argument("--ip", default="192.168.1.1")
+    ap.add_argument("--username", default="admin")
+    ap.add_argument("--password-file", type=Path, default=DEFAULT_PASSWORD_FILE)
+    ap.add_argument(
+        "--out-dir",
+        type=Path,
+        help="write raw JSON here (mode 600); keep it under backups/",
+    )
+    ap.add_argument(
+        "endpoints",
+        nargs="*",
+        metavar="ENDPOINT",
+        help=", ".join(sorted(READ_ENDPOINTS)),
+    )
+    args = ap.parse_args(argv)
+
+    if args.selftest:
+        return selftest()
+    if not args.endpoints:
+        ap.error("name at least one ENDPOINT, or use --selftest")
+    for name in args.endpoints:
+        if name in REFUSED:
+            ap.error(f"{name} is refused: it {REFUSED[name]}")
+        if name not in READ_ENDPOINTS:
+            ap.error(
+                f"{name} is not an allowlisted read endpoint ({', '.join(sorted(READ_ENDPOINTS))})"
+            )
+
+    password = read_password(args.password_file)
+    session = Session(args.ip)
+    session.login(args.username, password)
+    del password
+    try:
+        for name in args.endpoints:
+            status, data = session.request("POST", READ_ENDPOINTS[name], b"{}")
+            if args.out_dir:
+                args.out_dir.mkdir(parents=True, exist_ok=True)
+                target = args.out_dir / f"{name}.json"
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh, indent=2, sort_keys=True)
+            print(f"== {name} (HTTP {status})")
+            print(json.dumps(safe_view(data), indent=2, sort_keys=True))
+    finally:
+        session.logout()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

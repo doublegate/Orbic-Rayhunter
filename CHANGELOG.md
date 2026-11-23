@@ -10,6 +10,23 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 
 ### Added
 
+- `scripts/orbic-ui-read.py`: a read-only client for the stock GoAhead web UI. It logs in with
+  the same encoding as upstream's installer (verified against four reference vectors from
+  upstream's own `encode_password`), calls only an allowlist of read endpoints, and **refuses**
+  `FotaGetVersionInfo` (which would ask the device to check for an OTA update). The admin
+  password is read from a mode-600 file, never argv, and identifier fields are length-redacted
+  on stdout.
+- `scripts/orbic-shell.py`: drives the upstream root shell (busybox `nc` on TCP 24) one command
+  at a time with per-command markers and exit status. It is read-only by policy -- a first-word
+  command classifier plus redirection/writer-form checks refuse anything that could modify the
+  device, so no recon run can write flash before the Sprint 1.3 backup. `scripts/recon/` holds
+  the inventory command lists.
+- Phase 1 Sprint 1.2 on-device recon (T-OR-013/T-OR-014) recorded in docs/DEVICE-PROFILE.md:
+  kernel 3.18.48 and command line, the 17-partition MTD table and UBI layout, mounts and free
+  space, the available backup tools (`nanddump`, `nandwrite`, `flash_erase`, `ubinfo`,
+  `sha256sum`), listening sockets, the absence of a persistent FOTA daemon, and the stock
+  `misc-daemon` SHA-256 baseline. The one device change from opening the shell (`telnetd` 1->0
+  in the remote-access config) is noted; identifiers are redacted.
 - Repository scaffold: GPL-3.0-or-later license (ADR 0002), overlay layout (ADR 0001), upstream
   EFForg/rayhunter submodule pinned to `v0.13.0` (`cd462a1`), Rust 1.98.0 toolchain pin matching
   upstream.

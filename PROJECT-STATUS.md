@@ -3,7 +3,7 @@
 Single source of truth for the current state of Orbic-Rayhunter. Other files point here instead
 of restating status. Updated at every sprint and phase boundary.
 
-- Last updated: 2026-11-23
+- Last updated: 2026-11-23 (Sprint 1.2)
 - Version: 0.1.0-dev (`Cargo.toml` `workspace.package.version = "0.1.0"`, unreleased)
 - Upstream pin: EFForg/rayhunter v0.13.0 (cd462a1)
 - Target: Orbic RC400L, `ORB400L_V1.2.0_BVZRT`
@@ -26,7 +26,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Phase | Release(s) | Theme | Status | Plan |
 |---|---|---|---|---|
 | 0 | v0.1.0 | Foundation | in progress (T-OR-001..010 done; T-OR-011 tag open) | [to-dos/PHASE-0-foundation.md](to-dos/PHASE-0-foundation.md) |
-| 1 | v0.2.0 | Device recon + verified backup | in progress (Sprint 1.1 host recon done except the UI firmware string) | [to-dos/PHASE-1-recon-backup.md](to-dos/PHASE-1-recon-backup.md) |
+| 1 | v0.2.0 | Device recon + verified backup | in progress (Sprint 1.1 + 1.2 done; next: 1.3 verified backup) | [to-dos/PHASE-1-recon-backup.md](to-dos/PHASE-1-recon-backup.md) |
 | 2 | v0.3.0 | Stock upstream install | not started | [to-dos/PHASE-2-stock-install.md](to-dos/PHASE-2-stock-install.md) |
 | 3 | v0.4.0 | Reproducible patched build | not started | [to-dos/PHASE-3-reproducible-build.md](to-dos/PHASE-3-reproducible-build.md) |
 | 4 | v0.5.0..v1.0.0 | `orx` tooling, baseline | not started | [to-dos/PHASE-4-orx-tooling.md](to-dos/PHASE-4-orx-tooling.md) |
@@ -44,7 +44,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | `orx doctor` | present | T-OR-003, T-OR-106 | USB f626/f601/9008 with the serial read from the `_SN:` product suffix, TCP :80 and :8080; f622 not classified |
 | CI workflows | green on `main` | T-OR-002, T-OR-010 | ci, docs, security, upstream-watch; release untested until a tag |
 | Specification docs | present | T-OR-007 | `docs/` |
-| Device profile | host-side facts measured (USB descriptors, web server, TLS, ports, OTA trigger) | T-OR-012, T-OR-014 | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
+| Device profile | host-side and on-device facts measured (partitions, UBI, mounts, tools, processes, sockets) | T-OR-012, T-OR-013, T-OR-014 | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
 | Verified device backup | absent | T-OR-015..T-OR-017 | blocks every device write |
 | OTA block | absent | T-OR-018 | |
 | Rayhunter on device | not installed | T-OR-022 | |
@@ -59,7 +59,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Tickets | 106 minted; 11 done (T-OR-001..T-OR-010, T-OR-106) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 0 | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
-| Host unit tests | 10 passed | `cargo test` (local and CI) |
+| Host unit tests | 10 passed; 2 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
 | Latest release | none | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |
