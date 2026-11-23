@@ -6,7 +6,7 @@
 
 ## [0.8.0] - 2026-11-23
 
-Adds `orx install` and `orx uninstall` -- the device-write operations that complete the orx tooling. Both are DRY-RUN by default (print the exact step plan) and `--apply` executes; both refuse unless `verify::gate()` passes for the backup directory, so a device write is impossible without a verified rootfs backup to roll back to. The deployed file set and paths mirror upstream's network installer and the install-footprint RE, but deploy OUR firmware build; uninstall restores the true stock misc-daemon extracted from the verified backup's `root.tar` and removes our files (leaving recordings). orx-cli stays zero-dependency; 50 unit tests, dry-run validated on the unit against the verified Sprint 1.3 backup.
+Adds `orx install` and `orx uninstall` -- the device-write operations that complete the orx tooling. Both are DRY-RUN by default (print the exact step plan) and `--apply` executes; both refuse unless `verify::gate()` passes for the backup directory, so a device write is impossible without a verified rootfs backup to roll back to. The deployed file set and paths mirror upstream's network installer and the install-footprint RE, but deploy OUR firmware build; uninstall restores the true stock misc-daemon extracted from the verified backup's `root.tar` and removes our files (leaving recordings). orx-cli stays zero-dependency; 54 unit tests, dry-run validated on the unit against the verified Sprint 1.3 backup.
 
 ### Added
 
@@ -17,8 +17,9 @@ Adds `orx install` and `orx uninstall` -- the device-write operations that compl
   file is written ATOMICALLY (send to
   `<path>.orx-new`, which the device re-hashes, then `chmod` + `mv`), so a dropped connection or
   failed chmod can never leave a half-written/non-executable init script, and `mv`-over-a-running
-  binary avoids `ETXTBSY`. The daemon and init scripts are validated first (non-empty; `#!` shebang;
-  no CRLF).
+  binary avoids `ETXTBSY`. The daemon and init scripts are validated first (daemon = 32-bit LE ARM ELF;
+  scripts = `#!` shebang, no CRLF/NUL, valid UTF-8; the init references the daemon path and the
+  misc-daemon references `rayhunter_daemon`). A failed transfer cleans up its `.orx-new` temp.
 - `orx uninstall --dir <backup> [--apply]` (T-OR-039): restores the TRUE stock `misc-daemon`
   extracted from the verified backup's `root.tar` (NOT copied from the device, which may already
   carry the hooked script), atomically, then removes our files (leaving `/data/rayhunter-data`

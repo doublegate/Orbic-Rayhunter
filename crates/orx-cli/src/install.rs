@@ -115,9 +115,9 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 /// A device init script must be non-empty and start with a `#!` shebang (reject a
 /// truncated or CRLF-mangled script before it can break boot).
 fn check_init_script(bytes: &[u8], what: &str) -> Result<(), String> {
-    if bytes.len() < 2 || &bytes[..2] != b"#!" {
+    if bytes.len() < 10 || &bytes[..2] != b"#!" {
         return Err(format!(
-            "{what} does not start with a #! shebang (truncated?)"
+            "{what} is not a plausible shell script (too short or no #! shebang)"
         ));
     }
     if bytes.contains(&b'\r') {
@@ -125,7 +125,31 @@ fn check_init_script(bytes: &[u8], what: &str) -> Result<(), String> {
             "{what} contains CR (CRLF line endings break BusyBox sh)"
         ));
     }
+    if bytes.contains(&0) {
+        return Err(format!("{what} contains a NUL byte (not a text script)"));
+    }
+    if std::str::from_utf8(bytes).is_err() {
+        return Err(format!(
+            "{what} is not valid UTF-8 (corrupt or wrong file?)"
+        ));
+    }
     Ok(())
+}
+
+/// Whether `hay` contains the byte sequence `needle`.
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// A 32-bit little-endian ARM ELF (the RC400L is armv7). Rejects a host x86-64
+/// binary, a text file, or a corrupt artifact before it is deployed as the
+/// daemon. `e_machine == 40` is EM_ARM; `EI_CLASS == 1` 32-bit; `EI_DATA == 1` LE.
+fn is_arm32_elf(bytes: &[u8]) -> bool {
+    bytes.len() >= 20
+        && &bytes[..4] == b"\x7fELF"
+        && bytes[4] == 1
+        && bytes[5] == 1
+        && u16::from_le_bytes([bytes[18], bytes[19]]) == 40
 }
 
 /// Build the install step plan. Validates every source (fail before any device
@@ -137,16 +161,29 @@ pub fn install_plan(
     config_template: &Path,
 ) -> Result<Vec<Step>, String> {
     let daemon_bytes = read(daemon)?;
-    if daemon_bytes.len() < 1024 {
+    if !is_arm32_elf(&daemon_bytes) {
         return Err(format!(
-            "{} is implausibly small for a daemon",
+            "{} is not a 32-bit little-endian ARM ELF (wrong arch, or not a daemon binary)",
             daemon.display()
         ));
     }
     let init_bytes = read(rayhunter_init)?;
     check_init_script(&init_bytes, "rayhunter_daemon")?;
+    // The init script must actually start OUR daemon, and the misc-daemon we
+    // deploy must be the HOOKED one (it references rayhunter_daemon); otherwise
+    // the install would boot to a broken or unhooked state.
+    if !contains(&init_bytes, b"/data/rayhunter/rayhunter-daemon") {
+        return Err(
+            "rayhunter_daemon init does not reference /data/rayhunter/rayhunter-daemon".to_string(),
+        );
+    }
     let misc_bytes = read(misc_daemon)?;
     check_init_script(&misc_bytes, "misc-daemon")?;
+    if !contains(&misc_bytes, b"rayhunter_daemon") {
+        return Err(
+            "misc-daemon does not reference rayhunter_daemon (not the hooked script?)".to_string(),
+        );
+    }
     let config_text = String::from_utf8(read(config_template)?)
         .map_err(|_| "config template is not UTF-8".to_string())?;
     let config_bytes = render_config(&config_text).into_bytes();
@@ -294,7 +331,13 @@ pub fn execute(
                     return Err(format!("unsafe remote path in plan: {remote:?}"));
                 }
                 let tmp = format!("{remote}.orx-new");
-                shell.send_file(&tmp, bytes)?; // verifies the temp's sha256
+                // verifies the temp's sha256; clean up the temp on failure so a
+                // partial/failed transfer never leaks (a stray 16 MB daemon temp
+                // on /data can wedge the daemon and AP, #1192).
+                if let Err(e) = shell.send_file(&tmp, bytes) {
+                    let _ = shell.run(&format!("rm -f {tmp}"));
+                    return Err(e);
+                }
                 let c = shell.run(&format!("chmod {chmod} {tmp}"))?;
                 if c.status != 0 {
                     let _ = shell.run(&format!("rm -f {tmp}"));
@@ -358,11 +401,74 @@ mod tests {
         assert!(check_init_script(b"", "x").is_err());
     }
 
+    /// A minimal buffer that passes is_arm32_elf (header only; not runnable).
+    fn fake_arm_elf() -> Vec<u8> {
+        let mut b = vec![0u8; 2048];
+        b[..4].copy_from_slice(b"\x7fELF");
+        b[4] = 1; // ELFCLASS32
+        b[5] = 1; // little-endian
+        b[18] = 40; // EM_ARM (little end of e_machine)
+        b
+    }
+
     fn write_artifacts(d: &Path) {
-        std::fs::write(d.join("daemon"), [1u8; 2048]).unwrap();
-        std::fs::write(d.join("rayhunter_daemon"), b"#!/bin/sh\nstart\n").unwrap();
-        std::fs::write(d.join("misc-daemon"), b"#!/bin/sh\nmisc\n").unwrap();
+        std::fs::write(d.join("daemon"), fake_arm_elf()).unwrap();
+        std::fs::write(
+            d.join("rayhunter_daemon"),
+            b"#!/bin/sh\n/data/rayhunter/rayhunter-daemon &\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("misc-daemon"),
+            b"#!/bin/sh\n/etc/init.d/rayhunter_daemon start\n",
+        )
+        .unwrap();
         std::fs::write(d.join("config.toml.in"), b"port = 8080\n").unwrap();
+    }
+
+    #[test]
+    fn is_arm32_elf_accepts_arm_rejects_others() {
+        assert!(is_arm32_elf(&fake_arm_elf()));
+        assert!(!is_arm32_elf(&[0u8; 2048])); // no magic
+        let mut x86 = fake_arm_elf();
+        x86[18] = 0x3e; // EM_X86_64
+        assert!(!is_arm32_elf(&x86));
+        let mut be = fake_arm_elf();
+        be[5] = 2; // big-endian
+        assert!(!is_arm32_elf(&be));
+    }
+
+    #[test]
+    fn check_init_script_rejects_nul_and_non_utf8() {
+        assert!(check_init_script(b"#!/bin/sh\n\0bad", "x").is_err());
+        assert!(check_init_script(b"#!/bin/sh\n\xff\xfe", "x").is_err());
+        assert!(check_init_script(b"#!", "x").is_err()); // 2-byte
+    }
+
+    #[test]
+    fn install_plan_rejects_wrong_arch_and_unhooked_scripts() {
+        let d = tmp();
+        write_artifacts(&d);
+        // Wrong-arch daemon.
+        std::fs::write(d.join("daemon"), [0u8; 2048]).unwrap();
+        assert!(plan_res(&d).is_err());
+        std::fs::write(d.join("daemon"), fake_arm_elf()).unwrap();
+        // misc-daemon that does not reference rayhunter_daemon.
+        std::fs::write(d.join("misc-daemon"), b"#!/bin/sh\nnohook\n").unwrap();
+        match plan_res(&d) {
+            Err(e) => assert!(e.contains("misc-daemon does not reference")),
+            Ok(_) => panic!("expected an error for an unhooked misc-daemon"),
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn plan_res(d: &Path) -> Result<Vec<Step>, String> {
+        install_plan(
+            &d.join("daemon"),
+            &d.join("rayhunter_daemon"),
+            &d.join("misc-daemon"),
+            &d.join("config.toml.in"),
+        )
     }
 
     fn plan(d: &Path) -> Vec<Step> {
