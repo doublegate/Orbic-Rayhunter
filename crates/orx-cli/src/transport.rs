@@ -302,43 +302,46 @@ impl Shell for TcpShell {
         let data_addr = SocketAddr::new(self.addr.ip(), data_port);
         let marker = make_marker();
         let mut ctl = self.connect()?;
-        // `remote` is always our own `<path>.orx-new` temp, so truncating it here
-        // is harmless. Cross-file safety (never streaming THIS file's bytes into a
-        // stale listener bound to a DIFFERENT path) comes from the pre-connect peek
-        // below, not from the redirect. The listener prints its exit status after
-        // the transfer, in the same framing run() uses.
+        // Build a self-bounding, atomic, cleaned-up listener command:
+        //  - write into an internal `.ncpart`, and `mv` onto `{remote}` ONLY on a
+        //    clean transfer, so a bind failure never truncates `{remote}` (which
+        //    matters because Shell::put is a public primitive: a caller may pass an
+        //    existing file, not a disposable temp);
+        //  - a watchdog kills the listener after LISTEN_SECS so a transfer that is
+        //    never completed (we fail to connect, or a peer grabs and holds it)
+        //    cannot leave `nc -l` orphaned in accept() on the device;
+        //  - report the listener's exit status in run()'s framing.
+        const LISTEN_SECS: u32 = 45;
+        let part = format!("{remote}.ncpart");
         ctl.write_all(
-            format!("nc -l -p {data_port} > {remote}; printf '{marker} %s.' \"$?\"\n").as_bytes(),
+            format!(
+                "nc -l -p {data_port} > {part} & p=$!; (sleep {LISTEN_SECS}; kill $p 2>/dev/null) & w=$!; \
+                 wait $p; st=$?; kill $w 2>/dev/null; \
+                 if [ $st -eq 0 ]; then mv {part} {remote}; else rm -f {part}; fi; \
+                 printf '{marker} %s.' \"$st\"\n"
+            )
+            .as_bytes(),
         )
         .map_err(|e| format!("start device listener: {e}"))?;
 
-        // Peek the control channel BEFORE connecting: a healthy `nc -l` blocks in
-        // accept() and writes nothing, so the channel stays silent. If instead the
-        // marker arrives now, the listener exited immediately (e.g. a stale
-        // listener already holds the port) -- abort WITHOUT connecting, so we
-        // never stream this file's bytes into a stale listener bound to another
-        // path (fail closed; Shell::put is a public write primitive).
-        ctl.set_read_timeout(Some(Duration::from_millis(600))).ok();
-        let mut probe = Vec::new();
+        // Peek the control channel BEFORE connecting: a healthy listener is silent
+        // (nc blocks in accept(), nothing is printed until the transfer ends), so
+        // ANY output now is an error state -- most importantly the completion
+        // marker, which means the listener exited immediately (e.g. a stale
+        // listener already holds the port). Fail closed in every such case so we
+        // never stream this file's bytes into a listener bound to another path.
+        ctl.set_read_timeout(Some(Duration::from_millis(300))).ok();
         let mut pbuf = [0u8; 256];
-        let probe_deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match ctl.read(&mut pbuf) {
-                Ok(0) => return Err("device control channel closed before transfer".to_string()),
-                Ok(n) => {
-                    probe.extend_from_slice(&pbuf[..n]);
-                    if find_sub(&probe, marker.as_bytes()).is_some() {
-                        return Err(format!(
-                            "device listener did not bind port {data_port} (a stale listener may hold it); aborted before sending"
-                        ));
-                    }
-                    if Instant::now() >= probe_deadline {
-                        break; // produced output but no marker; treat as up
-                    }
-                }
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
-                Err(e) => return Err(format!("device control channel: {e}")),
+        match ctl.read(&mut pbuf) {
+            Ok(0) => return Err("device control channel closed before transfer".to_string()),
+            Ok(_) => {
+                return Err(format!(
+                    "device listener on port {data_port} produced output before any transfer \
+                     (it did not bind -- a stale listener may hold the port); aborted before sending"
+                ));
             }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(e) => return Err(format!("device control channel: {e}")),
         }
 
         // Connect the data channel; retry briefly while the listener binds.
@@ -376,7 +379,7 @@ impl Shell for TcpShell {
         // (the trailing '.' guarantees the status is complete even if TCP split it).
         let deadline = Instant::now() + self.timeout;
         let end = format!("{marker} ");
-        let mut raw = probe; // include anything already read during the peek
+        let mut raw: Vec<u8> = Vec::new(); // the peek consumed nothing on the healthy path
         let mut rbuf = [0u8; 256];
         loop {
             if let Some(at) = find_sub(&raw, end.as_bytes()) {
