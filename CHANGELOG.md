@@ -19,10 +19,11 @@ Adds `orx verify` and the shared backup-gate, so a backup can be proven as a rol
   device access; fully unit-tested (43 orx-cli tests). It fails closed throughout: `parse_manifest`
   errors on a malformed row (< 3 fields, a non-`key=value` token, or a duplicate `size=`/`sha256=`);
   a row without a valid `size=` + 64-hex `sha256=` is rejected unchecked; a recorded state other
-  than `ok`/`ok-live` fails the entry; a duplicate rootfs `/` row is ambiguous; archives are opened
-  `O_NOFOLLOW` and rejected if a symlink/non-regular file; and `orx verify` + `verify::gate()` share
-  one gate policy over verdicts computed once (the ~87 MB rootfs is hashed once). Hardening from the
-  PR's Codex + Antigravity review.
+  than `ok`/`ok-live` fails the entry; a duplicate rootfs `/` row is ambiguous; an archive that is
+  a symlink or non-regular file is rejected (checked before open and re-checked on the open handle,
+  portably -- no arch-specific flag); and `orx verify` + `verify::gate()` share one gate policy over
+  verdicts computed once (the ~87 MB rootfs is hashed once). Hardening from the PR's Codex +
+  Antigravity review.
 
 ### Fixed
 
