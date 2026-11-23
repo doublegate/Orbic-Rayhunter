@@ -17,12 +17,17 @@ Recording rules for this file:
 | Item | Value | Method | Date |
 |---|---|---|---|
 | Firmware string | `ORB400L_V1.2.0_BVZRT` | read on the unit by the owner ([orbic-firmware-v1.2.0.md](../ref-docs/orbic-firmware-v1.2.0.md) section 1); storage location on the device TBD (on-device) | 2026-11-22 |
-| USB ID (normal mode) | `05c6:f626`, product string "MDM9207-MTP" | host sysfs (`orx doctor`) | 2026-11-22 |
-| USB serial | present, 8 hex characters; value redacted (device identifier) | host sysfs (`orx doctor`) | 2026-11-22 |
-| USB functions (normal mode) | RNDIS + CDC data | host USB enumeration | 2026-11-22 |
-| Host address on the RNDIS link | `192.168.1.112` | host network interface | 2026-11-22 |
+| USB ID (normal mode) | `05c6:f626`, product string "MDM9207-MTP _SN:<serial>", manufacturer "Android", `bcdUSB` 2.00, `bcdDevice` 3.18, 1 configuration, 500 mA | `lsusb -v -d 05c6:f626` | 2026-11-23 |
+| USB serial | 8 hex characters; value redacted (device identifier). In normal mode there is **no** `serial` sysfs attribute: the serial is embedded in the product string after `_SN:` (so a product string is redacted too), and `orx doctor` reads it from there (T-OR-106) | `lsusb -v`, sysfs, `orx doctor` | 2026-11-23 |
+| USB functions (normal mode) | two interfaces: 0 = class `e0`/`01`/`03` (Wireless, RF, RNDIS), "RNDIS Communications Control"; 1 = class `0a`/`00`/`00` (CDC Data), "RNDIS Ethernet Data" | `lsusb -v`, sysfs `bInterface*` | 2026-11-23 |
+| Host address on the RNDIS link | DHCP from the device: `192.168.1.112` (2026-11-22), `192.168.1.134` (2026-11-23); default route via `192.168.1.1` | `ip -br addr`, `ip route` | 2026-11-23 |
 | Stock web UI | `http://192.168.1.1/` reachable (TCP :80 open) | `orx doctor` | 2026-11-22 |
-| Rayhunter | not installed (TCP :8080 closed) | `orx doctor` | 2026-11-22 |
+| Rayhunter | not installed (TCP :8080 closed) | `orx doctor` | 2026-11-23 |
+| Web server | GoAhead (session cookie `-goahead-session-`; no `Server` header). `/` answers `302` to `/common/home.html` (`Last-Modified: Fri Nov 20 03:47:42 2020`); every response carries `X-Frame-Options: SAMEORIGIN` | `curl -sI` / `curl -D` | 2026-11-23 |
+| Unauthenticated login probe | `GET /goform/GetLoginInfo` returns `retcode`, `loginStatus` (0 = logged out), `loginUser`, `loginRole` and an 11-character `priKey`, and sets a session cookie, all without authentication. The `priKey` value is not recorded | `curl` | 2026-11-23 |
+| TLS on :443 | self-signed certificate with the OpenSSL default subject (`O=Internet Widgits Pty Ltd`), **expired** (valid 2017-08-30 to 2020-08-29), 1024-bit RSA key; TLSv1.2 `ECDHE-RSA-AES256-GCM-SHA384` | `openssl s_client` | 2026-11-23 |
+| Listening ports (host side, TCP 1-1024, 5555, 8080, 8081) | open: 53 (DNS), 80, 443. Closed: 24 and 8081 (as expected before T-OR-013), 8080, all others to 1024. **5555 filtered** (ADB over TCP dropped, not refused) | `nmap -sT -Pn` | 2026-11-23 |
+| OTA client trigger in the stock UI | the UI header calls `/action/FotaGetVersionInfo` on page load (`getNewVersionInfo()` in `js/common.js`), so **opening the stock UI in a browser asks the device to check for an update**. Not called by the recon, which used `curl` (no JavaScript). See T-OR-018 | UI JavaScript fetched with `curl` | 2026-11-23 |
 
 `orx doctor` (T-OR-003) classifies `05c6:f626` as normal, `05c6:f601` as debug (ADB + DIAG + AT)
 and `05c6:9008` as EDL. It does not yet classify `05c6:f622` (RNDIS plus serial, reachable via
@@ -60,12 +65,12 @@ may not print a prompt; run one command at a time and wait for output. Never run
 
 | Fact | Command | Status |
 |---|---|---|
-| Full USB descriptors, normal mode | `lsusb -v -d 05c6:f626` | TBD (on-device) |
-| Interface classes per function | `for i in /sys/bus/usb/devices/*:1.*; do echo "$i $(cat $i/bInterfaceClass $i/bInterfaceSubClass $i/bInterfaceProtocol 2>/dev/null)"; done` | TBD (on-device) |
+| Full USB descriptors, normal mode | `lsusb -v -d 05c6:f626` | measured 2026-11-23 |
+| Interface classes per function | `for i in /sys/bus/usb/devices/*:1.*; do echo "$i $(cat $i/bInterfaceClass $i/bInterfaceSubClass $i/bInterfaceProtocol 2>/dev/null)"; done` | measured 2026-11-23 |
 | Doctor transcript | `cargo run -p orx-cli -- doctor` | measured (see above) |
-| Host link | `ip -br addr` and `ip route` | measured (address only) |
-| Stock UI headers | `curl -sI http://192.168.1.1/` | TBD (on-device) |
-| Listening ports from the host side | `nmap -Pn -p 1-1024,5555,8080,8081 192.168.1.1` (ports 24 and 8081 should be closed before T-OR-013) | TBD (on-device) |
+| Host link | `ip -br addr` and `ip route` | measured 2026-11-23 |
+| Stock UI headers | `curl -sI http://192.168.1.1/` | measured 2026-11-23 |
+| Listening ports from the host side | `nmap -Pn -p 1-1024,5555,8080,8081 192.168.1.1` (ports 24 and 8081 should be closed before T-OR-013) | measured 2026-11-23 (`-sT`, no root) |
 
 ### Identity and kernel (T-OR-014)
 
