@@ -142,6 +142,9 @@ def selftest() -> int:
             "note": "357812340123456",  # identifier shape, innocuous key
             "lanMac": "02:00:00:00:00:01",
             "deviceName": "RC400L",
+            "meid": 490154203237518,  # integer identifier under a sensitive key
+            "ports": 8080,  # short integer, kept
+            "clients": ["02:00:00:00:00:01", "ok"],  # MAC inside a list, innocuous key
         }
     )
     assert isinstance(red, dict)
@@ -152,6 +155,9 @@ def selftest() -> int:
         red["softwareVersion"] == "ORB400L_V1.2.0_BVZRT",
         red["retcode"] == 0,
         red["deviceName"] == "RC400L",
+        red["meid"].startswith("<redacted"),
+        red["ports"] == 8080,
+        red["clients"][0].startswith("<redacted") and red["clients"][1] == "ok",
     ]
     if not all(checks):
         print(f"  FAIL  safe_view redaction: {red}")
@@ -192,13 +198,15 @@ class Session:
         headers = {"Content-Type": "application/json", "Connection": "close"}
         if self.cookie:
             headers["Cookie"] = self.cookie
-        conn.request(method, path, body=body, headers=headers)
-        resp = conn.getresponse()
-        set_cookie = resp.getheader("Set-Cookie")
-        if set_cookie:
-            self.cookie = set_cookie.split(";", 1)[0]
-        raw = resp.read()
-        conn.close()
+        try:
+            conn.request(method, path, body=body, headers=headers)
+            resp = conn.getresponse()
+            set_cookie = resp.getheader("Set-Cookie")
+            if set_cookie:
+                self.cookie = set_cookie.split(";", 1)[0]
+            raw = resp.read()
+        finally:
+            conn.close()
         try:
             return resp.status, json.loads(raw.decode("utf-8", "replace") or "{}")
         except json.JSONDecodeError:
@@ -206,12 +214,12 @@ class Session:
 
     def login(self, username: str, password: str) -> None:
         status, info = self.request("GET", "/goform/GetLoginInfo")
+        if not isinstance(info, dict):
+            raise SystemExit("GetLoginInfo did not return a JSON object")
         if status != 200 or info.get("retcode") != 0:
             raise SystemExit(
                 f"GetLoginInfo failed (HTTP {status}, retcode {info.get('retcode')})"
             )
-        if not isinstance(info, dict):
-            raise SystemExit("GetLoginInfo did not return a JSON object")
         parts = str(info.get("priKey", "")).split("x")
         if len(parts) != 2 or not all(re.fullmatch(r"[0-9A-Fa-f]+", p) for p in parts):
             raise SystemExit("GetLoginInfo returned an unexpected priKey format")
@@ -226,8 +234,8 @@ class Session:
             }
         ).encode("utf-8")
         status, result = self.request("POST", "/goform/login", body)
-        if result.get("retcode") != 0:
-            code = result.get("retcode")
+        if not isinstance(result, dict) or result.get("retcode") != 0:
+            code = result.get("retcode") if isinstance(result, dict) else None
             raise SystemExit(
                 "login failed: incorrect password"
                 if code == 201
@@ -246,29 +254,36 @@ IDENTIFIER_VALUE = re.compile(
 )
 
 
-def _is_sensitive(key: str, value: object) -> bool:
-    if value in ("", None):
+def _looks_like_identifier(value: object) -> bool:
+    """A leaf value shaped like a device identifier: a string matching
+    IDENTIFIER_VALUE, or an integer with 10+ digits (IMEI/ICCID/MDN)."""
+    if isinstance(value, bool):
         return False
-    if SENSITIVE.search(key):
-        return True
+    if isinstance(value, int):
+        return len(str(abs(value))) >= 10
     return isinstance(value, str) and IDENTIFIER_VALUE.match(value) is not None
 
 
-def safe_view(obj: object) -> object:
+def _redacted(value: object) -> str:
+    return f"<redacted, {len(str(value))} chars>"
+
+
+def safe_view(obj: object, key_sensitive: bool = False) -> object:
     """Field names kept; a value is replaced by its length when its KEY is
-    sensitive or its VALUE looks like an identifier -- a denylist of key names
-    plus a value-shape backstop, so an identifier in an unknown field is caught."""
+    sensitive (denylist of key names) or its VALUE looks like an identifier
+    (value-shape backstop). Key-sensitivity propagates into nested lists/dicts,
+    and the value-shape check runs on every leaf -- including numbers and strings
+    inside lists under an innocuous key -- so an identifier cannot hide in a
+    container."""
     if isinstance(obj, dict):
         return {
-            k: (
-                f"<redacted, {len(str(v))} chars>"
-                if _is_sensitive(k, v)
-                else safe_view(v)
-            )
+            k: safe_view(v, key_sensitive or SENSITIVE.search(k) is not None)
             for k, v in obj.items()
         }
     if isinstance(obj, list):
-        return [safe_view(v) for v in obj]
+        return [safe_view(v, key_sensitive) for v in obj]
+    if (key_sensitive and obj not in ("", None)) or _looks_like_identifier(obj):
+        return _redacted(obj)
     return obj
 
 
@@ -320,12 +335,16 @@ def main(argv: list[str]) -> int:
                 args.out_dir.mkdir(parents=True, exist_ok=True)
                 target = args.out_dir / f"{name}.json"
                 fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                os.fchmod(fd, 0o600)  # tighten a pre-existing file with a looser mode
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump(data, fh, indent=2, sort_keys=True)
             print(f"== {name} (HTTP {status})")
             print(json.dumps(safe_view(data), indent=2, sort_keys=True))
     finally:
-        session.logout()
+        try:
+            session.logout()
+        except OSError:
+            pass  # a logout failure must not mask an earlier error
     return 0
 
 
