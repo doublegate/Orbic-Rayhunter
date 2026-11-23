@@ -19,6 +19,9 @@ Adds `orx backup`, the first `orx` device operation and the write-gate every lat
   nested-mount excludes are unit-tested against the fake shell, and the command was validated
   end-to-end on the unit: root.tar 86.7 MB, data/usrdata/cache all `ok`, the inline SHA-256
   matching an independent `sha256sum`.
+  Output files are written to an `O_EXCL` temp (fresh `0600`, no symlink follow) and renamed
+  over the target, so a backup of device data (which can contain IMEI/IMSI) is never written
+  through a planted symlink (flagged by the automated security review).
 
 - `transport`: a streaming `Shell::run_to(command, sink)` that writes a command's output to a
   writer as it arrives (never buffering), for a `tar`-of-filesystem that would not fit in memory.

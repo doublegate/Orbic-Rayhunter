@@ -75,45 +75,47 @@ fn cmd_backup(ip: &str, out_dir: &Path, allow_live: bool) -> ExitCode {
     for t in &targets {
         let name = backup::archive_name(&t.mountpoint);
         let path = out_dir.join(format!("{name}.tar"));
-        let mut file = match fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(f) => f,
+        // Write to an O_EXCL temp (no symlink follow, fresh 0600), then rename
+        // over the target. A rejected archive leaves no final file.
+        let (mut file, tmp) = match open_tmp(&path) {
+            Ok(ft) => ft,
             Err(e) => {
-                eprintln!("error: cannot create {}: {e}", path.display());
+                eprintln!("error: cannot create temp for {}: {e}", path.display());
                 failed = true;
                 continue;
             }
         };
-        match backup::archive_one(&mut shell, t, &all_mps, &mut file) {
-            Ok((bytes, hash, status)) => {
-                match backup::classify(status, bytes, t.writable, allow_live) {
-                    Ok(state) => {
-                        let res = backup::ArchiveResult {
-                            mountpoint: t.mountpoint.clone(),
-                            fstype: t.fstype.clone(),
-                            bytes,
-                            sha256: hash,
-                            state: state.clone(),
-                        };
-                        println!(
-                            "  {state:10} {} -> {} ({bytes} B)",
-                            t.mountpoint,
-                            path.display()
-                        );
-                        lines.push(res.manifest_line());
-                    }
-                    Err(e) => {
-                        eprintln!("  FAIL       {}: {e}", t.mountpoint);
-                        failed = true;
-                    }
+        let outcome = backup::archive_one(&mut shell, t, &all_mps, &mut file).and_then(
+            |(bytes, hash, status)| {
+                backup::classify(status, bytes, t.writable, allow_live)
+                    .map(|state| (bytes, hash, state))
+            },
+        );
+        drop(file);
+        match outcome {
+            Ok((bytes, hash, state)) => {
+                if let Err(e) = fs::rename(&tmp, &path) {
+                    let _ = fs::remove_file(&tmp);
+                    eprintln!("  FAIL       {}: rename: {e}", t.mountpoint);
+                    failed = true;
+                    continue;
                 }
+                let res = backup::ArchiveResult {
+                    mountpoint: t.mountpoint.clone(),
+                    fstype: t.fstype.clone(),
+                    bytes,
+                    sha256: hash,
+                    state: state.clone(),
+                };
+                println!(
+                    "  {state:10} {} -> {} ({bytes} B)",
+                    t.mountpoint,
+                    path.display()
+                );
+                lines.push(res.manifest_line());
             }
             Err(e) => {
+                let _ = fs::remove_file(&tmp);
                 eprintln!("  FAIL       {}: {e}", t.mountpoint);
                 failed = true;
             }
@@ -126,15 +128,12 @@ fn cmd_backup(ip: &str, out_dir: &Path, allow_live: bool) -> ExitCode {
         ip,
         lines.join("\n")
     );
-    match fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&manifest)
-    {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(body.as_bytes()) {
+    match open_tmp(&manifest) {
+        Ok((mut f, tmp)) => {
+            let w = f.write_all(body.as_bytes());
+            drop(f);
+            if let Err(e) = w.and_then(|()| fs::rename(&tmp, &manifest)) {
+                let _ = fs::remove_file(&tmp);
                 eprintln!("error: writing {}: {e}", manifest.display());
                 return ExitCode::from(2);
             }
@@ -150,6 +149,24 @@ fn cmd_backup(ip: &str, out_dir: &Path, allow_live: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Create a fresh 0600 temp file beside `final_path` with `O_EXCL` (so it never
+/// follows or clobbers a pre-existing path, e.g. a planted symlink). The caller
+/// writes to it and renames it over `final_path`; `rename` replaces the target
+/// (symlink included) atomically, so device data is never written through a link.
+fn open_tmp(final_path: &Path) -> std::io::Result<(fs::File, std::path::PathBuf)> {
+    let name = final_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("out");
+    let tmp = final_path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    Ok((f, tmp))
 }
 
 /// Escape a string for embedding in the compact JSON `--json` output.
