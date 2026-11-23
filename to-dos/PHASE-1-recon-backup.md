@@ -136,9 +136,13 @@ age -d /media/<offline-disk>/orbic-<date>.tar.age | sha256sum
 - [ ] T-OR-012 (moved here from Sprint 1.1): read the firmware string as the stock UI reports it.
       It is shown only after the admin login, and the UI's page load calls the FOTA client, so it
       is read only once the FOTA client is blocked
-- [ ] T-OR-019: run the 0x11EB procedure in [docs/TESTING.md](../docs/TESTING.md) with the
-      upstream release daemon run manually (not installed persistently), then remove it
-- [ ] T-OR-019: record the result in DEVICE-PROFILE.md; delete the capture
+- [x] T-OR-019: ANSWERED FROM CODE -- upstream subscribes to 0x11EB
+      (`LOG_DATA_PROTOCOL_LOGGING_C`, "User IP traffic", diag_device.rs:57-58), so on an active
+      plan user IP packets are logged to QMDL; mitigation T-OR-029 (drop it from our build) is
+      justified. See [ref-docs/running-without-active-service-2026-11-23.md](../ref-docs/running-without-active-service-2026-11-23.md)
+- [ ] T-OR-019: empirical on-device confirmation DEFERRED -- needs an active data plan (the
+      built-in Verizon SIM is not activated; an inactive SIM yields broadcast-only captures, no
+      data session), or a shielded srsRAN lab
 - [x] T-OR-020: `re/notes/` entries for the FOTA client + `goahead` `Fota*` endpoints
       ([ota-mechanism.md](../re/notes/ota-mechanism.md)) and the stock vs upstream `misc-daemon`
       diff ([install-footprint.md](../re/notes/install-footprint.md)); the install hooks

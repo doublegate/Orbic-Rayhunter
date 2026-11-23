@@ -112,6 +112,17 @@ verified backup and the OTA block, with the active SIM providing data:
 
 The capture from this test contains real identifiers; delete it after recording the result.
 
+**Answered from code (2026-11-23), empirical test deferred.** The privacy question is already
+settled by the upstream source: `upstream/lib/src/diag_device.rs:57-58` subscribes to
+`LOG_DATA_PROTOCOL_LOGGING_C` (`log_codes.rs:113` = `0x11eb`), commented "User IP traffic", so on
+an active data plan a subscriber's IP packets ARE logged into the QMDL. This unit has no active
+plan (built-in Verizon SIM, not activated), so no data session occurs and no user traffic is
+produced to capture; the live confirmation and the connection-based heuristics are deferred until
+an active plan or a shielded srsRAN lab is available
+([ref-docs/running-without-active-service-2026-11-23.md](../ref-docs/running-without-active-service-2026-11-23.md)).
+The mitigation (T-OR-029: drop `LOG_DATA_PROTOCOL_LOGGING_C` from our build's subscription) is
+justified on the code regardless.
+
 ## 5. Optional shielded lab (srsRAN)
 
 For exercising analyzers with real signalling. Only inside an RF-shielded enclosure (Faraday box

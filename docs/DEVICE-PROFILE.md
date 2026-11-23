@@ -179,7 +179,7 @@ rayhunter:  192.168.1.1:8080 not running / not installed
 | Battery | `cat /sys/kernel/chg_info/level /sys/kernel/chg_info/chg_en` | TBD (on-device) |
 | Wi-Fi chip | `lsmod; dmesg \| grep -i -E "wlan\|qca\|ath"` | TBD (on-device) |
 | Input device | `cat /proc/bus/input/devices` | TBD (on-device) |
-| 0x11EB user traffic in QMDL | procedure in [TESTING.md](TESTING.md) (on-device privacy check) | TBD (on-device) |
+| 0x11EB user traffic in QMDL | upstream source + [TESTING.md](TESTING.md) | answered from code 2026-11-23: upstream subscribes to `LOG_DATA_PROTOCOL_LOGGING_C` (0x11EB, "User IP traffic"), so an active data plan would log user IP packets to QMDL; this unit has no active plan, so the empirical test is deferred (built-in Verizon SIM not activated; inactive SIM = broadcast-only). Mitigation T-OR-029 justified |
 | DIAG ioctl convention, log ID ranges, `ext_header_version` of 0xB0C0 | from the Rayhunter log and QMDL once running ([qualcomm-diag-qmdl.md](../ref-docs/qualcomm-diag-qmdl.md) section 9) | TBD (on-device) |
 
 ### Firmware behavior questions

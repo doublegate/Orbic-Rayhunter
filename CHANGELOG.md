@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `ref-docs/running-without-active-service-2026-11-23.md`: research synthesis on running
+  Rayhunter without an active plan. An inactive SIM (the built-in Verizon SIM here) captures
+  broadcast control-plane only (SIB1/Paging) -- enough for the broadcast heuristics and to
+  validate the capture path via the Test Heuristic -- while connection-based heuristics and
+  user-plane capture need an active data session. Analyzer accuracy work proceeds offline with
+  `rayhunter-check` + golden QMDL vectors.
+- T-OR-019 (0x11EB privacy check) answered from the upstream source: it subscribes to
+  `LOG_DATA_PROTOCOL_LOGGING_C` ("User IP traffic"), so an active plan would log user IP packets
+  to QMDL; the empirical on-device test is deferred (no active plan), the mitigation (T-OR-029)
+  justified. Recorded in docs/DEVICE-PROFILE.md and docs/TESTING.md.
+
 - `scripts/orbic-ota-block.py`: reversibly disables the on-demand OTA/FOTA updater
   (`oma_dm`/`dmclient`/`mdm-daemon`) by renaming them to `.orx-disabled`. The first tool that
   writes to the device: a fixed target allowlist (no arbitrary paths), a verified-backup gate,
