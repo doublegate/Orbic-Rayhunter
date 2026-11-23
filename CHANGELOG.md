@@ -2,7 +2,12 @@
 
 ### Added
 
-- (nothing yet)
+- `orx doctor` v2 (T-OR-032, Sprint 4.1): `--json` machine-readable output, the running
+  Rayhunter version read from `/api/system-stats` when `:8080` answers, and documented exit
+  codes (0 found, 1 nothing found, 2 usage/host error). A minimal std-only HTTP/1.0 client and a
+  dependency-free JSON string-field reader were added to `probe` (orx-cli stays zero-dependency),
+  both unit-tested with a loopback fake server. `rayhunter` reachability now also counts toward a
+  success exit.
 
 ## [0.4.0] - 2026-11-23
 

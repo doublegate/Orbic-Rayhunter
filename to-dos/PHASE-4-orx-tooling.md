@@ -16,10 +16,13 @@ Design rules for every subcommand:
 
 ## Sprint 4.1: `orx doctor` v2 and transport (v0.5.0)
 
-- [ ] T-OR-032: classify `05c6:f622`; list interfaces with class/subclass/protocol per function
-- [ ] T-OR-032: report the firmware string from the stock UI where obtainable without login
-      (TBD (on-device) whether it is), Rayhunter `/api/system-stats` when :8080 answers
-- [ ] T-OR-032: `--json` output; documented exit codes
+- [x] T-OR-032: `orx doctor` reports each Qualcomm USB device with vid:pid, product, serial
+      and the inferred mode (f626 normal / f601 debug / 9008 EDL / else UnknownQualcomm);
+      interface-level class/subclass listing is deferred to when a non-f626 composition is on hand
+- [x] T-OR-032: Rayhunter version read from `/api/system-stats` when :8080 answers (verified
+      on-device: `Rayhunter 0.13.0`). Stock-UI firmware string without login is still TBD
+      (on-device) -- the page load triggers the FOTA client, so it is deferred
+- [x] T-OR-032: `--json` output; documented exit codes (0 found / 1 nothing / 2 usage|host)
 - [ ] T-OR-033: shell session over the network shell (start via upstream `util orbic-start-telnet`
       or equivalent, connect to port 24, command framing with an exit-code marker)
 - [ ] T-OR-033: checksummed file transfer (device listener, host stream, device `sha256sum` or
