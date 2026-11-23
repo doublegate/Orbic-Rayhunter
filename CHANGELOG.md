@@ -6,7 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device yet.
+## [0.1.0] - 2026-11-23
+
+Foundation plus Phase 1 on-device reconnaissance and a verified pre-write backup. The repository,
+CI, docs and the research corpus are in place; the host `orx` tool and the read-only device tools
+(`orbic-shell.py`, `orbic-ui-read.py`, `orbic-backup.py`) are shipped and self-tested; the
+RC400L's layout is measured and every writable filesystem is backed up and verified. Nothing in
+this release installs or modifies anything on the device. Upstream pin: EFForg/rayhunter
+`v0.13.0` (`cd462a1`).
 
 ### Added
 
