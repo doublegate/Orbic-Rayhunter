@@ -50,33 +50,19 @@ READ_ENDPOINTS = {
 # Named explicitly so that a future edit cannot add it by accident.
 REFUSED = {"FotaGetVersionInfo": "asks the device to check for an OTA update"}
 
-# Long, unambiguous tokens matched as a substring anywhere in the key.
+# Credential-class tokens matched as a SUBSTRING anywhere in the key -- a key with
+# no camelCase/underscore boundary (`wifikey`, `WPAKEY`, `wlanssid`, `simpin`) must
+# still be caught, and over-redaction (e.g. "monkey") beats leaking a secret.
 SENSITIVE = re.compile(
     r"imei|iccid|mdn|meid|imsi|msisdn|bssid|serial|esn|passw|pwd|secret|token|"
-    r"apn|gateway",
+    r"apn|gateway|key|ssid|psk|phone|mac|addr|pin|puk",
     re.IGNORECASE,
 )
-# Short, ambiguous tokens (`ip` is in "script"/"description", `sn` in "dns") are
-# matched only as whole WORDS after splitting the key on camelCase, snake_case and
-# digit boundaries -- so `wanIp`/`sim_pin`/`mac_addr` match but `description` does
-# not.
-_SENSITIVE_WORDS = {
-    "sn",
-    "mac",
-    "key",
-    "ssid",
-    "phone",
-    "pin",
-    "puk",
-    "ip",
-    "ipv4",
-    "ipv6",
-    "addr",
-    "address",
-    "dns",
-    "meid",
-    "esn",
-}
+# Only the genuinely ambiguous SHORT tokens use whole-WORD matching (`ip` is in
+# "description"/"script", `sn` in many words), after splitting the key on
+# camelCase, snake_case and digit boundaries -- so `wanIp`/`dns_server` match but
+# `description` does not.
+_SENSITIVE_WORDS = {"ip", "ipv4", "ipv6", "sn", "dns"}
 _KEY_SPLIT = re.compile(
     r"[_\-\s]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])"
 )
@@ -183,6 +169,10 @@ def selftest() -> int:
             "phone": "+1-555-123-4567",  # formatted phone
             "simPin": "1234",  # short value, camelCase sensitive key
             "lanIpv6": "2001:db8::1",  # compressed IPv6
+            "wifikey": "hunter2",  # no boundary -> substring match
+            "WPAKEY": "hunter2",
+            "wlanssid": "MyNet",
+            "simpin": "4321",
             "hwVer": "V1.1",  # kept
             "upTime": "12:34:56",  # kept (not an identifier)
             "description": "a script to zip",  # kept (no sensitive word boundary)
@@ -204,6 +194,10 @@ def selftest() -> int:
         red["phone"].startswith("<redacted"),
         red["simPin"].startswith("<redacted"),
         red["lanIpv6"].startswith("<redacted"),
+        red["wifikey"].startswith("<redacted"),
+        red["WPAKEY"].startswith("<redacted"),
+        red["wlanssid"].startswith("<redacted"),
+        red["simpin"].startswith("<redacted"),
         red["hwVer"] == "V1.1",
         red["upTime"] == "12:34:56",
         red["description"] == "a script to zip",
