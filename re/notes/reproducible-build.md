@@ -40,7 +40,11 @@ candidate), not a behavior concern.
 
 - `scripts/build.sh firmware` now builds in the `messense/rust-musl-cross` container (no host
   cross toolchain needed), making the production build reproducible on any machine with docker
-  or podman.
+  or podman. The image is **pinned by digest**
+  (`messense/rust-musl-cross:armv7-musleabihf@sha256:dd494898259cf6981f9832bfd4437ddfc8393605164b3c242e4efe8a6bc30dfb`,
+  override with `ORX_MUSL_CROSS_IMAGE`) so the build environment itself cannot be silently
+  re-tagged -- a prerequisite for the reproducibility claim to mean anything. Update the digest
+  deliberately and re-measure.
 - `release.yml` now ships the production `firmware` daemon (~6.1 MB, pq-tls, stripped) instead
   of the `firmware-devel` build (~16 MB, rustcrypto, unstripped) that v0.1.0-v0.3.0 shipped.
   This is the binary intended for the device and for the eventual v1.0.0 our-build install.

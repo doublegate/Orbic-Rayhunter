@@ -44,10 +44,14 @@ case "$profile" in
             echo "error: firmware profile needs docker or podman (see docs/BUILD.md)" >&2
             exit 3
         fi
+        # Pin the build image by digest so the production build is reproducible and
+        # not silently re-tagged upstream (override with ORX_MUSL_CROSS_IMAGE). Update
+        # the digest deliberately and record it; see re/notes/reproducible-build.md.
+        image="${ORX_MUSL_CROSS_IMAGE:-messense/rust-musl-cross:armv7-musleabihf@sha256:dd494898259cf6981f9832bfd4437ddfc8393605164b3c242e4efe8a6bc30dfb}"
         tgt="$(mktemp -d "${TMPDIR:-/tmp}/orx-firmware.XXXXXX")"
         "$engine" run --rm \
             -v "$tree":/work -v "$tgt":/target -e CARGO_TARGET_DIR=/target -w /work \
-            messense/rust-musl-cross:armv7-musleabihf \
+            "$image" \
             bash -lc 'rustup target add armv7-unknown-linux-musleabihf >/dev/null 2>&1; cargo build-daemon-firmware && cargo build-rootshell-firmware'
         out="$tgt/$target/firmware"
         cp "$out/rayhunter-daemon" "$out/rootshell" "$root/dist/"
