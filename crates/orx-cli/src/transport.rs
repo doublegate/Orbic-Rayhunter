@@ -33,11 +33,81 @@ pub fn safe_remote(path: &str) -> bool {
         && !path.contains("..")
 }
 
+/// Splits a streamed command response into the payload (everything before the
+/// end marker) and the trailing `" <status>."`. Payload bytes are written to a
+/// sink as they are confirmed, so an arbitrarily large `tar` never buffers in
+/// memory. Correct across any chunk boundary: it withholds only the last
+/// `marker.len()-1` bytes (the only ones that could begin a split marker) until
+/// more arrives.
+struct MarkerSplitter {
+    marker: Vec<u8>,
+    pending: Vec<u8>,
+    tail: Vec<u8>,
+    found: bool,
+}
+
+impl MarkerSplitter {
+    fn new(marker: &str) -> Self {
+        Self {
+            marker: marker.as_bytes().to_vec(),
+            pending: Vec::new(),
+            tail: Vec::new(),
+            found: false,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8], sink: &mut dyn Write) -> Result<(), String> {
+        if self.found {
+            self.tail.extend_from_slice(chunk);
+            return Ok(());
+        }
+        self.pending.extend_from_slice(chunk);
+        if let Some(i) = find_sub(&self.pending, &self.marker) {
+            sink.write_all(&self.pending[..i])
+                .map_err(|e| format!("sink: {e}"))?;
+            self.tail = self.pending[i + self.marker.len()..].to_vec();
+            self.pending.clear();
+            self.found = true;
+        } else {
+            let keep = self.marker.len().saturating_sub(1);
+            if self.pending.len() > keep {
+                let flush = self.pending.len() - keep;
+                sink.write_all(&self.pending[..flush])
+                    .map_err(|e| format!("sink: {e}"))?;
+                self.pending.drain(..flush);
+            }
+        }
+        Ok(())
+    }
+
+    fn found(&self) -> bool {
+        self.found
+    }
+
+    /// The exit status parsed from the `" <status>."` tail, once the marker was seen.
+    fn status(&self) -> Option<i32> {
+        if !self.found {
+            return None;
+        }
+        String::from_utf8_lossy(&self.tail)
+            .trim_start()
+            .split('.')
+            .next()
+            .and_then(|d| d.trim().parse::<i32>().ok())
+    }
+}
+
 /// Device shell transport. `run` and `put` are the primitives; `send_file` is a
 /// verified transfer built on them and must not be overridden.
 pub trait Shell {
     /// Run one command; return its combined output and exit status.
     fn run(&mut self, command: &str) -> Result<CmdResult, String>;
+
+    /// Run one command, streaming its stdout+stderr to `sink` (never buffering
+    /// the whole output), and return the exit status. For large transfers such
+    /// as a `tar` of a filesystem, where `run`'s in-memory buffering would not
+    /// fit. The end marker and trailing status are stripped from `sink`.
+    fn run_to(&mut self, command: &str, sink: &mut dyn Write) -> Result<i32, String>;
 
     /// Transfer raw `bytes` to `remote` with NO verification.
     fn put(&mut self, remote: &str, bytes: &[u8]) -> Result<(), String>;
@@ -163,6 +233,41 @@ impl Shell for TcpShell {
         Ok(CmdResult { output, status })
     }
 
+    fn run_to(&mut self, command: &str, sink: &mut dyn Write) -> Result<i32, String> {
+        let deadline = Instant::now() + self.timeout;
+        let mut stream = self.connect()?;
+        let marker = make_marker();
+        let line = format!("{{ {command} ; }} 2>&1; printf '{marker} %s.' \"$?\"\n");
+        stream
+            .write_all(line.as_bytes())
+            .map_err(|e| format!("write: {e}"))?;
+        let mut splitter = MarkerSplitter::new(&marker);
+        let mut buf = [0u8; 8192];
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("read: deadline exceeded before marker".to_string());
+            }
+            stream.set_read_timeout(Some(remaining)).ok();
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    splitter.push(&buf[..n], sink)?;
+                    if splitter.found() {
+                        break;
+                    }
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Err("read: deadline exceeded before marker".to_string());
+                }
+                Err(e) => return Err(format!("read: {e}")),
+            }
+        }
+        splitter
+            .status()
+            .ok_or_else(|| "no end marker / unparseable status in device output".to_string())
+    }
+
     fn put(&mut self, remote: &str, bytes: &[u8]) -> Result<(), String> {
         if !safe_remote(remote) {
             return Err(format!("unsafe remote path: {remote:?}"));
@@ -243,6 +348,13 @@ pub mod fake {
                 output: String::new(),
                 status: 0,
             }))
+        }
+
+        fn run_to(&mut self, command: &str, sink: &mut dyn Write) -> Result<i32, String> {
+            let r = self.run(command)?;
+            sink.write_all(r.output.as_bytes())
+                .map_err(|e| format!("sink: {e}"))?;
+            Ok(r.status)
         }
 
         fn put(&mut self, remote: &str, bytes: &[u8]) -> Result<(), String> {
@@ -348,6 +460,67 @@ mod tests {
         let r = sh.run("whatever").unwrap();
         assert_eq!(r.output, "line1\nline2");
         assert_eq!(r.status, 3);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn marker_splitter_separates_payload_and_status_across_chunks() {
+        let marker = "__orx_abc_def__";
+        let payload: Vec<u8> = (0..5000u32).map(|i| (i % 253) as u8).collect();
+        let mut full = payload.clone();
+        full.extend_from_slice(format!("{marker} 7.").as_bytes());
+        // The marker must never leak into the sink, at any chunk size -- including
+        // ones that split the marker itself.
+        for chunk in [1usize, 2, 7, 8, 15, 16, 4096, full.len()] {
+            let mut sp = MarkerSplitter::new(marker);
+            let mut sink = Vec::new();
+            for part in full.chunks(chunk) {
+                sp.push(part, &mut sink).unwrap();
+            }
+            assert!(sp.found(), "chunk {chunk}: marker not found");
+            assert_eq!(sink, payload, "chunk {chunk}: payload mismatch");
+            assert!(
+                !find_sub(&sink, marker.as_bytes()).is_some(),
+                "chunk {chunk}: marker leaked"
+            );
+            assert_eq!(sp.status(), Some(7), "chunk {chunk}: status");
+        }
+    }
+
+    #[test]
+    fn tcpshell_run_to_streams_payload_and_status() {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                if n == 0 || req.contains(&b'\n') {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if req.contains(&b'\n') {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let marker = line
+                .split("printf '")
+                .nth(1)
+                .and_then(|r| r.split(' ').next())
+                .unwrap()
+                .to_string();
+            s.write_all(format!("PAYLOAD-BYTES{marker} 0.").as_bytes())
+                .unwrap();
+        });
+        let mut sh = TcpShell::new(addr, Duration::from_secs(2));
+        let mut sink = Vec::new();
+        let status = sh.run_to("tar -cf - .", &mut sink).unwrap();
+        assert_eq!(status, 0);
+        assert_eq!(sink, b"PAYLOAD-BYTES");
         server.join().unwrap();
     }
 

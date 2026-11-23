@@ -2,7 +2,11 @@
 
 ### Added
 
-- (nothing yet)
+- `transport`: a streaming `Shell::run_to(command, sink)` that writes a command's output to a
+  writer as it arrives (never buffering), for a `tar`-of-filesystem that would not fit in memory.
+  Its core is a unit-tested `MarkerSplitter` that separates the payload from the trailing
+  exit-status marker correctly across any chunk boundary (including a marker split mid-sequence),
+  so the end marker can never corrupt a streamed backup. Foundation for `orx backup`/`pull-logs`.
 
 ## [0.5.0] - 2026-11-23
 
