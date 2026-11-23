@@ -128,21 +128,26 @@ WRITER_SUBFORMS = re.compile(
     r"mknod|chmod|chown|chgrp|mkfs\w*|dd|tee|reboot|halt|poweroff|kill\w*|"
     r"setprop|passwd|truncate|install|insmod|rmmod|fw_setenv)\b"
 )
+# Command substitution and escapes: `$(...)`, backticks, and a backslash. The
+# allowlist checks only each command's PROGRAM word, so an allowed reader with a
+# substituted argument -- `cat $(reboot)`, `ls \`nandwrite ...\`` -- would run
+# arbitrary code. Those (and backslash escapes that can confuse parsing) are
+# refused outright; recon never needs them.
+_INJECTION = re.compile(r"\$\(|`|\\")
 # A redirect operator (optionally fd-prefixed `1>`/`2>>`, or bash `&>`) and its
-# target. Quoted spans are stripped before this runs so a `>` inside a string is
-# never seen as a redirect.
-_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
-_REDIRECT = re.compile(r"(?:\d*|&)>>?\s*(\S+)")
+# target, scanned on the RAW command and failing closed: a `>` inside quotes is
+# treated as a redirect and refused rather than reasoning about quoting (a
+# quote-stripping regex can mismatch). Recon uses no quoted `>`.
+_REDIRECT = re.compile(r"(?:\d*|&)>>?\s*(\S*)")
 
 
 def _has_file_redirect(command: str) -> bool:
-    """True if the command redirects to anything other than /dev/null or an fd
-    dup (`2>&1`). Catches fd-prefixed writes like `echo x 1>/etc/passwd` and
-    `&>/dev/mtd0` that a lookbehind-based check would miss."""
-    bare = _QUOTED.sub("''", command)
-    for m in _REDIRECT.finditer(bare):
+    """True if the command redirects anywhere other than /dev/null or an fd dup
+    (`2>&1`). Catches fd-prefixed writes (`echo x 1>/etc/passwd`), bash `&>`, and
+    a dangling `>` with no target."""
+    for m in _REDIRECT.finditer(command):
         target = m.group(1)
-        if target.startswith("&") or target == "/dev/null":
+        if re.fullmatch(r"&\d+", target) or target == "/dev/null":
             continue  # fd dup (2>&1) or the bit bucket
         return True
     return False
@@ -181,6 +186,8 @@ def is_read_only(command: str) -> bool:
     """True only when every simple command is a known reader in a read form.
     Fails closed: an unknown program, an unparseable fragment, a writer subform,
     or a redirection to a file all return False."""
+    if _INJECTION.search(command):
+        return False
     if _has_file_redirect(command) or WRITER_SUBFORMS.search(command):
         return False
     words = _first_words(command)
@@ -265,11 +272,16 @@ def selftest() -> int:
         "cat /etc/version 2>/etc/init.d/misc-daemon",
         "cat /proc/mtd &>/dev/mtd0",
         "ls / >>/data/x",
+        "cat >",  # dangling redirect, no target
+        # command substitution / escapes: an allowed reader runs arbitrary code
+        "cat $(reboot)",
+        "ls `nandwrite /dev/mtd0 x`",
+        "cat /etc/\\passwd",
+        "grep -c '2>/etc/passwd' /proc/mtd",  # quoted `>` now fails closed (acceptable)
     ]
     also_reads = [
         "cat /dev/mtd0 2>/dev/null",  # stderr to the bit bucket is fine
         "ps w 2>&1 | grep x",  # fd dup is fine
-        "grep -c '2>/etc/passwd' /proc/mtd",  # the redirect is inside quotes
     ]
     reads += also_reads
     for c in reads:
