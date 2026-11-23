@@ -302,23 +302,67 @@ impl Shell for TcpShell {
         let data_addr = SocketAddr::new(self.addr.ip(), data_port);
         let marker = make_marker();
         let mut ctl = self.connect()?;
-        // Start the listener; report its exit status after the transfer, in the
-        // same framing run() uses.
+        // `remote` is always our own `<path>.orx-new` temp, so truncating it here
+        // is harmless. Cross-file safety (never streaming THIS file's bytes into a
+        // stale listener bound to a DIFFERENT path) comes from the pre-connect peek
+        // below, not from the redirect. The listener prints its exit status after
+        // the transfer, in the same framing run() uses.
         ctl.write_all(
             format!("nc -l -p {data_port} > {remote}; printf '{marker} %s.' \"$?\"\n").as_bytes(),
         )
         .map_err(|e| format!("start device listener: {e}"))?;
-        // The listener needs a moment to bind; retry the data connect briefly.
-        let connect_deadline = Instant::now() + Duration::from_secs(5);
-        let mut data = loop {
-            match TcpStream::connect_timeout(&data_addr, Duration::from_secs(1)) {
-                Ok(s) => break s,
-                Err(e) => {
-                    if Instant::now() >= connect_deadline {
-                        return Err(format!("connect to device data port {data_port}: {e}"));
+
+        // Peek the control channel BEFORE connecting: a healthy `nc -l` blocks in
+        // accept() and writes nothing, so the channel stays silent. If instead the
+        // marker arrives now, the listener exited immediately (e.g. a stale
+        // listener already holds the port) -- abort WITHOUT connecting, so we
+        // never stream this file's bytes into a stale listener bound to another
+        // path (fail closed; Shell::put is a public write primitive).
+        ctl.set_read_timeout(Some(Duration::from_millis(600))).ok();
+        let mut probe = Vec::new();
+        let mut pbuf = [0u8; 256];
+        let probe_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match ctl.read(&mut pbuf) {
+                Ok(0) => return Err("device control channel closed before transfer".to_string()),
+                Ok(n) => {
+                    probe.extend_from_slice(&pbuf[..n]);
+                    if find_sub(&probe, marker.as_bytes()).is_some() {
+                        return Err(format!(
+                            "device listener did not bind port {data_port} (a stale listener may hold it); aborted before sending"
+                        ));
                     }
+                    if Instant::now() >= probe_deadline {
+                        break; // produced output but no marker; treat as up
+                    }
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
+                Err(e) => return Err(format!("device control channel: {e}")),
+            }
+        }
+
+        // Connect the data channel; retry briefly while the listener binds.
+        let connect_deadline = Instant::now() + Duration::from_secs(5);
+        let data = loop {
+            match TcpStream::connect_timeout(&data_addr, Duration::from_secs(1)) {
+                Ok(s) => break Some(s),
+                Err(_) if Instant::now() < connect_deadline => {
                     std::thread::sleep(Duration::from_millis(150));
                 }
+                Err(_) => break None,
+            }
+        };
+        let mut data = match data {
+            Some(s) => s,
+            None => {
+                // We never connected but the listener is up and orphaned, ready to
+                // overwrite `remote` with whatever connects next. Release it with a
+                // zero-byte connect (nc writes an empty file and exits); the empty
+                // file fails send_file's hash check and is cleaned up by execute.
+                if let Ok(s) = TcpStream::connect_timeout(&data_addr, Duration::from_secs(1)) {
+                    let _ = s.shutdown(Shutdown::Both);
+                }
+                return Err(format!("could not connect to device data port {data_port}"));
             }
         };
         data.set_write_timeout(Some(self.timeout)).ok();
@@ -327,23 +371,42 @@ impl Shell for TcpShell {
         data.shutdown(Shutdown::Write)
             .map_err(|e| format!("data shutdown: {e}"))?;
         drop(data); // EOF -> device nc writes the file and exits
-        // Wait for the control shell to report the listener finished.
+
+        // Read the listener's completion: wait for the full `{marker} <status>.`
+        // (the trailing '.' guarantees the status is complete even if TCP split it).
         let deadline = Instant::now() + self.timeout;
-        let raw = Self::read_until(&mut ctl, &marker, deadline)?;
-        let text = String::from_utf8_lossy(&raw);
-        let at = text
-            .find(&marker)
-            .ok_or_else(|| "device listener did not report completion".to_string())?;
-        let status = text[at + marker.len()..]
-            .trim_start()
-            .split('.')
-            .next()
-            .and_then(|d| d.trim().parse::<i32>().ok())
-            .ok_or_else(|| "could not parse device listener status".to_string())?;
-        if status != 0 {
-            return Err(format!("device listener exited with status {status}"));
+        let end = format!("{marker} ");
+        let mut raw = probe; // include anything already read during the peek
+        let mut rbuf = [0u8; 256];
+        loop {
+            if let Some(at) = find_sub(&raw, end.as_bytes()) {
+                let tail = &raw[at + end.len()..];
+                if let Some(dot) = tail.iter().position(|&b| b == b'.') {
+                    let status: i32 = std::str::from_utf8(&tail[..dot])
+                        .ok()
+                        .and_then(|d| d.trim().parse().ok())
+                        .ok_or_else(|| "could not parse device listener status".to_string())?;
+                    return if status == 0 {
+                        Ok(())
+                    } else {
+                        Err(format!("device listener exited with status {status}"))
+                    };
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("device listener did not report completion".to_string());
+            }
+            ctl.set_read_timeout(Some(remaining)).ok();
+            match ctl.read(&mut rbuf) {
+                Ok(0) => return Err("device control channel closed before status".to_string()),
+                Ok(n) => raw.extend_from_slice(&rbuf[..n]),
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Err("device listener did not report completion".to_string());
+                }
+                Err(e) => return Err(format!("device control channel: {e}")),
+            }
         }
-        Ok(())
     }
 }
 
