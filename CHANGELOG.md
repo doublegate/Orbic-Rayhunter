@@ -55,8 +55,10 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 - Antigravity reviewer re-synced from template `1451f73`: agy runs in a bubblewrap jail
   (`AGY_ISOLATION=bwrap`) with an empty private `HOME` (no MCP servers, skills, hooks or
   repositories), read-only `/usr` and `/etc`, and a D-Bus proxy exposing only its own keyring
-  item; its output is scanned for anchored credential shapes before posting (fail closed).
-  agy's own `--sandbox` was verified not to confine reads.
+  item. Its network is a TLS-intercepting egress proxy that allows only exact Google hosts and
+  rebuilds every request. Credential-shaped output is redacted before posting, and anything
+  redaction cannot remove stops the post. agy's own `--sandbox` was verified not to confine
+  reads.
 - `.gitignore` excludes device backups, firmware images, captures (`*.qmdl`, `*.qmdl.gz`,
   `*.ndjson`, `*.pcap`), Ghidra projects, extracted firmware, `wpa_sta.conf`, `.env` files and
   downloaded papers whose licenses do not permit redistribution.
