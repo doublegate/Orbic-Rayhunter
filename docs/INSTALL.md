@@ -63,8 +63,9 @@ Stop if the mode is not `normal`, if the stock UI is unreachable, or if the firm
 
 Preflight checks that `orx install` enforces (T-OR-021, T-OR-036):
 
-- [ ] Verified backup manifest present (`orx backup verify`, T-OR-035; manual:
-      `sha256sum -c MANIFEST.sha256` in the backup directory).
+- [ ] Verified backup present: `orx verify --dir <backup-dir>` (T-OR-035) re-hashes every
+      archive against `MANIFEST.txt` and requires rootfs `/` to be `ok`/`ok-live` with a matching
+      SHA-256 (manual: `sha256sum -c` against the manifest hashes in the backup directory).
 - [ ] Stock `/etc/init.d/misc-daemon` backed up byte for byte, and diffed against
       `upstream/dist/scripts/misc-daemon`. Upstream's replacement is a fixed copy of a stock script;
       any step present only in our stock file would be lost
@@ -79,9 +80,16 @@ Preflight checks that `orx install` enforces (T-OR-021, T-OR-036):
 ## 2. Backup gate
 
 ```sh
-orx backup                # T-OR-034 (v0.6.0)
-orx backup verify         # T-OR-035; every write command refuses to run without this
+orx backup --out <dir>    # T-OR-034 (v0.6.0): archive every writable filesystem
+orx verify --dir <dir>    # T-OR-035 (v0.7.0): re-hash the archives; the backup gate
 ```
+
+Every write command (`orx install`/`uninstall`, when added) refuses to run unless
+`verify::gate()` passes for the backup directory: a single rootfs `/` entry, state `ok`/`ok-live`,
+and a `root.tar` whose size and SHA-256 match the manifest. `orx verify --dir` reports that gate
+plus a per-filesystem result (`ok` / `MISSING` / `too small` / `size mismatch` / `SHA-256
+mismatch` / `no size=/sha256= in manifest`), and exits non-zero if any entry fails or the gate is
+not satisfied.
 
 Manual procedure until v0.6.0: [BACKUP-AND-RECOVERY.md](BACKUP-AND-RECOVERY.md) steps 1-7. Do
 not continue until the verification gate in step 6 passes.
@@ -185,10 +193,14 @@ transfer the binary with a checksum check the same way the upstream installer do
 8081 > <file>.tmp` on the device, stream from the host, compare the device-side hash with
 `dist/SHA256SUMS`, then `mv`), install the config, and reboot.
 
-## 5. Verify
+## 5. Post-install health check
+
+This is the ON-DEVICE health check after an install -- distinct from `orx verify --dir`, which
+checks a backup's integrity (section 2). It is planned as `orx check` (T-OR-037) and not yet
+implemented; for now run the manual equivalents.
 
 ```sh
-orx verify                # T-OR-037 (v0.7.0)
+orx check                 # T-OR-037 (planned); manual equivalents below
 ```
 
 Checks (manual equivalents in parentheses):

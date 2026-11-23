@@ -29,14 +29,22 @@ pub struct ManifestEntry {
 pub fn parse_manifest(text: &str) -> Vec<ManifestEntry> {
     let mut out = Vec::new();
     for ln in text.lines() {
-        if ln.starts_with('#') || ln.trim().is_empty() {
+        let t = ln.trim_start();
+        if t.starts_with('#') || t.is_empty() {
             continue;
         }
         let f: Vec<&str> = ln.split_whitespace().collect();
+        // `<mountpoint> <fstype> [key=val ...] <state>`: at least mountpoint,
+        // fstype and state.
         if f.len() < 3 {
             continue;
         }
-        let toks: HashMap<&str, &str> = f.iter().filter_map(|t| t.split_once('=')).collect();
+        // Parse key=val only from the MIDDLE tokens, so a row with no trailing
+        // state does not let its `sha256=` double as the state word.
+        let toks: HashMap<&str, &str> = f[2..f.len() - 1]
+            .iter()
+            .filter_map(|t| t.split_once('='))
+            .collect();
         out.push(ManifestEntry {
             mountpoint: f[0].to_string(),
             fstype: f[1].to_string(),
@@ -48,13 +56,38 @@ pub fn parse_manifest(text: &str) -> Vec<ManifestEntry> {
     out
 }
 
+/// A SHA-256 hex digest is exactly 64 hex characters.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The archive filename for a mountpoint must be a single safe path component --
+/// no separators, no `.`/`..` -- even though the mountpoint came from an
+/// untrusted MANIFEST.txt. `archive_name` already maps `/` to `-`; this is the
+/// belt-and-braces check.
+fn safe_archive_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
 /// Outcome of verifying one archive against its manifest entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Ok,
     Missing,
+    /// The manifest row lacks a `size=` or `sha256=` token, so there is nothing
+    /// to verify against. A checksum is mandatory -- a metadata-less row must
+    /// never be accepted as a verified backup.
+    MissingMetadata,
     TooSmall(u64),
-    SizeMismatch { expected: u64, actual: u64 },
+    SizeMismatch {
+        expected: u64,
+        actual: u64,
+    },
     HashMismatch,
     ReadError(String),
 }
@@ -67,6 +100,7 @@ impl Verdict {
         match self {
             Verdict::Ok => "ok".to_string(),
             Verdict::Missing => "MISSING archive".to_string(),
+            Verdict::MissingMetadata => "no size=/sha256= in manifest".to_string(),
             Verdict::TooSmall(n) => format!("too small ({n} B, < 1024)"),
             Verdict::SizeMismatch { expected, actual } => {
                 format!("size {actual} != manifest {expected}")
@@ -86,6 +120,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
         match f.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => h.update(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.to_string()),
         }
     }
@@ -94,25 +129,40 @@ fn hash_file(path: &Path) -> Result<String, String> {
 
 /// Verify one manifest entry's archive on disk in `dir`.
 pub fn verify_entry(dir: &Path, entry: &ManifestEntry) -> Verdict {
-    let path = dir.join(format!("{}.tar", archive_name(&entry.mountpoint)));
+    // A checksum is mandatory: without a valid size AND a valid 64-hex sha256
+    // there is nothing to verify, and an unverified archive is not a backup.
+    let (Some(expected), Some(want)) = (entry.size, entry.sha256.as_ref()) else {
+        return Verdict::MissingMetadata;
+    };
+    if !is_sha256_hex(want) {
+        return Verdict::MissingMetadata;
+    }
+    let name = archive_name(&entry.mountpoint);
+    if !safe_archive_name(&name) {
+        return Verdict::ReadError(format!(
+            "unsafe archive name from mountpoint {:?}",
+            entry.mountpoint
+        ));
+    }
+    let path = dir.join(format!("{name}.tar"));
     let meta = match std::fs::metadata(&path) {
         Ok(m) if m.is_file() => m,
-        _ => return Verdict::Missing,
+        Ok(_) => return Verdict::Missing, // exists but not a regular file
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Verdict::Missing,
+        Err(e) => return Verdict::ReadError(e.to_string()),
     };
     let actual = meta.len();
     if actual < 1024 {
         return Verdict::TooSmall(actual);
     }
-    match entry.size {
-        Some(expected) if expected != actual => return Verdict::SizeMismatch { expected, actual },
-        _ => {}
+    if expected != actual {
+        return Verdict::SizeMismatch { expected, actual };
     }
-    if let Some(want) = &entry.sha256 {
-        match hash_file(&path) {
-            Ok(got) if &got == want => {}
-            Ok(_) => return Verdict::HashMismatch,
-            Err(e) => return Verdict::ReadError(e),
-        }
+    match hash_file(&path) {
+        // Case-insensitive: a manifest might record uppercase hex.
+        Ok(got) if got.eq_ignore_ascii_case(want) => {}
+        Ok(_) => return Verdict::HashMismatch,
+        Err(e) => return Verdict::ReadError(e),
     }
     Verdict::Ok
 }
@@ -125,11 +175,20 @@ pub fn gate(dir: &Path) -> Result<(), String> {
     let manifest = dir.join("MANIFEST.txt");
     let text = std::fs::read_to_string(&manifest)
         .map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
-    let entries = parse_manifest(&text);
-    let root = entries
-        .iter()
-        .find(|e| e.mountpoint == "/")
-        .ok_or_else(|| format!("{} has no rootfs '/' entry", manifest.display()))?;
+    gate_from_entries(dir, &parse_manifest(&text))
+}
+
+/// Gate decision over already-parsed entries (so a caller that has verified the
+/// entries need not re-hash). Requires EXACTLY ONE rootfs `/` entry whose state
+/// is `ok`/`ok-live` and whose archive verifies; duplicate `/` rows are rejected
+/// as an ambiguous manifest.
+pub fn gate_from_entries(dir: &Path, entries: &[ManifestEntry]) -> Result<(), String> {
+    let roots: Vec<&ManifestEntry> = entries.iter().filter(|e| e.mountpoint == "/").collect();
+    let root = match roots.as_slice() {
+        [] => return Err("manifest has no rootfs '/' entry".to_string()),
+        [one] => *one,
+        _ => return Err("manifest has multiple rootfs '/' entries (ambiguous)".to_string()),
+    };
     if root.state != "ok" && root.state != "ok-live" {
         return Err(format!(
             "rootfs '/' state is {:?}, not ok/ok-live",
@@ -148,6 +207,7 @@ pub fn gate(dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const MANIFEST: &str = "\
 # orx backup 192.168.1.1
@@ -165,67 +225,123 @@ mod tests {
     }
 
     #[test]
-    fn parse_reads_both_layouts() {
+    fn parse_reads_both_layouts_and_middle_tokens_only() {
         let e = parse_manifest(&MANIFEST.replace("SHA", "deadbeef"));
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].mountpoint, "/");
         assert_eq!(e[0].size, Some(4096));
         assert_eq!(e[0].sha256.as_deref(), Some("deadbeef"));
-        assert_eq!(e[1].state, "ok-live"); // entries= token did not confuse the state
+        assert_eq!(e[1].state, "ok-live"); // entries= did not confuse the state
+        // A row with no trailing state must NOT let sha256= double as the state.
+        let e2 = parse_manifest("/ ubifs size=4096 sha256=abc");
+        assert_eq!(e2[0].state, "sha256=abc");
+        assert_eq!(e2[0].sha256, None); // sha256= was the state slot, not a middle token
     }
 
     #[test]
     fn verify_entry_matches_and_catches_corruption() {
-        let d = tempdir();
-        let text = setup(&d, &[7u8; 4096]);
+        let d = TempDir::new();
+        let text = setup(d.path(), &[7u8; 4096]);
         let entries = parse_manifest(&text);
-        assert!(verify_entry(&d, &entries[0]).is_ok());
-        // Corrupt data.tar: hash mismatch.
-        std::fs::write(d.join("data.tar"), [9u8; 4096]).unwrap();
-        assert_eq!(verify_entry(&d, &entries[1]), Verdict::HashMismatch);
-        // Remove root.tar: missing.
-        std::fs::remove_file(d.join("root.tar")).unwrap();
-        assert_eq!(verify_entry(&d, &entries[0]), Verdict::Missing);
-        cleanup(&d);
+        assert!(verify_entry(d.path(), &entries[0]).is_ok());
+        std::fs::write(d.path().join("data.tar"), [9u8; 4096]).unwrap();
+        assert_eq!(verify_entry(d.path(), &entries[1]), Verdict::HashMismatch);
+        std::fs::remove_file(d.path().join("root.tar")).unwrap();
+        assert_eq!(verify_entry(d.path(), &entries[0]), Verdict::Missing);
+    }
+
+    #[test]
+    fn verify_entry_requires_valid_metadata() {
+        let d = TempDir::new();
+        std::fs::write(d.path().join("root.tar"), [7u8; 4096]).unwrap();
+        let no_sha = parse_manifest("/ ubifs size=4096 ok");
+        assert_eq!(verify_entry(d.path(), &no_sha[0]), Verdict::MissingMetadata);
+        let bad_hex = parse_manifest("/ ubifs size=4096 sha256=notvalidhex ok");
+        assert_eq!(
+            verify_entry(d.path(), &bad_hex[0]),
+            Verdict::MissingMetadata
+        );
+        let bad_size = parse_manifest("/ ubifs size=corrupt sha256=deadbeef ok");
+        assert_eq!(
+            verify_entry(d.path(), &bad_size[0]),
+            Verdict::MissingMetadata
+        );
+    }
+
+    #[test]
+    fn verify_entry_size_mismatch() {
+        let d = TempDir::new();
+        std::fs::write(d.path().join("root.tar"), [7u8; 4096]).unwrap();
+        let sha = crate::sha256::hex(&[7u8; 4096]);
+        let e = parse_manifest(&format!("/ ubifs size=9999 sha256={sha} ok"));
+        assert_eq!(
+            verify_entry(d.path(), &e[0]),
+            Verdict::SizeMismatch {
+                expected: 9999,
+                actual: 4096
+            }
+        );
     }
 
     #[test]
     fn gate_requires_verified_rootfs() {
-        let d = tempdir();
-        setup(&d, &[7u8; 4096]);
-        assert!(gate(&d).is_ok());
-        // Truncate root.tar below the floor -> gate fails.
-        std::fs::write(d.join("root.tar"), [7u8; 10]).unwrap();
-        assert!(gate(&d).is_err());
-        cleanup(&d);
+        let d = TempDir::new();
+        setup(d.path(), &[7u8; 4096]);
+        assert!(gate(d.path()).is_ok());
+        std::fs::write(d.path().join("root.tar"), [7u8; 10]).unwrap();
+        assert!(gate(d.path()).is_err()); // below the 1 KiB floor
     }
 
     #[test]
-    fn gate_rejects_missing_and_bad_state() {
-        let d = tempdir();
-        std::fs::write(
-            d.join("MANIFEST.txt"),
-            "/ ubifs size=4096 sha256=x failed\n",
-        )
-        .unwrap();
-        assert!(gate(&d).is_err()); // bad state
-        cleanup(&d);
+    fn gate_rejects_missing_file_bad_state_and_duplicates() {
+        let d = TempDir::new();
+        // Missing MANIFEST.txt entirely.
+        assert!(gate(d.path()).is_err());
+        // No rootfs entry.
+        assert!(
+            gate_from_entries(
+                d.path(),
+                &parse_manifest("/data ubifs size=4096 sha256=x ok")
+            )
+            .is_err()
+        );
+        // Bad state.
+        let sha = crate::sha256::hex(&[7u8; 4096]);
+        std::fs::write(d.path().join("root.tar"), [7u8; 4096]).unwrap();
+        let failed = parse_manifest(&format!("/ ubifs size=4096 sha256={sha} failed"));
+        assert!(gate_from_entries(d.path(), &failed).is_err());
+        // Duplicate rootfs rows -> ambiguous -> reject.
+        let dup = parse_manifest(&format!(
+            "/ ubifs size=4096 sha256={sha} ok\n/ rootfs size=4096 sha256={sha} ok"
+        ));
+        assert!(
+            gate_from_entries(d.path(), &dup)
+                .unwrap_err()
+                .contains("multiple")
+        );
     }
 
-    // Minimal std-only temp dir (avoids a dev-dependency).
-    fn tempdir() -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "orx-verify-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    /// std-only temp dir with a collision-resistant name and Drop cleanup, so a
+    /// panicking assertion does not leak the directory.
+    struct TempDir(std::path::PathBuf);
+    static N: AtomicUsize = AtomicUsize::new(0);
+    impl TempDir {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "orx-verify-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
     }
-    fn cleanup(p: &Path) {
-        let _ = std::fs::remove_dir_all(p);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }

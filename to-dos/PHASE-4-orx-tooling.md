@@ -58,6 +58,9 @@ cargo run -p orx-cli -- doctor --json
       (ok/missing/too-small/size-mismatch/hash-mismatch); both manifest layouts parse
 - [x] T-OR-035: `verify::gate()` requires rootfs `/` ok/ok-live AND its archive to verify;
       `orbic-ota-block.py` `_backup_gate` hardened to match. `orx install`/`uninstall` will call it
+- [ ] T-OR-035 follow-up: `orx verify` does not yet check the off-repo-copy marker (the encrypted
+      copy on separate media, BACKUP-AND-RECOVERY.md step 5). Tracked for a later sprint; the gate
+      covers the on-disk archives, not the off-repo copy
 
 Acceptance criteria: `orx backup` on the real unit archives every writable filesystem with a
 verified inline hash and a gate-compatible manifest. MET (validated end-to-end 2026-11-23).

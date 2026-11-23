@@ -151,6 +151,15 @@ A bit-exact restore of a raw NAND partition is explicitly out of scope here (it 
 unproven EDL path, T-OR-098); the file-level archive is what this project's writes can be rolled
 back from.
 
+**`orx verify --dir <dir>`** (T-OR-035, v0.7.0) automates this gate: it re-parses `MANIFEST.txt`,
+re-hashes each `<label>.tar`, and reports `ok` / `MISSING` / `too small` (< 1 KiB) / `size
+mismatch` / `SHA-256 mismatch` / `no size=/sha256= in manifest` per filesystem, failing if any
+entry's archive does not verify or its recorded state is not `ok`/`ok-live`. The shared
+`verify::gate()` -- the contract every write command must pass before touching the device --
+requires **exactly one** rootfs `/` entry, state `ok`/`ok-live`, and a `root.tar` whose size and
+64-hex SHA-256 match the manifest; a missing checksum, a wrong size, a duplicate `/` row, or a
+bad state all fail closed. It is the Rust counterpart of `orbic-ota-block.py`'s `_backup_gate`.
+
 ### 5. Off-repo copy
 
 Encrypt before the data leaves this machine, then verify the round trip:

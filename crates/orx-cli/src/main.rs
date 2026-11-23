@@ -204,19 +204,50 @@ fn cmd_verify(dir: &Path) -> ExitCode {
         return ExitCode::from(2);
     }
     let mut bad = false;
+    // Track the rootfs entry so the gate is derived from the verdict computed
+    // here -- the ~87 MB root.tar is hashed once, not again inside gate().
+    let mut root_count = 0usize;
+    let mut root_state_ok = false;
+    let mut root_verdict_ok = false;
     for e in &entries {
         let v = verify::verify_entry(dir, e);
-        if !v.is_ok() {
+        let state_ok = e.state == "ok" || e.state == "ok-live";
+        // An entry passes only if its archive verifies AND its recorded state is
+        // ok/ok-live: a `failed`/`ABORT` entry is never a backup, even if a stale
+        // archive still hashes.
+        if !v.is_ok() || !state_ok {
             bad = true;
         }
-        println!("  {:14} {} [{}]", v.describe(), e.mountpoint, e.state);
+        if e.mountpoint == "/" {
+            root_count += 1;
+            root_state_ok = state_ok;
+            root_verdict_ok = v.is_ok();
+        }
+        let note = if state_ok {
+            ""
+        } else {
+            "  <-- state not ok/ok-live"
+        };
+        println!(
+            "  {:14} {} [{}]{}",
+            v.describe(),
+            e.mountpoint,
+            e.state,
+            note
+        );
     }
-    match verify::gate(dir) {
-        Ok(()) => println!("gate: rootfs backup verified -- device writes may proceed"),
-        Err(e) => {
-            println!("gate: NOT satisfied -- {e}");
-            bad = true;
-        }
+    let gate_ok = root_count == 1 && root_state_ok && root_verdict_ok;
+    if gate_ok {
+        println!("gate: rootfs backup verified -- device writes may proceed");
+    } else {
+        let why = match root_count {
+            0 => "no rootfs '/' entry".to_string(),
+            1 if !root_state_ok => "rootfs '/' state is not ok/ok-live".to_string(),
+            1 => "rootfs '/' archive did not verify".to_string(),
+            _ => "multiple rootfs '/' entries (ambiguous manifest)".to_string(),
+        };
+        println!("gate: NOT satisfied -- {why}");
+        bad = true;
     }
     if bad {
         ExitCode::from(1)
