@@ -10,10 +10,11 @@ Adds `orx install` and `orx uninstall` -- the device-write operations that compl
 
 ### Added
 
-- `orx install --dir <backup> [--dist <d>] [--daemon <f>] [--apply]` (T-OR-036): deploys the daemon
-  + rendered `config.toml` (device = orbic, robustly set in the root table) + `rayhunter_daemon`
-  init + the hooked `misc-daemon`, and reboots -- the upstream network-installer footprint with our
-  build. Dry-run unless `--apply`; always backup-gated. Every file is written ATOMICALLY (send to
+- `orx install --dir <backup> [--dist <d>] [--daemon <f>] [--apply]` (T-OR-036): deploys the
+  daemon, the rendered `config.toml` (device = orbic, robustly set in the root table), the
+  `rayhunter_daemon` init, and the hooked `misc-daemon`, then reboots -- the upstream
+  network-installer footprint with our build. Dry-run unless `--apply`; always backup-gated. Every
+  file is written ATOMICALLY (send to
   `<path>.orx-new`, which the device re-hashes, then `chmod` + `mv`), so a dropped connection or
   failed chmod can never leave a half-written/non-executable init script, and `mv`-over-a-running
   binary avoids `ETXTBSY`. The daemon and init scripts are validated first (non-empty; `#!` shebang;
