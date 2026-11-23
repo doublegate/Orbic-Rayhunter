@@ -2,6 +2,24 @@
 
 ### Added
 
+- (nothing yet)
+
+## [0.6.0] - 2026-11-23
+
+Adds `orx backup`, the first `orx` device operation and the write-gate every later command depends on. It ports the proven Python backup to native Rust on the Sprint 4.1 transport (streaming tar + inline SHA-256), and is validated end-to-end on the device. orx-cli stays zero-dependency; 33 unit tests.
+
+### Added
+
+- `orx backup` (T-OR-034, Sprint 4.2): archives every writable device filesystem over the root
+  shell with `tar`, streamed to a `0600` `<fs>.tar` on the host while hashing inline, and writes
+  a `MANIFEST.txt` in the exact format the write-gate reads. Each archive's state is `ok`, or
+  `ok-live` (only with `--allow-live`, for a writable fs whose tar exits non-zero); a sub-1 KiB
+  result is rejected so a failed tar cannot masquerade as a backup. The device-correct busybox
+  `tar` invocation (`-C <mp> <--exclude> -cf - . 2>/dev/null`, no `--ignore-failed-read`) and the
+  nested-mount excludes are unit-tested against the fake shell, and the command was validated
+  end-to-end on the unit: root.tar 86.7 MB, data/usrdata/cache all `ok`, the inline SHA-256
+  matching an independent `sha256sum`.
+
 - `transport`: a streaming `Shell::run_to(command, sink)` that writes a command's output to a
   writer as it arrives (never buffering), for a `tar`-of-filesystem that would not fit in memory.
   Its core is a unit-tested `MarkerSplitter` that separates the payload from the trailing

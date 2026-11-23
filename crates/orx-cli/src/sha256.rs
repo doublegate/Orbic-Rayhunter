@@ -144,6 +144,11 @@ pub fn hex(data: &[u8]) -> String {
     to_hex(&h.finish())
 }
 
+/// Lowercase hex digest of a streaming hasher (for data fed incrementally).
+pub fn hex_of(hasher: Sha256) -> String {
+    to_hex(&hasher.finish())
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

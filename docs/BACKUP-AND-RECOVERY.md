@@ -14,8 +14,10 @@ right backup for this project's writes, which only ever touch the mounted `ubifs
 Rayhunter install adds a daemon under `/data` and an init link on `/`). A bit-exact image of the
 static bootloader/modem regions would need EDL, which has no proven loader, and is deferred to
 the aggressive tier (T-OR-098). This file is the procedure behind tickets T-OR-015, T-OR-016,
-T-OR-017 and T-OR-018 ([ROADMAP.md](../ROADMAP.md)); `orx backup` (T-OR-034) automates it from
-v0.6.0, wrapping `scripts/orbic-backup.py`.
+T-OR-017 and T-OR-018 ([ROADMAP.md](../ROADMAP.md)). `orx backup --out <dir> [--allow-live]`
+(T-OR-034) automates it from v0.6.0: a native Rust port of `scripts/orbic-backup.py` on the
+`orx` device transport (streaming `tar` + inline SHA-256), producing the same gate-compatible
+`MANIFEST.txt`. Either tool works; the Python one remains the reference.
 
 ## Rules
 

@@ -1,21 +1,156 @@
+use std::fs;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{probe, usb};
+use orx_cli::{backup, probe, transport, usb};
+use transport::Shell;
 
 const USAGE: &str = "\
 orx - Orbic-Rayhunter host helper
 
 USAGE:
-    orx doctor [--ip <addr>] [--json]   Detect the Orbic over USB and probe its web UIs
+    orx doctor [--ip <addr>] [--json]    Detect the Orbic over USB and probe its web UIs
+    orx backup --out <dir> [--ip <addr>] [--allow-live]
+                                         Archive each writable device filesystem (tar+SHA-256)
     orx --version
     orx --help
 
+Notes:
+    backup needs the device root shell open on TCP 24 (see docs/BACKUP-AND-RECOVERY.md).
+    It writes <dir>/<fs>.tar (0600) and <dir>/MANIFEST.txt; a live rw filesystem whose
+    tar exits non-zero is only accepted with --allow-live (recorded as ok-live).
+
 EXIT CODES:
-    0   a device was found over USB, or a device web UI answered
-    1   nothing found (no USB device and no reachable web UI)
+    0   success (doctor: something found; backup: every target archived)
+    1   doctor: nothing found; backup: a target failed
     2   usage error, or the host environment could not be read";
+
+/// `orx backup`: archive every writable device filesystem to `out_dir`.
+fn cmd_backup(ip: &str, out_dir: &Path, allow_live: bool) -> ExitCode {
+    let addr = match probe::socket(ip, 24) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // tar of a whole filesystem streams for a while; give the transfer room but
+    // still bound a true stall.
+    let mut shell = transport::TcpShell::new(addr, Duration::from_secs(600));
+
+    let mounts_raw = match shell.run("cat /proc/mounts") {
+        Ok(r) if r.status == 0 => r.output,
+        Ok(r) => {
+            eprintln!(
+                "error: reading /proc/mounts failed (status {}): is the shell open on {addr}?",
+                r.status
+            );
+            return ExitCode::from(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "error: {e} (is the root shell open on {addr}? see docs/BACKUP-AND-RECOVERY.md)"
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let mounts = backup::parse_mounts(&mounts_raw);
+    let all_mps: Vec<String> = mounts.iter().map(|m| m.mountpoint.clone()).collect();
+    let targets = backup::backup_targets(&mounts);
+    if targets.is_empty() {
+        eprintln!("error: no writable filesystems found to back up");
+        return ExitCode::from(1);
+    }
+
+    if let Err(e) = fs::create_dir_all(out_dir) {
+        eprintln!("error: cannot create {}: {e}", out_dir.display());
+        return ExitCode::from(2);
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut failed = false;
+    for t in &targets {
+        let name = backup::archive_name(&t.mountpoint);
+        let path = out_dir.join(format!("{name}.tar"));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: cannot create {}: {e}", path.display());
+                failed = true;
+                continue;
+            }
+        };
+        match backup::archive_one(&mut shell, t, &all_mps, &mut file) {
+            Ok((bytes, hash, status)) => {
+                match backup::classify(status, bytes, t.writable, allow_live) {
+                    Ok(state) => {
+                        let res = backup::ArchiveResult {
+                            mountpoint: t.mountpoint.clone(),
+                            fstype: t.fstype.clone(),
+                            bytes,
+                            sha256: hash,
+                            state: state.clone(),
+                        };
+                        println!(
+                            "  {state:10} {} -> {} ({bytes} B)",
+                            t.mountpoint,
+                            path.display()
+                        );
+                        lines.push(res.manifest_line());
+                    }
+                    Err(e) => {
+                        eprintln!("  FAIL       {}: {e}", t.mountpoint);
+                        failed = true;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  FAIL       {}: {e}", t.mountpoint);
+                failed = true;
+            }
+        }
+    }
+
+    let manifest = out_dir.join("MANIFEST.txt");
+    let body = format!(
+        "# orx backup {}\n# <mountpoint> <fstype> size=<bytes> sha256=<hex> <state>\n{}\n",
+        ip,
+        lines.join("\n")
+    );
+    match fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&manifest)
+    {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(body.as_bytes()) {
+                eprintln!("error: writing {}: {e}", manifest.display());
+                return ExitCode::from(2);
+            }
+        }
+        Err(e) => {
+            eprintln!("error: cannot write {}: {e}", manifest.display());
+            return ExitCode::from(2);
+        }
+    }
+    println!("manifest: {}", manifest.display());
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
 
 /// Escape a string for embedding in the compact JSON `--json` output.
 fn json_escape(s: &str) -> String {
@@ -164,6 +299,42 @@ fn main() -> ExitCode {
                 }
             }
             doctor(&ip, json)
+        }
+        Some("backup") => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut out: Option<String> = None;
+            let mut allow_live = false;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--allow-live" => allow_live = true,
+                    "--ip" => match rest.next() {
+                        Some(v) => ip = v.clone(),
+                        None => {
+                            eprintln!("error: --ip needs a value\n\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                    },
+                    "--out" => match rest.next() {
+                        Some(v) => out = Some(v.clone()),
+                        None => {
+                            eprintln!("error: --out needs a value\n\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                    },
+                    other => {
+                        eprintln!("error: unexpected argument {other:?}\n\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            match out {
+                Some(dir) => cmd_backup(&ip, Path::new(&dir), allow_live),
+                None => {
+                    eprintln!("error: backup needs --out <dir>\n\n{USAGE}");
+                    ExitCode::from(2)
+                }
+            }
         }
         Some("--version" | "-V") => {
             println!("orx {}", env!("CARGO_PKG_VERSION"));

@@ -49,15 +49,17 @@ cargo run -p orx-cli -- doctor --json
 
 ## Sprint 4.2: `orx backup` (v0.6.0)
 
-- [ ] T-OR-034: enumerate `/proc/mtd`; stream each partition; hash both ends; write
-      `MANIFEST.sha256`, `device-hashes.txt`, `layout/`
-- [ ] T-OR-034: file-level archive and stock-file copies (BACKUP-AND-RECOVERY.md step 4)
-- [ ] T-OR-035: `orx backup verify`: manifest, sizes vs `/proc/mtd`, second-pass comparison,
-      presence of the off-repo copy marker
-- [ ] T-OR-035: backup gate library function used by every write subcommand
+- [x] T-OR-034: `orx backup --out <dir> [--allow-live]` archives each writable filesystem with
+      `tar` over the shell (raw `/proc/mtd` dumps deadlock this device -- a tar of the mounted
+      `ubifs` is the correct backup, per Sprint 1.3), streaming to `0600` `<fs>.tar` while hashing
+      inline, and writes a gate-compatible `MANIFEST.txt`. Validated on the unit (root.tar
+      86.7 MB, data/usrdata/cache `ok`; inline SHA-256 == independent `sha256sum`)
+- [ ] T-OR-035: `orx verify`: re-check a MANIFEST (sizes, re-hash, off-repo-copy marker) -- Sprint 4.3
+- [ ] T-OR-035: backup-gate library fn (reads a MANIFEST, requires rootfs ok/ok-live) used by every
+      write subcommand -- Sprint 4.3, before `orx install`
 
-Acceptance criteria: `orx backup` on the real unit reproduces the Phase 1 hashes for every
-partition not mounted writable.
+Acceptance criteria: `orx backup` on the real unit archives every writable filesystem with a
+verified inline hash and a gate-compatible manifest. MET (validated end-to-end 2026-11-23).
 
 Verification:
 

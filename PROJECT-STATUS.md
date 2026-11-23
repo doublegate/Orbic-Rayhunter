@@ -29,7 +29,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | 1 | v0.2.0 | Device recon + verified backup + OTA block | **released 2026-11-23** (recon, verified backup, off-repo copy, reversible OTA block; empirical 0x11EB deferred -- no active plan) | [to-dos/PHASE-1-recon-backup.md](to-dos/PHASE-1-recon-backup.md) |
 | 2 | v0.3.0 | Stock upstream install | installed & validated on-device 2026-11-23 (web UI, recording, reboot-persistent, rayhunter-check); released 2026-11-23 | [to-dos/PHASE-2-stock-install.md](to-dos/PHASE-2-stock-install.md) |
 | 3 | v0.4.0 | Reproducible patched build | **released 2026-11-23** (firmware build reproduces upstream to within 384 B; releases now ship it) | [to-dos/PHASE-3-reproducible-build.md](to-dos/PHASE-3-reproducible-build.md) |
-| 4 | v0.5.0..v1.0.0 | orx tooling + v1.0.0 baseline | Sprint 4.1 done (doctor v2 + transport), v0.5.0 released 2026-11-23 | [to-dos/PHASE-4-orx-tooling.md](to-dos/PHASE-4-orx-tooling.md) |
+| 4 | v0.5.0..v1.0.0 | orx tooling + v1.0.0 baseline | Sprints 4.1-4.2 done (doctor v2, transport, backup); v0.6.0 released 2026-11-23 | [to-dos/PHASE-4-orx-tooling.md](to-dos/PHASE-4-orx-tooling.md) |
 | 5 | v1.1.0..v1.3.0 | Alerting, analyzers, storage | not started | [to-dos/PHASE-5-v1.1-v1.3-features.md](to-dos/PHASE-5-v1.1-v1.3-features.md) |
 | 6 | v1.4.0..v1.6.0 | Performance, UI/UX, security | not started | [to-dos/PHASE-6-v1.4-v1.6-performance-hardening.md](to-dos/PHASE-6-v1.4-v1.6-performance-hardening.md) |
 | 7 | v1.7.0..v2.0.0 | Host pipeline, firmware, soak, release | not started | [to-dos/PHASE-7-v1.7-v2.0-pipeline-firmware-release.md](to-dos/PHASE-7-v1.7-v2.0-pipeline-firmware-release.md) |
@@ -61,7 +61,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 10 passed; 3 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
-| Latest release | v0.5.0 (2026-11-23) | `gh release list` |
+| Latest release | v0.6.0 (2026-11-23) | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |
 | Device firmware | `ORB400L_V1.2.0_BVZRT` | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
 | Device backup | none | `backups/` |
