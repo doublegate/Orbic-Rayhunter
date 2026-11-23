@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, probe, transport, usb};
+use orx_cli::{backup, probe, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -15,6 +15,7 @@ USAGE:
     orx doctor [--ip <addr>] [--json]    Detect the Orbic over USB and probe its web UIs
     orx backup --out <dir> [--ip <addr>] [--allow-live]
                                          Archive each writable device filesystem (tar+SHA-256)
+    orx verify --dir <dir>               Re-hash a backup dir against its MANIFEST.txt
     orx --version
     orx --help
 
@@ -185,6 +186,43 @@ fn open_tmp(final_path: &Path) -> std::io::Result<(fs::File, std::path::PathBuf)
         .mode(0o600)
         .open(&tmp)?;
     Ok((f, tmp))
+}
+
+/// `orx verify`: re-check a backup directory against its MANIFEST.txt.
+fn cmd_verify(dir: &Path) -> ExitCode {
+    let manifest = dir.join("MANIFEST.txt");
+    let text = match fs::read_to_string(&manifest) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", manifest.display());
+            return ExitCode::from(2);
+        }
+    };
+    let entries = verify::parse_manifest(&text);
+    if entries.is_empty() {
+        eprintln!("error: {} has no filesystem entries", manifest.display());
+        return ExitCode::from(2);
+    }
+    let mut bad = false;
+    for e in &entries {
+        let v = verify::verify_entry(dir, e);
+        if !v.is_ok() {
+            bad = true;
+        }
+        println!("  {:14} {} [{}]", v.describe(), e.mountpoint, e.state);
+    }
+    match verify::gate(dir) {
+        Ok(()) => println!("gate: rootfs backup verified -- device writes may proceed"),
+        Err(e) => {
+            println!("gate: NOT satisfied -- {e}");
+            bad = true;
+        }
+    }
+    if bad {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// Escape a string for embedding in the compact JSON `--json` output.
@@ -367,6 +405,32 @@ fn main() -> ExitCode {
                 Some(dir) => cmd_backup(&ip, Path::new(&dir), allow_live),
                 None => {
                     eprintln!("error: backup needs --out <dir>\n\n{USAGE}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("verify") => {
+            let mut dir: Option<String> = None;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--dir" => match rest.next() {
+                        Some(v) => dir = Some(v.clone()),
+                        None => {
+                            eprintln!("error: --dir needs a value\n\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                    },
+                    other => {
+                        eprintln!("error: unexpected argument {other:?}\n\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            match dir {
+                Some(d) => cmd_verify(Path::new(&d)),
+                None => {
+                    eprintln!("error: verify needs --dir <dir>\n\n{USAGE}");
                     ExitCode::from(2)
                 }
             }
