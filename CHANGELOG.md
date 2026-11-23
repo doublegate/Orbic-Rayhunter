@@ -2,6 +2,14 @@
 
 ### Added
 
+- (nothing yet)
+
+## [0.3.0] - 2026-11-23
+
+Installs stock upstream Rayhunter v0.13.0 on the device and validates the end-to-end capture path. The network installer deploys the daemon, config, `rayhunter_daemon` init and the hooked `misc-daemon` exactly as the install-footprint RE predicted; after a reboot the daemon records and the Phase 1 OTA block persists. Validated on the inactive built-in SIM without an active plan -- `rayhunter-check` analyzes a live capture clean, confirming capture + offline analysis work on this unit. Upstream pin: EFForg/rayhunter `v0.13.0` (`cd462a1`). The install is the reversible footprint from Phase 1's RE; the Phase 1 backup is the rollback.
+
+### Added
+
 - Phase 2: upstream Rayhunter v0.13.0 installed and validated on the device (T-OR-021/T-OR-022).
   The network installer deployed the daemon + `config.toml` + `rayhunter_daemon` init + the
   hooked `misc-daemon`, as the install-footprint RE predicted; after reboot the web UI/API answer
