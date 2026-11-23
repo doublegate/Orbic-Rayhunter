@@ -22,3 +22,24 @@ every release note.
 8. Verify the release page assets and checksums.
 
 A published version is immutable: fix forward with a new patch version.
+
+## Release notes (robust, comprehensive, technically detailed)
+
+Every release's notes have two parts, assembled by `release.yml`:
+
+1. **The CHANGELOG section for the version** (human-written). This must be comprehensive, not a
+   one-liner: a short overview paragraph (what the release is, the upstream pin, whether it
+   touches the device) followed by the full `Added` / `Changed` / `Fixed` / `Security` /
+   `Removed` breakdown with enough technical detail that a reader understands each change and its
+   rationale. Write it as you land the work (the `[Unreleased]` discipline), so the release is
+   just a rename.
+2. **An auto-generated technical appendix** (by `release.yml`): a release-asset table with each
+   file's target/role, size and SHA-256; build provenance (tagged commit, upstream pin, Rust
+   toolchain); and pointers to install/scope/backup/security docs and the full changelog. This
+   guarantees the asset, checksum and provenance detail is present on every release without
+   hand-assembly.
+
+The annotated tag (step 7) carries its own standalone summary + key changes + upstream pin +
+test evidence. Keep all three consistent. For a release that changes the install, also document
+install steps, the platform/support matrix, known issues and upgrade/rollback notes in the
+notes body.

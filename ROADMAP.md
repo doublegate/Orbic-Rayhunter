@@ -61,7 +61,7 @@ Goal: a buildable, lintable, documented overlay repository with upstream pinned 
 | T-OR-008 | First commit and push to `main` | host | done |
 | T-OR-009 | Branch protection on `main` with required checks | host | done |
 | T-OR-010 | First CI run on `main` with every job executing its real gate | host | done |
-| T-OR-011 | Tag and release v0.1.0 | host | open |
+| T-OR-011 | Tag and release v0.1.0 | host | done |
 
 Exit criteria: T-OR-001..T-OR-011 done; CI green on the tagged commit with no
 `continue-on-error` on a blocking gate; `markdownlint-cli2 '**/*.md' '.github/**/*.md'` clean; README points to

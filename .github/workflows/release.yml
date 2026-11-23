@@ -71,11 +71,52 @@ jobs:
           rm -f SHA256SUMS
           sha256sum -- ./* > ../SHA256SUMS.tmp
           mv ../SHA256SUMS.tmp SHA256SUMS
-      - name: Extract release notes from CHANGELOG
+      - name: Build release notes (CHANGELOG section + technical appendix)
+        # Release notes are the human-written CHANGELOG section for this version
+        # followed by an auto-generated, technically detailed appendix (asset table
+        # with per-file SHA-256 and target, build provenance, and pointers). Every
+        # release is therefore comprehensive without hand-assembly.
         run: |
           ver="${TAG#v}"
-          awk -v v="$ver" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
-          test -s notes.md || echo "See CHANGELOG.md" > notes.md
+          awk -v v="$ver" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > body.md
+          test -s body.md || echo "See CHANGELOG.md for details." > body.md
+          upstream_tag=$(git -C upstream describe --tags --always 2>/dev/null || echo unknown)
+          upstream_sha=$(git -C upstream rev-parse --short HEAD 2>/dev/null || echo unknown)
+          toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' build/rayhunter/rust-toolchain.toml | head -1)
+          {
+            cat body.md
+            echo
+            echo "## Release assets"
+            echo
+            echo "| Asset | Target / role | Size | SHA-256 |"
+            echo "|---|---|---|---|"
+            while read -r sum path; do
+              f="${path#./}"
+              case "$f" in
+                orx-*linux*)       role="host CLI (\`orx\`), x86_64 Linux" ;;
+                rayhunter-daemon)  role="device daemon, armv7 musleabihf" ;;
+                rootshell)         role="device root helper, armv7 musleabihf" ;;
+                *)                 role="-" ;;
+              esac
+              sz=$(stat -c%s "dist/$f")
+              echo "| \`$f\` | $role | $sz B | \`$sum\` |"
+            done < dist/SHA256SUMS
+            echo
+            echo "\`SHA256SUMS\` lists these hashes; verify with \`sha256sum -c SHA256SUMS\` in the download directory."
+            echo
+            echo "## Build provenance"
+            echo
+            echo "- Tagged commit: \`${GITHUB_SHA:-$TAG}\`"
+            echo "- Upstream pin: EFForg/rayhunter \`$upstream_tag\` (\`$upstream_sha\`)"
+            echo "- Rust toolchain: \`${toolchain:-see rust-toolchain.toml}\`"
+            echo "- Built reproducibly by \`.github/workflows/release.yml\` on ubuntu-24.04."
+            echo
+            echo "## Pointers"
+            echo
+            echo "- Install, scope and current state: \`INSTALL.md\`, \`PROJECT-STATUS.md\` at this tag."
+            echo "- Backup/recovery and device safety: \`docs/BACKUP-AND-RECOVERY.md\`, \`docs/SECURITY-MODEL.md\`."
+            echo "- Full change history: \`CHANGELOG.md\`."
+          } > notes.md
       - name: Create or update release (never duplicates)
         env:
           GH_TOKEN: ${{ github.token }}
