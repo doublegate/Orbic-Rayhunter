@@ -183,6 +183,10 @@ pub fn install_plan(
             chmod: "755",
         },
         Step::Cmd {
+            desc: "flush to flash".into(),
+            command: "sync".into(),
+        },
+        Step::Cmd {
             desc: "reboot".into(),
             command: "reboot".into(),
         },
@@ -194,14 +198,15 @@ pub fn install_plan(
 /// regardless of the device's current (possibly hooked) state.
 pub fn stock_misc_daemon(backup_dir: &Path) -> Result<Vec<u8>, String> {
     let tar = backup_dir.join("root.tar");
-    // Open in Rust and feed the archive on stdin to `tar -xO` (no `-f`): portable
-    // across GNU/BSD tar and immune to a `--dir` containing `:` (which GNU tar
-    // would treat as a remote `host:file` and invoke rsh) or a leading `-`.
+    // Open in Rust and feed the archive on stdin to `tar -xO -f -`: `-f -` forces
+    // stdin (without it GNU tar honors $TAPE / a default tape device, not stdin),
+    // and keeping the backup dir out of `-f` means a path containing `:` is not
+    // treated as a remote `host:file` and a leading `-` is not parsed as an
+    // option. `--` ends option parsing before the member name.
     let file =
         std::fs::File::open(&tar).map_err(|e| format!("cannot open {}: {e}", tar.display()))?;
     let out = std::process::Command::new("tar")
-        .arg("-xO")
-        .arg("./etc/init.d/misc-daemon")
+        .args(["-xO", "-f", "-", "--", "./etc/init.d/misc-daemon"])
         .stdin(std::process::Stdio::from(file))
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -250,6 +255,10 @@ pub fn uninstall_plan(stock_misc_daemon: Vec<u8>) -> Vec<Step> {
         Step::Cmd {
             desc: "remove daemon + config".into(),
             command: format!("rm -f {DAEMON_REMOTE} {CONFIG_REMOTE}"),
+        },
+        Step::Cmd {
+            desc: "flush to flash".into(),
+            command: "sync".into(),
         },
         Step::Cmd {
             desc: "reboot".into(),

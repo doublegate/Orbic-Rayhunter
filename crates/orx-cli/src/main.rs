@@ -277,6 +277,20 @@ fn cmd_install(backup: &Path, dist: &Path, daemon: &Path, ip: &str, apply: bool)
             return ExitCode::from(2);
         }
     };
+    // Refuse to install unless the backup can roll the install BACK: gate first,
+    // then confirm it holds an unhooked stock misc-daemon (`orx uninstall`'s
+    // restore source). A backup taken after an earlier install would pass the
+    // gate but leave no clean rollback -- fail closed here, before any write.
+    if let Err(e) = verify::gate(backup) {
+        eprintln!("error: backup gate not satisfied, refusing to install: {e}");
+        return ExitCode::from(1);
+    }
+    if let Err(e) = install::stock_misc_daemon(backup) {
+        eprintln!(
+            "error: backup has no stock misc-daemon to roll back to, refusing to install: {e}"
+        );
+        return ExitCode::from(1);
+    }
     run_plan(&steps, backup, ip, apply, "install")
 }
 
