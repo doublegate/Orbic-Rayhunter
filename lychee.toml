@@ -1,6 +1,6 @@
 # Link checker configuration (docs.yml). ref-docs/ is excluded from the
 # blocking check: it is an immutable dated corpus whose external links rot.
-exclude_path = ["upstream", "build", "target", "ref-docs"]
+exclude_path = ["upstream", "build", "target", "ref-docs", "salvaged"]
 exclude = [
   "^http://192\\.168\\.",
   "^http://localhost",

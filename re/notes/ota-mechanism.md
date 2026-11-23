@@ -60,5 +60,5 @@ trigger and a carrier-pushed DM session. The block, in order of strength:
 
 Permanent suppression with a full documented reversal is T-OR-096. A raw image restore is not
 available (NAND is UBI-backed; `nanddump` deadlocks -- see
-[../docs/BACKUP-AND-RECOVERY.md](../docs/BACKUP-AND-RECOVERY.md)); recovery for this class is a
-file-level restore of the renamed binaries from the backup.
+[../../docs/BACKUP-AND-RECOVERY.md](../../docs/BACKUP-AND-RECOVERY.md)); recovery for this class
+is a file-level restore of the renamed binaries from the backup.

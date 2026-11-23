@@ -178,8 +178,8 @@ unit (`/etc/xml/fota/fota_cfg.xml`: `autocheck`/`autodown`/`autoinstall` all `0`
 empty), there is **no FOTA daemon at boot**, and the updater (`/usr/bin/oma_dm`, `dmclient`,
 `mdm-daemon`) runs only on demand. No static update hostname exists to DNS-block (the server is
 provisioned dynamically via carrier OMA-DM). Two triggers remain: the stock UI's `goahead`
-`/goform/Fota*` actions, and a carrier-pushed OMA-DM session (needs the SIM + Verizon network,
-#163). The block therefore is:
+`/goform/Fota*` actions, and a carrier-pushed OMA-DM session (needs the SIM + Verizon
+network, upstream #163). The block therefore is:
 
 1. Never start an update from the device menu, the stock web UI (its page load calls
    `FotaGetVersionInfo`), or the Verizon Windows tool. `orbic-ui-read.py` refuses the `Fota*`
