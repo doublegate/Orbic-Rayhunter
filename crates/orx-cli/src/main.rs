@@ -42,6 +42,7 @@ fn doctor(ip: &str) -> ExitCode {
             d.sysfs_name,
             d.vid,
             d.pid,
+            // `product` is the model only; the serial is printed once, in its own field.
             d.product.as_deref().unwrap_or("?"),
             d.serial.as_deref().unwrap_or("?"),
             d.mode.describe()

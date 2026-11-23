@@ -11,11 +11,11 @@ verification) -> 1.4 (OTA block, then SIM, then 0x11EB). No write to the device 
 
 ## Sprint 1.1: Host-side recon
 
-- [ ] T-OR-012: `lsusb -v -d 05c6:f626` saved to `backups/<date>-V1.2.0/layout/lsusb-f626.txt`
-- [ ] T-OR-012: interface class/subclass/protocol per USB function recorded in DEVICE-PROFILE.md
-- [ ] T-OR-012: `orx doctor` transcript; serial redacted before committing
-- [ ] T-OR-012: stock UI response headers and the firmware string as the UI reports it
-- [ ] T-OR-012: host-side port scan of the device (expect 24 and 8081 closed before any shell)
+- [x] T-OR-012: `lsusb -v -d 05c6:f626` saved to `backups/<date>-V1.2.0/layout/lsusb-f626.txt`
+- [x] T-OR-012: interface class/subclass/protocol per USB function recorded in DEVICE-PROFILE.md
+- [x] T-OR-012: `orx doctor` transcript; serial redacted before committing
+- [x] T-OR-012: stock UI response headers (2026-11-23)
+- [x] T-OR-012: host-side port scan of the device (expect 24 and 8081 closed before any shell)
 
 Acceptance criteria: DEVICE-PROFILE.md host-side table filled; no write to the device.
 
@@ -30,7 +30,10 @@ nmap -Pn -p 1-1024,5555,8080,8081 192.168.1.1
 
 ### Research (REA/Ghidra/web)
 
-- Stock web UI JavaScript (fetched with a browser from the unit, saved locally, not committed):
+- Stock web UI JavaScript (fetched with `curl`, saved locally, not committed). **Do not open the
+  stock UI in a browser before T-OR-018:** its header calls `/action/FotaGetVersionInfo` on page
+  load, which asks the device to check for an update (if a browser is unavoidable, remove the SIM
+  first):
   locate the login flow (`/goform/GetLoginInfo`, `/goform/login`) and the remote-access settings
   page that drives `/action/SetRemoteAccessCfg`.
 - Web: Verizon RC400L update pages for the current published build list (V1.3.2 is the newest
@@ -109,6 +112,9 @@ age -d /media/<offline-disk>/orbic-<date>.tar.age | sha256sum
 - [ ] T-OR-018: block it reversibly (stop, rename the init link; record original name, path,
       hash); DNS block of update hosts if identified
 - [ ] T-OR-018: verify across a reboot without the SIM, then with the active SIM inserted
+- [ ] T-OR-012 (moved here from Sprint 1.1): read the firmware string as the stock UI reports it.
+      It is shown only after the admin login, and the UI's page load calls the FOTA client, so it
+      is read only once the FOTA client is blocked
 - [ ] T-OR-019: run the 0x11EB procedure in [docs/TESTING.md](../docs/TESTING.md) with the
       upstream release daemon run manually (not installed persistently), then remove it
 - [ ] T-OR-019: record the result in DEVICE-PROFILE.md; delete the capture

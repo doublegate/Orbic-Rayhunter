@@ -46,3 +46,6 @@ CLAUDE.local.md
 *.swp
 *~
 .DS_Store
+
+# Local salvage of session scratch (never published)
+/salvaged/

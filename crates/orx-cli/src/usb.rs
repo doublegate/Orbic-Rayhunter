@@ -54,7 +54,10 @@ pub struct QualcommDevice {
     pub sysfs_name: String,
     pub vid: u16,
     pub pid: u16,
+    /// The product's model text. Any `_SN:<serial>` suffix is removed when the
+    /// device is read, so this field never carries the device serial.
     pub product: Option<String>,
+    /// The serial: the sysfs `serial` attribute, or else the product's `_SN:` token.
     pub serial: Option<String>,
     pub mode: OrbicMode,
 }
@@ -70,18 +73,74 @@ fn parse_hex_u16(s: &str) -> Option<u16> {
     u16::from_str_radix(s.trim(), 16).ok()
 }
 
+/// Byte offset of the last `_SN:` marker that starts `product` or follows
+/// whitespace. A marker in the middle of a word (`FOO_SN:`) is not one.
+fn sn_marker(product: &str) -> Option<usize> {
+    product.rmatch_indices("_SN:").map(|(i, _)| i).find(|&i| {
+        i == 0
+            || product[..i]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+    })
+}
+
+/// Split a product string such as `MDM9207-MTP _SN:0123ABCD` into its model
+/// text and the serial it embeds, in one scan.
+///
+/// The RC400L (V1.2.0) exposes no `serial` sysfs attribute in normal mode and
+/// carries the serial here instead. Only a plain ASCII alphanumeric token of
+/// 1..=64 characters, directly after a word-start `_SN:`, counts as a serial,
+/// so arbitrary product text is never reported as one. When no valid serial is
+/// found, the whole string is the model.
+pub fn split_product(product: &str) -> (&str, Option<&str>) {
+    if let Some(i) = sn_marker(product) {
+        let tail = &product[i + "_SN:".len()..];
+        if !tail.is_empty() && tail.len() <= 64 && tail.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return (product[..i].trim_end(), Some(tail));
+        }
+    }
+    (product, None)
+}
+
+/// The serial embedded in a product string, if it carries a valid one.
+pub fn serial_from_product(product: &str) -> Option<String> {
+    split_product(product).1.map(str::to_string)
+}
+
+/// The product string without its `_SN:` serial suffix.
+pub fn product_model(product: &str) -> &str {
+    split_product(product).0
+}
+
 /// Read one sysfs USB device directory. Returns `None` for interfaces,
 /// hubs without IDs, or non-Qualcomm devices.
 pub fn read_device(dir: &Path) -> Option<QualcommDevice> {
     let vid = parse_hex_u16(&read_attr(dir, "idVendor")?)?;
     let pid = parse_hex_u16(&read_attr(dir, "idProduct")?)?;
     let mode = OrbicMode::classify(vid, pid)?;
+    // Split once, here: the serial is held only in `serial`, never inside `product`, so
+    // nothing that prints or logs a `QualcommDevice` (Debug included) can leak it through
+    // the product string. A product that was nothing but `_SN:<serial>` has no model.
+    let raw_product = read_attr(dir, "product");
+    let (model, embedded) = match raw_product.as_deref() {
+        Some(p) => {
+            let (m, s) = split_product(p);
+            (
+                Some(m.to_string()).filter(|m| !m.is_empty()),
+                s.map(str::to_string),
+            )
+        }
+        None => (None, None),
+    };
+    let serial = read_attr(dir, "serial").or(embedded);
+    let product = model;
     Some(QualcommDevice {
         sysfs_name: dir.file_name()?.to_string_lossy().into_owned(),
         vid,
         pid,
-        product: read_attr(dir, "product"),
-        serial: read_attr(dir, "serial"),
+        product,
+        serial,
         mode,
     })
 }
@@ -158,6 +217,120 @@ mod tests {
         assert_eq!(d.sysfs_name, "1-4");
         assert_eq!(d.mode, OrbicMode::Normal);
         assert_eq!(d.serial.as_deref(), Some("0000TEST"));
+        assert_eq!(d.product.as_deref(), Some("MDM9207-MTP"));
+    }
+
+    #[test]
+    fn serial_falls_back_to_the_product_string() {
+        // The RC400L (V1.2.0) exposes no `serial` attribute in normal mode; the
+        // serial is embedded in the product string instead (measured 2026-11-23).
+        let t = TempDir::new("sn");
+        fake_dev(
+            &t.0,
+            "1-1",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "f626"),
+                ("product", "MDM9207-MTP _SN:0000TEST"),
+            ],
+        );
+        fake_dev(
+            &t.0,
+            "1-2",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "f601"),
+                ("product", "MDM9207-MTP"),
+            ],
+        );
+        fake_dev(
+            &t.0,
+            "1-3",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "9008"),
+                ("product", "MDM9207-MTP _SN:not a serial!"),
+            ],
+        );
+        fake_dev(
+            &t.0,
+            "1-4",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "f626"),
+                ("product", "_SN:ONLYSERIAL"),
+            ],
+        );
+        let found = scan(&t.0).unwrap();
+        assert_eq!(found[0].serial.as_deref(), Some("0000TEST"));
+        assert_eq!(found[1].serial, None);
+        assert_eq!(found[2].serial, None);
+        // The serial never stays inside `product`; an invalid token leaves it untouched.
+        assert_eq!(found[0].product.as_deref(), Some("MDM9207-MTP"));
+        assert_eq!(
+            found[2].product.as_deref(),
+            Some("MDM9207-MTP _SN:not a serial!")
+        );
+        // A product that is only `_SN:<serial>` has no model text at all.
+        assert_eq!(found[3].product, None);
+        assert_eq!(found[3].serial.as_deref(), Some("ONLYSERIAL"));
+        assert!(!format!("{found:?}").contains("_SN:0000TEST"));
+    }
+
+    #[test]
+    fn serial_from_product_takes_only_a_plain_token() {
+        assert_eq!(
+            serial_from_product("X _SN:F00D1234"),
+            Some("F00D1234".into())
+        );
+        assert_eq!(serial_from_product("X _SN:"), None);
+        assert_eq!(serial_from_product("X"), None);
+        assert_eq!(serial_from_product("X _SN:ab/cd"), None);
+        assert_eq!(
+            serial_from_product(&format!("X _SN:{}", "A".repeat(65))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_real_serial_attribute_wins_over_the_product_string() {
+        let t = TempDir::new("prec");
+        fake_dev(
+            &t.0,
+            "1-1",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "f626"),
+                ("product", "MDM9207-MTP _SN:FROMPRODUCT"),
+                ("serial", "FROMSYSFS"),
+            ],
+        );
+        assert_eq!(scan(&t.0).unwrap()[0].serial.as_deref(), Some("FROMSYSFS"));
+    }
+
+    #[test]
+    fn serial_token_bounds_and_position() {
+        let max = "A".repeat(64);
+        assert_eq!(serial_from_product(&format!("X _SN:{max}")), Some(max));
+        assert_eq!(serial_from_product("_SN:AB12"), Some("AB12".into()));
+        // `_SN:` must start the string or follow whitespace, and the token must follow it
+        // directly: mid-word markers and padded tokens are not serials.
+        assert_eq!(serial_from_product("FOO_SN:1234"), None);
+        assert_eq!(serial_from_product("X _SN: 1234"), None);
+    }
+
+    #[test]
+    fn model_strips_the_serial_from_the_product_string() {
+        assert_eq!(product_model("MDM9207-MTP _SN:0000TEST"), "MDM9207-MTP");
+        assert_eq!(product_model("MDM9207-MTP"), "MDM9207-MTP");
+        assert_eq!(product_model("FOO_SN:1234"), "FOO_SN:1234");
+        assert_eq!(product_model("_SN:AB12"), "");
+        assert_eq!(product_model("MDM _SN:bad!"), "MDM _SN:bad!");
+        // The LAST word-start marker is the one used.
+        assert_eq!(
+            split_product("A _SN:X1 B _SN:Y2"),
+            ("A _SN:X1 B", Some("Y2"))
+        );
     }
 
     #[test]
