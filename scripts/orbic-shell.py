@@ -128,8 +128,24 @@ WRITER_SUBFORMS = re.compile(
     r"mknod|chmod|chown|chgrp|mkfs\w*|dd|tee|reboot|halt|poweroff|kill\w*|"
     r"setprop|passwd|truncate|install|insmod|rmmod|fw_setenv)\b"
 )
-# Any redirection to a path other than /dev/null (so `2>/dev/null`, `2>&1` are fine).
-REDIRECT_TO_FILE = re.compile(r"(?<![0-9&])>>?\s*(?!&|/dev/null\b)")
+# A redirect operator (optionally fd-prefixed `1>`/`2>>`, or bash `&>`) and its
+# target. Quoted spans are stripped before this runs so a `>` inside a string is
+# never seen as a redirect.
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+_REDIRECT = re.compile(r"(?:\d*|&)>>?\s*(\S+)")
+
+
+def _has_file_redirect(command: str) -> bool:
+    """True if the command redirects to anything other than /dev/null or an fd
+    dup (`2>&1`). Catches fd-prefixed writes like `echo x 1>/etc/passwd` and
+    `&>/dev/mtd0` that a lookbehind-based check would miss."""
+    bare = _QUOTED.sub("''", command)
+    for m in _REDIRECT.finditer(bare):
+        target = m.group(1)
+        if target.startswith("&") or target == "/dev/null":
+            continue  # fd dup (2>&1) or the bit bucket
+        return True
+    return False
 
 
 _ASSIGN_OR_WRAP = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*=|exec$|env$|nice$|time$)")
@@ -165,7 +181,7 @@ def is_read_only(command: str) -> bool:
     """True only when every simple command is a known reader in a read form.
     Fails closed: an unknown program, an unparseable fragment, a writer subform,
     or a redirection to a file all return False."""
-    if REDIRECT_TO_FILE.search(command) or WRITER_SUBFORMS.search(command):
+    if _has_file_redirect(command) or WRITER_SUBFORMS.search(command):
         return False
     words = _first_words(command)
     return bool(words) and all(w in READ_COMMANDS for w in words)
@@ -244,7 +260,18 @@ def selftest() -> int:
         "dmesg -c",
         "cat /proc/mtd; nandwrite /dev/mtd0 x",  # a writer hiding after a reader
         "&& rm -rf /",  # operator-only / unparseable fragment
+        # fd-prefixed and bash redirects a lookbehind check would miss:
+        "echo foo 1>/etc/passwd",
+        "cat /etc/version 2>/etc/init.d/misc-daemon",
+        "cat /proc/mtd &>/dev/mtd0",
+        "ls / >>/data/x",
     ]
+    also_reads = [
+        "cat /dev/mtd0 2>/dev/null",  # stderr to the bit bucket is fine
+        "ps w 2>&1 | grep x",  # fd dup is fine
+        "grep -c '2>/etc/passwd' /proc/mtd",  # the redirect is inside quotes
+    ]
+    reads += also_reads
     for c in reads:
         if not is_read_only(c):
             print(f"  FAIL  read command refused: {c}")
