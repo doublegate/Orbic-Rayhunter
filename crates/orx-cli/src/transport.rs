@@ -112,6 +112,10 @@ pub trait Shell {
     /// Transfer raw `bytes` to `remote` with NO verification.
     fn put(&mut self, remote: &str, bytes: &[u8]) -> Result<(), String>;
 
+    /// Adjust the per-command timeout (e.g. a short bound for `reboot`, which
+    /// drops the connection without a clean close). Default: no-op.
+    fn set_timeout(&mut self, _timeout: std::time::Duration) {}
+
     /// Transfer `bytes` to `remote` and accept only if the device's own
     /// `sha256sum` of the written file equals the hash of what we sent.
     fn send_file(&mut self, remote: &str, bytes: &[u8]) -> Result<(), String> {
@@ -210,6 +214,10 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 impl Shell for TcpShell {
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
     fn run(&mut self, command: &str) -> Result<CmdResult, String> {
         let deadline = Instant::now() + self.timeout;
         let mut stream = self.connect()?;
@@ -321,10 +329,13 @@ pub mod fake {
         pub corrupt: bool,
         /// `put` silently drops the data (simulated short write / failed transfer).
         pub drop_writes: bool,
+        /// Every command passed to `run`, in order (for sequence assertions).
+        pub cmds: Vec<String>,
     }
 
     impl Shell for FakeShell {
         fn run(&mut self, command: &str) -> Result<CmdResult, String> {
+            self.cmds.push(command.to_string());
             if let Some(remote) = command.strip_prefix("sha256sum ") {
                 let remote = remote.trim();
                 return Ok(match self.fs.get(remote) {

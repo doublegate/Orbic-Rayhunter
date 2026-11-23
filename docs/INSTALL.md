@@ -173,27 +173,32 @@ If this path was used, the uninstall in step 6 must also remove `/bin/rootshell`
 ## 4. Install our build with `orx install`
 
 ```sh
-orx install --dist dist/  # T-OR-036 (v0.7.0)
+orx install --dir <backup-dir>           # T-OR-036 (v0.8.0): DRY RUN -- prints the plan
+orx install --dir <backup-dir> --apply   # execute: writes to the device and reboots
+# --dist defaults to build/rayhunter/dist; --daemon to dist/rayhunter-daemon
 ```
 
-`orx install` refuses to run without a verified backup. When upstream is already installed it:
+`orx install` is **dry-run by default** (it prints the exact step plan and changes nothing) and
+**refuses unless `verify::gate()` passes** for `--dir` (a verified rootfs backup -- the rollback).
+With `--apply` it, in order:
 
-1. Verifies `dist/SHA256SUMS`.
-2. Stops the daemon (`/etc/init.d/rayhunter_daemon stop`).
-3. Transfers `dist/rayhunter-daemon` to `/data/rayhunter/rayhunter-daemon.tmp`, checks the
-   device-side hash against `SHA256SUMS`, and renames it into place, keeping the previous binary
-   as `rayhunter-daemon.prev` for rollback.
-4. Installs `device/config/config.orbic.toml` as `/data/rayhunter/config.toml` (previous file kept
-   as `config.toml.prev`). Values and reasons: [CONFIGURATION.md](CONFIGURATION.md).
-5. Leaves upstream's init scripts in place and reboots.
+1. `mkdir -p /data/rayhunter/scripts /data/rayhunter/bin`.
+2. Deploys, each **atomically** (send to `<path>.orx-new`, which the device re-hashes to confirm
+   the transfer, then `chmod` and `mv` into place -- so a dropped connection never leaves a
+   half-written or non-executable file, and `mv`-over-a-running-binary avoids `ETXTBSY`):
+   - `dist/rayhunter-daemon` -> `/data/rayhunter/rayhunter-daemon` (0755);
+   - the rendered `config.toml` (from `config.toml.in`, with `device = "orbic"`) ->
+     `/data/rayhunter/config.toml` (0644). Values and reasons: [CONFIGURATION.md](CONFIGURATION.md);
+   - `rayhunter_daemon` -> `/etc/init.d/rayhunter_daemon` (0755);
+   - the hooked `misc-daemon` -> `/etc/init.d/misc-daemon` (0755), last before reboot.
+3. Runs `sync`, then reboots.
 
-On a stock unit it first runs upstream's `installer orbic` (step 3) and then the steps above.
-`rootshell` from `dist/` is installed only on the USB path.
-
-Manual equivalent until v0.7.0 (T-OR-030): open `installer util orbic-shell`, stop the daemon,
-transfer the binary with a checksum check the same way the upstream installer does (`nc -l -p
-8081 > <file>.tmp` on the device, stream from the host, compare the device-side hash with
-`dist/SHA256SUMS`, then `mv`), install the config, and reboot.
+The daemon binary and both init scripts are validated before any write: the daemon must be a
+32-bit little-endian ARM ELF, the init scripts must have a `#!/bin/sh` shebang with no CRLF/NUL and
+valid UTF-8, the `rayhunter_daemon` init must reference `/data/rayhunter/rayhunter-daemon`, and the
+`misc-daemon` must reference `rayhunter_daemon` (the hook). The backup -- not a `.prev` copy -- is the
+rollback; `orx uninstall` (section 6) uses it. On a stock unit, run upstream's `installer orbic`
+(step 3) first if you prefer, then `orx install --apply` to replace its build with ours.
 
 ## 5. Post-install health check
 
@@ -222,8 +227,16 @@ smoke list is in [TESTING.md](TESTING.md).
 ## 6. Uninstall and restore
 
 ```sh
-orx uninstall             # T-OR-039 (v0.8.0); restores stock files from the verified backup
+orx uninstall --dir <backup-dir>           # T-OR-039 (v0.8.0): DRY RUN
+orx uninstall --dir <backup-dir> --apply   # execute
 ```
+
+`orx uninstall` is **dry-run by default** and **backup-gated** like install. With `--apply` it
+restores the **true stock** `/etc/init.d/misc-daemon` -- extracted from the verified backup's
+`root.tar` (piped to `tar -xO -f -`), NOT copied from the device, because the device may already carry the
+hooked script -- atomically (`<path>.orx-new` -> `chmod 755` -> `mv`), then removes
+`/etc/init.d/rayhunter_daemon` and `/data/rayhunter/{rayhunter-daemon,config.toml}`, leaving the
+`/data/rayhunter-data` recordings, and reboots.
 
 Upstream has no automated uninstaller, and its manual routine leaves the real data directory and
 the overwritten `misc-daemon` behind

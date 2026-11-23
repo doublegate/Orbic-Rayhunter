@@ -82,12 +82,15 @@ diff <(sort backups/<date>-V1.2.0/MANIFEST.sha256) <(sort backups/<date>-V1.2.0-
 
 ## Sprint 4.3: `orx install` and `orx verify` (v0.7.0)
 
-- [ ] T-OR-036: run upstream `installer orbic` on a stock unit; then replace daemon and config
-      from `dist/` and `device/config/` with `.prev` copies (INSTALL.md step 4)
-- [ ] T-OR-036: refuse when `dist/SHA256SUMS` fails, the backup gate fails, or the USB mode is
-      not normal
-- [ ] T-OR-037: `orx verify`: installed hashes, daemon process, API, active recording, init hooks
-      present, no port 24/8081 listener
+- [x] T-OR-036: `orx install --dir <backup> [--apply]` (v0.8.0) deploys our firmware build
+      (daemon + rendered config.toml + rayhunter_daemon + hooked misc-daemon, chmod, reboot) --
+      the upstream network-installer footprint with our build. Dry-run unless `--apply`; each
+      transfer is SHA-256-verified by the device
+- [x] T-OR-036: refuses unless `verify::gate()` passes (a verified rootfs backup); dry-run
+      validated on the unit against the Sprint 1.3 backup. (A separate post-install on-device
+      health check is the planned `orx check`, T-OR-037, not yet implemented)
+- [ ] T-OR-037: `orx check` (on-device post-install health: installed hashes, daemon process,
+      API, active recording, init hooks, no port 24/8081 listener) -- still to do
 
 Acceptance criteria: install and verify on the real unit from the Phase 2 state; refusal paths
 covered by unit tests.
@@ -109,9 +112,11 @@ cargo run -p orx-cli -- verify
 
 - [ ] T-OR-038: list via `/api/qmdl-manifest`; download QMDL, ndjson and GPS files; host
       manifest with SHA-256; skip already-pulled entries
-- [ ] T-OR-039: `orx uninstall` implementing INSTALL.md step 6, restoring stock files from the
-      verified backup and verifying their hashes
-- [ ] T-OR-039: `orx restore <file>` for single stock files from the backup
+- [x] T-OR-039: `orx uninstall --dir <backup> [--apply]` (v0.8.0) restores the true stock
+      misc-daemon extracted from the verified backup's `root.tar` (gated before extract; refuses an
+      already-hooked script), atomically, and removes our files, leaving `/data/rayhunter-data`
+      recordings; dry-run unless `--apply`, backup-gated
+- [ ] T-OR-039: `orx restore <file>` for arbitrary single stock files from the backup -- follow-up
 
 Acceptance criteria: uninstall on the real unit leaves `misc-daemon` byte-identical to the backup
 and no Rayhunter files; reinstall afterwards passes `orx verify`.
@@ -180,3 +185,15 @@ gh release view v1.0.0
 ### Research (REA/Ghidra/web)
 
 - None new; review open upstream issues affecting the Orbic since v0.13.0 before tagging.
+
+## v0.8.0 review follow-ups (deferred from PR #6, agy suggestions)
+
+Additive hardening for `orx install`, deferred from the v0.8.0 PR as next-PR work (the shipped
+command is backup-gated, dry-run-first, atomic, and validates payloads; these make it stricter):
+
+- [ ] T-OR-036a: verify `dist/rayhunter-daemon` against `dist/SHA256SUMS` before transfer (catch a
+      stale/corrupt local artifact); allow an explicit opt-out.
+- [ ] T-OR-036b: `--config <path>` and deploy our hardened `config.toml` (wifi_enabled = false,
+      retention/free-space thresholds) instead of bare upstream `config.toml.in`; ties to T-OR-040.
+- [ ] T-OR-036c: `/data` (and `/`) free-space preflight before staging a second copy of the daemon,
+      or stop `rayhunter_daemon` first (unlinked-but-open blocks hold space until reboot; #1192).
