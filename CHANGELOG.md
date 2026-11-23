@@ -2,6 +2,21 @@
 
 ### Added
 
+- (nothing yet)
+
+## [0.5.0] - 2026-11-23
+
+First `orx` tooling release (Sprint 4.1). `orx doctor` gains `--json`, a reported Rayhunter version and documented exit codes, and a tested, dependency-free device transport layer (shell + checksummed file transfer) lands as the foundation for the backup/install/pull-logs/uninstall commands in later Phase 4 sprints. orx-cli remains zero-dependency; 23 unit tests, all device I/O behind a trait with an in-memory fake.
+
+### Added
+
+- `orx-cli` `transport` module (T-OR-033, Sprint 4.1): a `Shell` trait (run a command with an
+  exit-code marker, transfer a file) over the device's TCP-24 root shell, mirroring the proven
+  Python tools' wire protocol. The verified transfer (`send_file`) accepts a file only when the
+  device's own `sha256sum` matches the bytes sent, and rejects unsafe remote paths before
+  touching the device. A `TcpShell` real implementation and an in-memory `FakeShell` let every
+  caller be unit-tested with no hardware; the failure paths (hash mismatch, dropped write, unsafe
+  path, read timeout) and the real `TcpShell` framing are covered (23 orx-cli tests).
 - `orx-cli` `sha256` module: a std-only, streaming SHA-256 (no dependency added) for verifying
   device transfers against a device-side `sha256sum`, validated against the FIPS 180-4 known
   vectors (incl. the one-million-'a' case). Foundation for the Sprint 4.1 transport (T-OR-033).

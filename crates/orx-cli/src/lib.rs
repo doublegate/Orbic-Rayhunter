@@ -6,4 +6,5 @@
 
 pub mod probe;
 pub mod sha256;
+pub mod transport;
 pub mod usb;

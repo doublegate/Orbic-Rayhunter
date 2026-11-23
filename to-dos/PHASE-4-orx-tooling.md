@@ -23,10 +23,13 @@ Design rules for every subcommand:
       on-device: `Rayhunter 0.13.0`). Stock-UI firmware string without login is still TBD
       (on-device) -- the page load triggers the FOTA client, so it is deferred
 - [x] T-OR-032: `--json` output; documented exit codes (0 found / 1 nothing / 2 usage|host)
-- [ ] T-OR-033: shell session over the network shell (start via upstream `util orbic-start-telnet`
-      or equivalent, connect to port 24, command framing with an exit-code marker)
-- [ ] T-OR-033: checksummed file transfer (device listener, host stream, device `sha256sum` or
-      `md5sum`, atomic `mv`)
+- [x] T-OR-033: `transport::TcpShell` runs a command over the TCP-24 root shell with an
+      exit-code marker (`{ cmd ; } 2>&1; printf 'MARKER %s.' "$?"`), total-deadline bounded;
+      behind a `Shell` trait with an in-memory `FakeShell` for tests
+- [x] T-OR-033: `Shell::send_file` streams bytes to the device (`cat > remote`), then accepts
+      only if the device's `sha256sum` matches the host-side SHA-256 of what was sent; rejects
+      unsafe remote paths first. Failure paths (hash mismatch, dropped write, unsafe path,
+      timeout) unit-tested
 
 Acceptance criteria: unit tests for every PID and for transfer failure paths (short write, hash
 mismatch, timeout); doctor output on the real unit matches DEVICE-PROFILE.md.
