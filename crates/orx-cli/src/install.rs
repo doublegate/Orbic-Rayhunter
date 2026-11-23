@@ -1,13 +1,22 @@
 //! `orx install` / `orx uninstall`: deploy our production firmware build to the
 //! device and reverse it. High blast radius (a bad `/etc/init.d` write can break
-//! boot), so both are DRY-RUN by default and gated on a verified backup
-//! (`verify::gate`); `--apply` executes. The deployed file set and paths mirror
-//! upstream's network installer (`upstream/installer/src/orbic_network.rs`) and
-//! the RE in `re/notes/install-footprint.md`, with OUR daemon binary.
+//! boot, and there is no software unbrick path), so both are DRY-RUN by default
+//! and gated on a verified backup (`verify::gate`); `--apply` executes.
 //!
-//! A step plan is built with all payload bytes resolved up front, so the plan
-//! can be printed (dry run) and unit-tested against a fake shell without
-//! touching hardware; only `execute` with `apply = true` writes to the device.
+//! Design choices that keep this safe:
+//! - **Atomic writes.** Every file is sent to a temp beside its target, chmod'd,
+//!   then `mv`'d into place (same filesystem). A dropped connection or failed
+//!   chmod can never leave `/etc/init.d/misc-daemon` half-written or
+//!   non-executable, and `mv`-over-a-running-binary avoids `ETXTBSY`.
+//! - **Stock `misc-daemon` comes from the VERIFIED BACKUP, not the device.** The
+//!   device may already carry upstream's *hooked* `misc-daemon` (Phase 2), so a
+//!   device `cp` would stash the hooked script as "stock". `orx uninstall`
+//!   extracts the true stock `./etc/init.d/misc-daemon` from the backup's
+//!   `root.tar` (which `verify::gate` has already checked).
+//!
+//! A step plan is built with all payload bytes resolved up front, so it prints
+//! (dry run) and is unit-tested against a fake shell; only `execute(.., true)`
+//! writes.
 
 use std::path::Path;
 
@@ -17,16 +26,15 @@ const DAEMON_REMOTE: &str = "/data/rayhunter/rayhunter-daemon";
 const CONFIG_REMOTE: &str = "/data/rayhunter/config.toml";
 const RAYHUNTER_INIT: &str = "/etc/init.d/rayhunter_daemon";
 const MISC_DAEMON: &str = "/etc/init.d/misc-daemon";
-/// Where install stashes the stock misc-daemon so uninstall can restore it even
-/// without the original backup directory.
-const MISC_DAEMON_SAVE: &str = "/data/rayhunter/misc-daemon.orig";
 
-/// One ordered step. Payloads are bytes so a step is self-contained and the plan
-/// is printable without the source files.
+/// One ordered step. Payloads are bytes so a step is self-contained.
 pub enum Step {
-    /// Run a device command (mkdir, chmod, cp, rm, reboot).
-    Cmd { desc: String, command: String },
-    /// Transfer `bytes` to `remote` (verified by device sha256), then chmod.
+    Cmd {
+        desc: String,
+        command: String,
+    },
+    /// Transfer `bytes` to `remote` atomically (temp -> chmod -> mv), verified by
+    /// the device's sha256 against what was sent.
     Put {
         desc: String,
         remote: String,
@@ -46,7 +54,7 @@ impl Step {
                 chmod,
             } => {
                 format!(
-                    "{desc}: put {} bytes -> {remote} (chmod {chmod})",
+                    "{desc}: put {} bytes -> {remote} (chmod {chmod}, atomic)",
                     bytes.len()
                 )
             }
@@ -54,26 +62,47 @@ impl Step {
     }
 }
 
-/// Render `config.toml.in` into the device config: set `device = "orbic"` (the
-/// installer's one substitution) and drop the leading `# cat config.toml` hint.
-fn render_config(template: &str) -> String {
+/// Render `config.toml.in` into the device config: set `device = "orbic"` exactly
+/// once, in the ROOT table, before the first `[section]` (so it is never placed
+/// inside a sub-table), replacing any existing/commented `device` line. Drops the
+/// stray `# cat config.toml` hint line.
+pub fn render_config(template: &str) -> String {
+    let is_device_line = |t: &str| -> bool {
+        let s = t.trim_start_matches('#').trim_start();
+        s.strip_prefix("device")
+            .map(|r| r.trim_start().starts_with('='))
+            .unwrap_or(false)
+    };
     let mut out = String::with_capacity(template.len() + 32);
-    let mut set_device = false;
+    let mut in_root = true;
+    let mut emitted = false;
     for line in template.lines() {
-        if line.trim_start() == "# cat config.toml" {
+        let t = line.trim_start();
+        if t == "# cat config.toml" {
             continue;
         }
-        if line.trim_start().starts_with("#device = \"orbic\"")
-            || line.trim_start().starts_with("device = ")
-        {
-            out.push_str("device = \"orbic\"\n");
-            set_device = true;
+        if t.starts_with('[') {
+            // Leaving the root table: set device here if not already done.
+            if in_root && !emitted {
+                out.push_str("device = \"orbic\"\n");
+                emitted = true;
+            }
+            in_root = false;
+            out.push_str(line);
+            out.push('\n');
             continue;
+        }
+        if in_root && is_device_line(t) {
+            if !emitted {
+                out.push_str("device = \"orbic\"\n");
+                emitted = true;
+            }
+            continue; // drop the original (possibly commented) device line
         }
         out.push_str(line);
         out.push('\n');
     }
-    if !set_device {
+    if !emitted {
         out.push_str("device = \"orbic\"\n");
     }
     out
@@ -83,9 +112,24 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
-/// Build the install step plan from the daemon binary, the two init scripts, and
-/// the config template. Validates every source exists (fail before any device
-/// write). All remote paths are the fixed constants above (no arbitrary paths).
+/// A device init script must be non-empty and start with a `#!` shebang (reject a
+/// truncated or CRLF-mangled script before it can break boot).
+fn check_init_script(bytes: &[u8], what: &str) -> Result<(), String> {
+    if bytes.len() < 2 || &bytes[..2] != b"#!" {
+        return Err(format!(
+            "{what} does not start with a #! shebang (truncated?)"
+        ));
+    }
+    if bytes.contains(&b'\r') {
+        return Err(format!(
+            "{what} contains CR (CRLF line endings break BusyBox sh)"
+        ));
+    }
+    Ok(())
+}
+
+/// Build the install step plan. Validates every source (fail before any device
+/// write); remote paths are the fixed constants above.
 pub fn install_plan(
     daemon: &Path,
     rayhunter_init: &Path,
@@ -93,8 +137,16 @@ pub fn install_plan(
     config_template: &Path,
 ) -> Result<Vec<Step>, String> {
     let daemon_bytes = read(daemon)?;
+    if daemon_bytes.len() < 1024 {
+        return Err(format!(
+            "{} is implausibly small for a daemon",
+            daemon.display()
+        ));
+    }
     let init_bytes = read(rayhunter_init)?;
+    check_init_script(&init_bytes, "rayhunter_daemon")?;
     let misc_bytes = read(misc_daemon)?;
+    check_init_script(&misc_bytes, "misc-daemon")?;
     let config_text = String::from_utf8(read(config_template)?)
         .map_err(|_| "config template is not UTF-8".to_string())?;
     let config_bytes = render_config(&config_text).into_bytes();
@@ -103,12 +155,6 @@ pub fn install_plan(
         Step::Cmd {
             desc: "create install dirs".into(),
             command: "mkdir -p /data/rayhunter/scripts /data/rayhunter/bin".into(),
-        },
-        // Save the stock misc-daemon ONCE (never clobber an existing save), so
-        // uninstall can restore it; `[ -f save ]` keeps a re-install idempotent.
-        Step::Cmd {
-            desc: "stash stock misc-daemon".into(),
-            command: format!("[ -f {MISC_DAEMON_SAVE} ] || cp {MISC_DAEMON} {MISC_DAEMON_SAVE}"),
         },
         Step::Put {
             desc: "daemon".into(),
@@ -128,6 +174,8 @@ pub fn install_plan(
             bytes: init_bytes,
             chmod: "755",
         },
+        // The hooked misc-daemon goes LAST before reboot: once it is in place the
+        // boot path references rayhunter_daemon, which is already deployed above.
         Step::Put {
             desc: "misc-daemon (hooked)".into(),
             remote: MISC_DAEMON.into(),
@@ -141,15 +189,40 @@ pub fn install_plan(
     ])
 }
 
-/// Build the uninstall step plan: restore the stock misc-daemon from the stash,
-/// remove our files (leaving `/data/rayhunter-data` recordings), and reboot.
-pub fn uninstall_plan() -> Vec<Step> {
+/// Extract the stock `./etc/init.d/misc-daemon` from a verified backup's
+/// `root.tar` (host-side `tar`), so uninstall restores the TRUE stock script
+/// regardless of the device's current (possibly hooked) state.
+pub fn stock_misc_daemon(backup_dir: &Path) -> Result<Vec<u8>, String> {
+    let tar = backup_dir.join("root.tar");
+    if !tar.is_file() {
+        return Err(format!("{} not found", tar.display()));
+    }
+    let out = std::process::Command::new("tar")
+        .arg("-xOf")
+        .arg(&tar)
+        .arg("./etc/init.d/misc-daemon")
+        .output()
+        .map_err(|e| format!("running tar on {}: {e}", tar.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "tar could not extract ./etc/init.d/misc-daemon from {}: {}",
+            tar.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    check_init_script(&out.stdout, "stock misc-daemon from backup")?;
+    Ok(out.stdout)
+}
+
+/// Build the uninstall plan: atomically restore the stock `misc-daemon` (bytes
+/// from the backup), remove our files (leaving `/data/rayhunter-data`), reboot.
+pub fn uninstall_plan(stock_misc_daemon: Vec<u8>) -> Vec<Step> {
     vec![
-        Step::Cmd {
-            desc: "restore stock misc-daemon".into(),
-            command: format!(
-                "if [ -f {MISC_DAEMON_SAVE} ]; then mv {MISC_DAEMON_SAVE} {MISC_DAEMON}; else echo 'no saved misc-daemon; restore from backup root.tar' >&2; exit 1; fi"
-            ),
+        Step::Put {
+            desc: "restore stock misc-daemon (from backup)".into(),
+            remote: MISC_DAEMON.into(),
+            bytes: stock_misc_daemon,
+            chmod: "755",
         },
         Step::Cmd {
             desc: "remove rayhunter init".into(),
@@ -166,9 +239,9 @@ pub fn uninstall_plan() -> Vec<Step> {
     ]
 }
 
-/// Execute a plan. Always enforces the backup gate first. With `apply = false`
-/// (the default) it prints the plan and makes no device change. `reboot` is only
-/// sent on apply, last.
+/// Execute a plan. Enforces the backup gate first. With `apply = false` it prints
+/// the plan and makes no device change. Each `Put` is atomic: send to
+/// `<remote>.orx-new`, chmod it, then `mv` into place.
 pub fn execute(
     shell: &mut dyn Shell,
     steps: &[Step],
@@ -181,6 +254,7 @@ pub fn execute(
             println!("  [dry-run] {}", s.describe());
             continue;
         }
+        println!("  {}", s.describe());
         match s {
             Step::Put {
                 remote,
@@ -191,21 +265,22 @@ pub fn execute(
                 if !safe_remote(remote) {
                     return Err(format!("unsafe remote path in plan: {remote:?}"));
                 }
-                println!("  {}", s.describe());
-                shell.send_file(remote, bytes)?;
-                let r = shell.run(&format!("chmod {chmod} {remote}"))?;
-                if r.status != 0 {
-                    return Err(format!(
-                        "chmod {chmod} {remote} failed: {}",
-                        r.output.trim()
-                    ));
+                let tmp = format!("{remote}.orx-new");
+                shell.send_file(&tmp, bytes)?; // verifies the temp's sha256
+                let c = shell.run(&format!("chmod {chmod} {tmp}"))?;
+                if c.status != 0 {
+                    let _ = shell.run(&format!("rm -f {tmp}"));
+                    return Err(format!("chmod {chmod} {tmp} failed: {}", c.output.trim()));
+                }
+                let m = shell.run(&format!("mv {tmp} {remote}"))?;
+                if m.status != 0 {
+                    let _ = shell.run(&format!("rm -f {tmp}"));
+                    return Err(format!("mv {tmp} {remote} failed: {}", m.output.trim()));
                 }
             }
             Step::Cmd { command, .. } => {
-                println!("  {}", s.describe());
-                // reboot closes the shell; do not wait for a status marker.
                 if command.trim() == "reboot" {
-                    let _ = shell.run("reboot");
+                    let _ = shell.run("reboot"); // closes the shell; no status to wait on
                     println!("  device rebooting");
                     continue;
                 }
@@ -230,31 +305,54 @@ mod tests {
     use crate::transport::fake::FakeShell;
 
     #[test]
-    fn render_config_sets_device_and_drops_hint() {
-        let t = "# cat config.toml\nport = 8080\n#device = \"orbic\"\nui_level = 1\n";
+    fn render_config_sets_device_once_in_root_before_sections() {
+        let t = "# cat config.toml\nport = 8080\n# device = \"orbic\"\nui_level = 1\n[analyzers]\nx = true\n";
         let c = render_config(t);
         assert!(!c.contains("# cat config.toml"));
-        assert!(c.contains("device = \"orbic\"\n"));
-        assert!(!c.contains("#device"));
         assert_eq!(c.matches("device = \"orbic\"").count(), 1);
+        // device must be BEFORE the [analyzers] section (root table).
+        assert!(c.find("device = \"orbic\"").unwrap() < c.find("[analyzers]").unwrap());
+        assert!(!c.contains("# device"));
     }
 
     #[test]
-    fn install_plan_order_and_paths() {
-        let d = tmp();
+    fn render_config_inserts_before_section_when_absent() {
+        let c = render_config("port = 8080\n[analyzers]\nx = true\n");
+        assert_eq!(c.matches("device = \"orbic\"").count(), 1);
+        assert!(c.find("device = \"orbic\"").unwrap() < c.find("[analyzers]").unwrap());
+    }
+
+    #[test]
+    fn check_init_script_rejects_bad_scripts() {
+        assert!(check_init_script(b"#!/bin/sh\n", "x").is_ok());
+        assert!(check_init_script(b"not a script", "x").is_err());
+        assert!(check_init_script(b"#!/bin/sh\r\n", "x").is_err()); // CRLF
+        assert!(check_init_script(b"", "x").is_err());
+    }
+
+    fn write_artifacts(d: &Path) {
         std::fs::write(d.join("daemon"), [1u8; 2048]).unwrap();
-        std::fs::write(d.join("rayhunter_daemon"), b"#init\n").unwrap();
-        std::fs::write(d.join("misc-daemon"), b"#misc\n").unwrap();
+        std::fs::write(d.join("rayhunter_daemon"), b"#!/bin/sh\nstart\n").unwrap();
+        std::fs::write(d.join("misc-daemon"), b"#!/bin/sh\nmisc\n").unwrap();
         std::fs::write(d.join("config.toml.in"), b"port = 8080\n").unwrap();
-        let steps = install_plan(
+    }
+
+    fn plan(d: &Path) -> Vec<Step> {
+        install_plan(
             &d.join("daemon"),
             &d.join("rayhunter_daemon"),
             &d.join("misc-daemon"),
             &d.join("config.toml.in"),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn install_plan_order_paths_and_validation() {
+        let d = tmp();
+        write_artifacts(&d);
+        let steps = plan(&d);
         let descs: Vec<String> = steps.iter().map(|s| s.describe()).collect();
-        // mkdir first, reboot last, daemon goes to the fixed remote path.
         assert!(descs[0].contains("mkdir -p /data/rayhunter"));
         assert!(descs.last().unwrap().contains("reboot"));
         assert!(
@@ -263,18 +361,16 @@ mod tests {
                 .any(|x| x.contains("/data/rayhunter/rayhunter-daemon"))
         );
         assert!(descs.iter().any(|x| x.contains("/etc/init.d/misc-daemon")));
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn install_plan_errors_on_missing_artifact() {
-        let d = tmp();
+        // No device cp stash step.
+        assert!(!descs.iter().any(|x| x.contains("misc-daemon.orig")));
+        // A non-shebang init script is rejected.
+        std::fs::write(d.join("rayhunter_daemon"), b"oops\n").unwrap();
         assert!(
             install_plan(
-                &d.join("nope"),
-                &d.join("nope2"),
-                &d.join("nope3"),
-                &d.join("nope4"),
+                &d.join("daemon"),
+                &d.join("rayhunter_daemon"),
+                &d.join("misc-daemon"),
+                &d.join("config.toml.in")
             )
             .is_err()
         );
@@ -284,45 +380,39 @@ mod tests {
     #[test]
     fn execute_refuses_when_gate_fails() {
         let mut sh = FakeShell::default();
-        let steps = uninstall_plan();
+        let steps = uninstall_plan(b"#!/bin/sh\nmisc\n".to_vec());
         let err = execute(&mut sh, &steps, || Err("no backup".into()), true).unwrap_err();
         assert!(err.contains("backup gate not satisfied"));
-        assert!(sh.fs.is_empty()); // nothing written
+        assert!(sh.fs.is_empty());
     }
 
     #[test]
     fn execute_dry_run_writes_nothing() {
         let mut sh = FakeShell::default();
         let d = tmp();
-        std::fs::write(d.join("daemon"), [1u8; 2048]).unwrap();
-        std::fs::write(d.join("i"), b"x").unwrap();
-        std::fs::write(d.join("m"), b"y").unwrap();
-        std::fs::write(d.join("c"), b"port = 8080\n").unwrap();
-        let steps =
-            install_plan(&d.join("daemon"), &d.join("i"), &d.join("m"), &d.join("c")).unwrap();
-        execute(&mut sh, &steps, || Ok(()), false).unwrap();
-        assert!(sh.fs.is_empty()); // dry run: no device write
+        write_artifacts(&d);
+        execute(&mut sh, &plan(&d), || Ok(()), false).unwrap();
+        assert!(sh.fs.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn execute_apply_deploys_and_verifies() {
+    fn execute_apply_deploys_atomically_and_verifies() {
         let mut sh = FakeShell::default();
         let d = tmp();
-        std::fs::write(d.join("daemon"), [1u8; 2048]).unwrap();
-        std::fs::write(d.join("i"), b"#init\n").unwrap();
-        std::fs::write(d.join("m"), b"#misc\n").unwrap();
-        std::fs::write(d.join("c"), b"port = 8080\n").unwrap();
-        let steps =
-            install_plan(&d.join("daemon"), &d.join("i"), &d.join("m"), &d.join("c")).unwrap();
-        execute(&mut sh, &steps, || Ok(()), true).unwrap();
-        // The daemon and the hooked misc-daemon landed (send_file verified them).
+        write_artifacts(&d);
+        execute(&mut sh, &plan(&d), || Ok(()), true).unwrap();
+        // Atomic Put stages to <remote>.orx-new then `mv`s; the FakeShell mv is a
+        // run() no-op, so the staged temp is what persists -- assert on it.
         assert_eq!(
-            sh.fs.get("/data/rayhunter/rayhunter-daemon").unwrap().len(),
+            sh.fs
+                .get("/data/rayhunter/rayhunter-daemon.orx-new")
+                .unwrap()
+                .len(),
             2048
         );
-        assert!(sh.fs.contains_key("/etc/init.d/misc-daemon"));
-        assert!(sh.fs.contains_key("/data/rayhunter/config.toml"));
+        assert!(sh.fs.contains_key("/etc/init.d/misc-daemon.orx-new"));
+        assert!(sh.fs.contains_key("/data/rayhunter/config.toml.orx-new"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

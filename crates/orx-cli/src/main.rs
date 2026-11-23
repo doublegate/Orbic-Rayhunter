@@ -283,7 +283,22 @@ fn cmd_install(backup: &Path, dist: &Path, daemon: &Path, ip: &str, apply: bool)
 /// `orx uninstall`: reverse the install (restore stock misc-daemon, remove our
 /// files), dry-run unless --apply.
 fn cmd_uninstall(backup: &Path, ip: &str, apply: bool) -> ExitCode {
-    run_plan(&install::uninstall_plan(), backup, ip, apply, "uninstall")
+    // The true stock misc-daemon comes from the verified backup, not the device
+    // (which may carry the hooked script).
+    let stock = match install::stock_misc_daemon(backup) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    run_plan(
+        &install::uninstall_plan(stock),
+        backup,
+        ip,
+        apply,
+        "uninstall",
+    )
 }
 
 fn run_plan(steps: &[install::Step], backup: &Path, ip: &str, apply: bool, what: &str) -> ExitCode {

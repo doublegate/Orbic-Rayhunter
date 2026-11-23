@@ -10,12 +10,18 @@ Adds `orx install` and `orx uninstall` -- the device-write operations that compl
 
 ### Added
 
-- `orx install --dir <backup> [--dist <d>] [--daemon <f>] [--apply]` (T-OR-036/T-OR-039): deploys
-  the daemon + rendered `config.toml` + `rayhunter_daemon` init + the hooked `misc-daemon`, chmods
-  them, and reboots -- the same footprint as the upstream installer, with our build. Dry-run unless
-  `--apply`; always backup-gated; each transfer is SHA-256-verified by the device.
-- `orx uninstall --dir <backup> [--apply]` (T-OR-041): restores the stock `misc-daemon` from the
-  stash `orx install` saved and removes our files; dry-run unless `--apply`; backup-gated.
+- `orx install --dir <backup> [--dist <d>] [--daemon <f>] [--apply]` (T-OR-036): deploys the daemon
+  + rendered `config.toml` (device = orbic, robustly set in the root table) + `rayhunter_daemon`
+  init + the hooked `misc-daemon`, and reboots -- the upstream network-installer footprint with our
+  build. Dry-run unless `--apply`; always backup-gated. Every file is written ATOMICALLY (send to
+  `<path>.orx-new`, which the device re-hashes, then `chmod` + `mv`), so a dropped connection or
+  failed chmod can never leave a half-written/non-executable init script, and `mv`-over-a-running
+  binary avoids `ETXTBSY`. The daemon and init scripts are validated first (non-empty; `#!` shebang;
+  no CRLF).
+- `orx uninstall --dir <backup> [--apply]` (T-OR-039): restores the TRUE stock `misc-daemon`
+  extracted from the verified backup's `root.tar` (NOT copied from the device, which may already
+  carry the hooked script), atomically, then removes our files (leaving `/data/rayhunter-data`
+  recordings); dry-run unless `--apply`; backup-gated.
 
 ## [0.7.0] - 2026-11-23
 

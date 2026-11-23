@@ -213,8 +213,8 @@ Rayhunter's own `auto_check_updates` only queries GitHub releases and is unrelat
 
 | Failure | Recoverable? | Path |
 |---|---|---|
-| Rayhunter files in `/data/rayhunter*`, `/etc/init.d/rayhunter_daemon` | yes | network shell, `rm`, reboot ([INSTALL.md](INSTALL.md) uninstall) |
-| Replaced `/etc/init.d/misc-daemon` | yes, while a shell works | push the backed-up stock file, compare SHA-256, reboot |
+| Rayhunter files in `/data/rayhunter*`, `/etc/init.d/rayhunter_daemon` | yes | `orx uninstall --dir <backup> --apply` (v0.8.0), or network shell + `rm` + reboot ([INSTALL.md](INSTALL.md) uninstall) |
+| Replaced `/etc/init.d/misc-daemon` | yes, while a shell works | `orx uninstall` restores the TRUE stock file from this backup's `root.tar` (`tar -xOf ... ./etc/init.d/misc-daemon`), atomically; or push the backed-up stock file, compare SHA-256, reboot |
 | `/data` full, daemon and AP down (#1192) | yes if any shell is reachable; the reported recovery used `/bin/rootshell` over ADB | `orx rescue` (T-OR-041); prevent with free-space thresholds and retention ([CONFIGURATION.md](CONFIGURATION.md)) |
 | USB composition changed (`mode.cfg`) | yes, while a shell works | restore the backed-up `mode.cfg`, reboot |
 | AP lost after enabling Wi-Fi client mode (#1033, reported on V1.2.0) | yes if ADB or the RNDIS link still reaches the device | `adb -s <serial> forward tcp:8080 tcp:8080`, disable client mode; keep `wifi_enabled = false` |
