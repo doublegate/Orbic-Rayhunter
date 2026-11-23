@@ -7,15 +7,20 @@ relationship to the upstream release binary is measured. Tickets T-OR-026..T-OR-
 
 ## Sprint 3.1: Reproducibility
 
-- [ ] T-OR-026: `scripts/build.sh firmware` with an empty series (needs the arm-linux-musleabihf
-      cross compiler or the `messense/rust-musl-cross:armv7-musleabihf` container)
-- [ ] T-OR-026: extract the daemon embedded in the upstream v0.13.0 installer release (or the
-      on-device binary from Phase 2 via its recorded hash) for comparison
-- [ ] T-OR-026: compare size, section table and bytes; record results and the explanation of
-      every difference in [docs/PERFORMANCE.md](../docs/PERFORMANCE.md) (build artifacts table)
+- [x] T-OR-026/T-OR-030: `scripts/build.sh firmware` with the empty series, in the
+      `messense/rust-musl-cross:armv7-musleabihf` container (2026-11-23). build.sh now runs the
+      cargo build in that container, so no host cross toolchain is needed
+- [x] T-OR-026: compared to the upstream v0.13.0 release daemon (from the release zip's
+      `rayhunter-daemon/` folder)
+- [x] T-OR-026/T-OR-030: result recorded in [re/notes/reproducible-build.md](../re/notes/reproducible-build.md)
+      and [docs/BUILD.md](../docs/BUILD.md) -- within 384 bytes of upstream, same
+      profile/toolchain/lockfile/pq-tls; not bit-identical (embedded build paths differ;
+      `--remap-path-prefix` is the upstreamable follow-up)
+- [x] T-OR-031: `release.yml` now ships the production `firmware` daemon (was `firmware-devel`),
+      so `orx-cli install` / the v1.0.0 install deploys our production build
 
 Acceptance criteria: comparison recorded with commands; byte identity achieved or each source of
-difference identified.
+difference identified. MET (difference identified: embedded build paths).
 
 Verification:
 

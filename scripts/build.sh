@@ -2,9 +2,12 @@
 # Build the patched Rayhunter daemon (and rootshell) for the Orbic (armv7 musl).
 #
 # Usage: scripts/build.sh [devel|firmware]
-#   devel    (default) upstream "firmware-devel" profile; needs only rustup + npm
-#   firmware upstream "firmware" profile with pq-tls; needs an
-#            arm-linux-musleabihf cross toolchain (see docs/BUILD.md)
+#   devel    (default) "firmware-devel" profile, rustcrypto TLS backend. Pure Rust,
+#            needs only rustup + npm. Fast to iterate; larger, unstripped binary.
+#   firmware production "firmware" profile with post-quantum TLS, matching the
+#            upstream release build. Built inside the messense/rust-musl-cross
+#            container (the same one upstream uses) for a reproducible result;
+#            needs docker (or podman) + npm. See docs/BUILD.md.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,16 +24,33 @@ rustup target add "$target"
 npm install
 npm run build -w daemon/web
 
+mkdir -p "$root/dist"
+
 case "$profile" in
     devel)
         cargo build-daemon-firmware-devel
         cargo build-rootshell-firmware-devel
         out="target/$target/firmware-devel"
+        cp "$out/rayhunter-daemon" "$out/rootshell" "$root/dist/"
         ;;
     firmware)
-        cargo build-daemon-firmware
-        cargo build-rootshell-firmware
-        out="target/$target/firmware"
+        # Reproducible production build in the same cross container upstream uses
+        # (post-quantum TLS needs an arm-linux-musleabihf C toolchain). The web UI
+        # is already built on the host above; the container only runs cargo. The
+        # target dir is a scratch path OUTSIDE the tree so the container's
+        # root-owned artifacts never land in build/rayhunter.
+        engine="$(command -v docker || command -v podman || true)"
+        if [ -z "$engine" ]; then
+            echo "error: firmware profile needs docker or podman (see docs/BUILD.md)" >&2
+            exit 3
+        fi
+        tgt="$(mktemp -d "${TMPDIR:-/tmp}/orx-firmware.XXXXXX")"
+        "$engine" run --rm \
+            -v "$tree":/work -v "$tgt":/target -e CARGO_TARGET_DIR=/target -w /work \
+            messense/rust-musl-cross:armv7-musleabihf \
+            bash -lc 'rustup target add armv7-unknown-linux-musleabihf >/dev/null 2>&1; cargo build-daemon-firmware && cargo build-rootshell-firmware'
+        out="$tgt/$target/firmware"
+        cp "$out/rayhunter-daemon" "$out/rootshell" "$root/dist/"
         ;;
     *)
         echo "error: unknown profile '$profile' (expected devel|firmware)" >&2
@@ -38,8 +58,6 @@ case "$profile" in
         ;;
 esac
 
-mkdir -p "$root/dist"
-cp "$out/rayhunter-daemon" "$out/rootshell" "$root/dist/"
 (cd "$root/dist" && sha256sum rayhunter-daemon rootshell > SHA256SUMS)
 echo "artifacts in $root/dist:"
 cat "$root/dist/SHA256SUMS"

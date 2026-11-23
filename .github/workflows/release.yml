@@ -62,8 +62,13 @@ jobs:
           save-if: false
       - name: Build orx (host, x86_64 linux)
         run: cargo build --release --locked -p orx-cli
-      - name: Build patched daemon + rootshell
-        run: scripts/build.sh devel
+      - name: Build patched daemon + rootshell (production firmware profile)
+        # Ship the production `firmware` profile (pq-tls, stripped, opt-level z,
+        # fat LTO) -- the device binary, ~6.1 MB -- not the dev build. Built in the
+        # messense/rust-musl-cross container (same as upstream) for reproducibility;
+        # ubuntu-24.04 runners have docker. See docs/BUILD.md and
+        # re/notes/reproducible-build.md.
+        run: scripts/build.sh firmware
       - name: Stage assets
         run: |
           cp target/release/orx dist/orx-x86_64-linux
@@ -109,7 +114,10 @@ jobs:
             echo "- Tagged commit: \`${GITHUB_SHA:-$TAG}\`"
             echo "- Upstream pin: EFForg/rayhunter \`$upstream_tag\` (\`$upstream_sha\`)"
             echo "- Rust toolchain: \`${toolchain:-see rust-toolchain.toml}\`"
-            echo "- Built reproducibly by \`.github/workflows/release.yml\` on ubuntu-24.04."
+            echo "- Daemon profile: \`firmware\` (pq-tls, stripped, opt-level z, fat LTO), built in"
+            echo "  \`messense/rust-musl-cross:armv7-musleabihf\` -- reproduces the upstream release"
+            echo "  daemon to within a few hundred bytes (see \`re/notes/reproducible-build.md\`)."
+            echo "- Built by \`.github/workflows/release.yml\` on ubuntu-24.04."
             echo
             echo "## Pointers"
             echo

@@ -4,6 +4,26 @@
 
 - (nothing yet)
 
+## [0.4.0] - 2026-11-23
+
+Makes our build produce the **production** daemon and records the reproducibility result. `release.yml` now ships the `firmware`-profile daemon (pq-tls, stripped, opt-level z, fat LTO -- ~6.1 MB), the device binary, instead of the `firmware-devel` build (~16 MB) that v0.1.0-v0.3.0 shipped. `scripts/build.sh firmware` builds it reproducibly in the same `messense/rust-musl-cross` container upstream uses, so it needs only docker/podman + npm, no host cross toolchain. Measured: our build reproduces the upstream release daemon to within 384 bytes (same profile/toolchain/lockfile/pq-tls); not bit-identical (embedded build paths differ).
+
+### Changed
+
+- `release.yml` builds and ships the production `firmware` daemon + rootshell (was
+  `firmware-devel`). The release notes' build-provenance section now records the daemon profile
+  and the reproducibility result.
+- `scripts/build.sh firmware` now runs the cargo build inside the
+  `messense/rust-musl-cross:armv7-musleabihf` container (no host `arm-linux-musleabihf` cross
+  toolchain required); the web UI is still built on the host. The target dir is a scratch path
+  outside the tree so the container's root-owned artifacts never land in `build/rayhunter`.
+
+### Added
+
+- `re/notes/reproducible-build.md` (T-OR-030): method, hashes and interpretation of the
+  our-build-vs-upstream-release daemon comparison. `docs/BUILD.md` reproducibility section
+  updated to match.
+
 ## [0.3.0] - 2026-11-23
 
 Installs stock upstream Rayhunter v0.13.0 on the device and validates the end-to-end capture path. The network installer deploys the daemon, config, `rayhunter_daemon` init and the hooked `misc-daemon` exactly as the install-footprint RE predicted; after a reboot the daemon records and the Phase 1 OTA block persists. Validated on the inactive built-in SIM without an active plan -- `rayhunter-check` analyzes a live capture clean, confirming capture + offline analysis work on this unit. Upstream pin: EFForg/rayhunter `v0.13.0` (`cd462a1`). The install is the reversible footprint from Phase 1's RE; the Phase 1 backup is the rollback.
