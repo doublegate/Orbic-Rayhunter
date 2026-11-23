@@ -111,6 +111,29 @@ host being online.
   exactly the 12 allowlisted variables present on the host. `agy-review-selftest.sh`
   asserts all of this. `AGY_DIFF_MODE` is back to the template default (`auto`), so large diffs
   are reviewed whole again.
+- Jail (`AGY_ISOLATION=bwrap`, default): agy's own `--sandbox` was verified not to confine
+  reads, and agy otherwise loads the host's MCP servers, skills and hooks. So agy runs in a
+  bubblewrap jail with an empty private `HOME`, read-only `/usr` and `/etc`, and only the review
+  sandbox writable. Its D-Bus is an `xdg-dbus-proxy` (`--filter`) that allows `GetSecret` only
+  on agy's own Secret Service item; the item is resolved outside the jail from
+  `AGY_KEYRING_ATTRS`, and an empty attribute set is refused.
+- Egress (`AGY_EGRESS=filtered`, default): the jail has no network of its own. Its only route
+  out is an HTTPS `CONNECT` proxy outside the jail that accepts port 443 of exact
+  `AGY_EGRESS_ALLOW` hosts only, with no wildcards. Google's front end routes by the `Host`
+  header on any googleapis connection, so the proxy terminates TLS for **every** allowed host
+  with a per-run CA (key kept outside the jail). It carries one HTTP/1.1 request per connection
+  and rebuilds it with its own `Host` header, forwarding the body exactly once. A host in
+  `AGY_EGRESS_PATH_RULES` (default `www.googleapis.com=/oauth2/v2/userinfo`, because that host
+  also serves the Cloud Storage API) accepts only a body-less `GET` of exactly that path. The job
+  log shows egress verdict counts only. Denied host names go to
+  `~/.gemini/antigravity-cli/agy-egress-denied.log` on the runner host (mode 600); after an
+  agy update starts failing reviews, look there and add the needed host to `AGY_EGRESS_ALLOW`.
+- Fail closed: a runner host without `bwrap`, `xdg-dbus-proxy`, `gdbus`, `socat`, `python3`
+  (3.11 or later), `openssl` or a system CA bundle, without a user session, or with no matching
+  keyring item refuses to run agy. A jail that fails to start ends the run with nothing posted.
+  Credential-shaped strings in agy's output are redacted to `[REDACTED: <kind>]` and the comment
+  says so; only a match that redaction cannot remove stops the post. A credential-shaped stderr
+  tail is withheld from the job log.
 - The template's first-install bootstrap steps were removed before the reviewer reached `main` (it
   bootstrapped itself once on PR #1):
   they check out PR-head code in the job and trip CodeQL's `actions/untrusted-checkout` (high).
