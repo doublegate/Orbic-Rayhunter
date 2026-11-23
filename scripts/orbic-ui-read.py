@@ -50,11 +50,43 @@ READ_ENDPOINTS = {
 # Named explicitly so that a future edit cannot add it by accident.
 REFUSED = {"FotaGetVersionInfo": "asks the device to check for an OTA update"}
 
+# Long, unambiguous tokens matched as a substring anywhere in the key.
 SENSITIVE = re.compile(
-    r"imei|iccid|mdn|meid|imsi|msisdn|mac|bssid|serial|\bsn\b|esn|passw|pwd|key|token|"
-    r"secret|ssid|phone|apn|\bpin\b|\bpuk\b|\bip\b|ipv4|ipv6|addr|gateway|dns",
+    r"imei|iccid|mdn|meid|imsi|msisdn|bssid|serial|esn|passw|pwd|secret|token|"
+    r"apn|gateway",
     re.IGNORECASE,
 )
+# Short, ambiguous tokens (`ip` is in "script"/"description", `sn` in "dns") are
+# matched only as whole WORDS after splitting the key on camelCase, snake_case and
+# digit boundaries -- so `wanIp`/`sim_pin`/`mac_addr` match but `description` does
+# not.
+_SENSITIVE_WORDS = {
+    "sn",
+    "mac",
+    "key",
+    "ssid",
+    "phone",
+    "pin",
+    "puk",
+    "ip",
+    "ipv4",
+    "ipv6",
+    "addr",
+    "address",
+    "dns",
+    "meid",
+    "esn",
+}
+_KEY_SPLIT = re.compile(
+    r"[_\-\s]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])"
+)
+
+
+def _key_is_sensitive(key: str) -> bool:
+    if SENSITIVE.search(key):
+        return True
+    return any(p.lower() in _SENSITIVE_WORDS for p in _KEY_SPLIT.split(key) if p)
+
 
 DEFAULT_PASSWORD_FILE = Path.home() / ".claude-secrets" / "orbic-admin.txt"
 
@@ -146,11 +178,14 @@ def selftest() -> int:
             "meid": 490154203237518,  # integer identifier under a sensitive key
             "ports": 8080,  # short integer, kept
             "clients": ["02:00:00:00:00:01", "ok"],  # MAC inside a list, innocuous key
-            "wanIp": "100.72.14.9",  # IPv4 value
+            "wanIp": "100.72.14.9",  # IPv4 value, camelCase key
             "apn": "vzwinternet",  # sensitive key
             "phone": "+1-555-123-4567",  # formatted phone
+            "simPin": "1234",  # short value, camelCase sensitive key
+            "lanIpv6": "2001:db8::1",  # compressed IPv6
             "hwVer": "V1.1",  # kept
             "upTime": "12:34:56",  # kept (not an identifier)
+            "description": "a script to zip",  # kept (no sensitive word boundary)
         }
     )
     assert isinstance(red, dict)
@@ -167,8 +202,11 @@ def selftest() -> int:
         red["wanIp"].startswith("<redacted"),
         red["apn"].startswith("<redacted"),
         red["phone"].startswith("<redacted"),
+        red["simPin"].startswith("<redacted"),
+        red["lanIpv6"].startswith("<redacted"),
         red["hwVer"] == "V1.1",
         red["upTime"] == "12:34:56",
+        red["description"] == "a script to zip",
     ]
     if not all(checks):
         print(f"  FAIL  safe_view redaction: {red}")
@@ -265,7 +303,8 @@ IDENTIFIER_VALUE = re.compile(
     r"\d{10,}"  # IMEI/ICCID/MDN/MEID and other long digit runs
     r"|([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"  # MAC/BSSID
     r"|\b\d{1,3}(\.\d{1,3}){3}\b"  # IPv4
-    r"|([0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{0,4}"  # IPv6 (>= 4 colon groups)
+    r"|[0-9A-Fa-f]{0,4}::[0-9A-Fa-f:]*"  # compressed IPv6 (fe80::1, 2001:db8::1)
+    r"|([0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{1,4}"  # full IPv6 (>= 4 colon groups)
     r"|\+\d[\d -]{6,}\d"  # international phone (+1-555-123-4567)
     r"|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"  # NANP phone (555-123-4567)
     r"|\b[0-9A-Fa-f]{8,}\b"  # 8+ hex: serial/ESN/hash
@@ -298,7 +337,7 @@ def safe_view(obj: object, key_sensitive: bool = False) -> object:
     container."""
     if isinstance(obj, dict):
         return {
-            k: safe_view(v, key_sensitive or SENSITIVE.search(k) is not None)
+            k: safe_view(v, key_sensitive or _key_is_sensitive(k))
             for k, v in obj.items()
         }
     if isinstance(obj, list):

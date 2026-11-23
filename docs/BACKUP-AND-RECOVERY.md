@@ -73,14 +73,19 @@ backed-up `goahead` binary (T-OR-020).
 ### 2. Record the layout
 
 Capture the layout to `layout/*.txt` in the backup directory with the read-only driver (it
-refuses any writer, so nothing touches flash):
+refuses any writer, so nothing touches flash). Use `--out-dir`, not a `>` redirect: the tool
+creates each transcript mode 0600 (the recon captures `/proc/cmdline` with the device serial and
+`/etc/passwd`), whereas a shell redirect would create a world-readable file:
 
 ```sh
-scripts/orbic-shell.py --script scripts/recon/phase1-inventory.sh > backups/<date>-V1.2.0/layout/inventory.txt
-scripts/orbic-shell.py --command 'cat /proc/mounts' > backups/<date>-V1.2.0/layout/010-cat-proc-mounts.txt
+mkdir -p backups/<date>-V1.2.0/layout
+scripts/orbic-shell.py --script scripts/recon/phase1-inventory.sh --out-dir backups/<date>-V1.2.0/layout
+scripts/orbic-shell.py --command 'cat /proc/mounts' --out-dir backups/<date>-V1.2.0/layout
 ```
 
-`/proc/mounts` is the input the backup tool needs. This unit's writable `ubifs` volumes are `/`
+The second invocation writes `001-cat-proc-mounts.txt`; pass that file to the backup tool's
+`--proc-mounts` (its `$ ...` / `# exit=` transcript lines are not mount entries, so the mount
+parser ignores them). This unit's writable `ubifs` volumes are `/`
 (rootfs), `/data` (usrfs, the install target), `/usrdata`, `/cache`; `/firmware` is read-only
 modem data. The 17 raw MTD partitions are recorded in `/proc/mtd` for reference, but are not
 imaged (see the note on raw images below).

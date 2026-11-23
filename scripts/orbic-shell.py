@@ -115,8 +115,10 @@ READ_COMMANDS = {
 # Command substitution and escapes: `$(...)`, backticks, and a backslash. Even
 # with an allowlisted program, a substituted argument -- `cat $(reboot)`,
 # `ls \`nandwrite ...\`` -- runs arbitrary code; a backslash can also confuse the
-# lexer. Refused outright; recon never needs them.
-_INJECTION = re.compile(r"\$\(|`|\\")
+# lexer. A bare `$` is also refused: parameter expansion like `${x:=-c}` / `$x`
+# would let an expanded value (`dmesg $x` -> `dmesg -c`) slip past the per-command
+# flag checks. Recon uses no shell variables, command substitution or escapes.
+_INJECTION = re.compile(r"[$`\\]")
 # A program token must be a bare name or live under a trusted system bin dir --
 # never a `VAR=val` prefix, an `env`/`exec`/`nice`/`time` wrapper (which would run
 # the next word, defeating the allowlist and, for `LD_PRELOAD=...`/`exec`, injecting
@@ -132,7 +134,11 @@ _TRUSTED_PROG = re.compile(
 # a quoted argument such as `fota|update`, which also has letters. The rule below
 # rejects any all-operator token that is not an exact recognized operator.
 _OP_CHARS = frozenset("();<>|&{}")
-_CMD_SEP = {"|", "||", "&&", ";", "&", "|&", ";;"}
+# `&` (background), `;;` and `|&` are intentionally NOT recognized operators: they
+# are all-operator-char tokens, so the top-level check rejects them. `&` would
+# background a process past run_one's `exit`, and `;;`/`|&` alter how run_one
+# chains the trailing marker/status.
+_CMD_SEP = {"|", "||", "&&", ";"}
 _OUT_FILE = {">", ">>", ">|", "&>", "&>>"}  # target must be /dev/null
 _DUP = {">&", "<&"}  # target: a bare fd (2>&1) or /dev/null
 _IN = {"<", "<<", "<<<"}  # input redirect (only plain `<` to a filename is allowed)
@@ -148,12 +154,18 @@ def _split_simple(tokens: list[str]) -> list[list[str]] | None:
     simples: list[list[str]] = []
     cur: list[str] = []
     i, n = 0, len(tokens)
+    ended_on_sep = False
     while i < n:
         t = tokens[i]
         if t in _CMD_SEP:
-            if cur:
-                simples.append(cur)
-                cur = []
+            # An empty segment -- a leading separator (`; cat`), a doubled one
+            # (`a ;; b` once `;;` is split) or a trailing one (`cat |`) -- would
+            # desync run_one's marker chaining, so fail closed.
+            if not cur:
+                return None
+            simples.append(cur)
+            cur = []
+            ended_on_sep = True
             i += 1
         elif t in _OUT_FILE:
             if (tokens[i + 1] if i + 1 < n else "") != "/dev/null":
@@ -176,9 +188,12 @@ def _split_simple(tokens: list[str]) -> list[list[str]] | None:
             i += 2
         else:
             cur.append(t)
+            ended_on_sep = False
             i += 1
     if cur:
         simples.append(cur)
+    elif ended_on_sep:
+        return None  # a trailing separator (`cat /proc/mtd |`) leaves no command
     return simples
 
 
@@ -391,6 +406,14 @@ def selftest() -> int:
         # dmesg console-state flags beyond clear
         "dmesg -n 1",
         "dmesg -D",
+        # parameter expansion would smuggle a flag past the per-command checks
+        "true ${x:=-c}; dmesg $x",
+        "dmesg $x",
+        # backgrounding and empty/trailing segments desync run_one framing
+        "cat /proc/mtd &",
+        "cat /proc/mtd |",
+        "; cat /proc/mtd",
+        "cat a ;; cat b",
         # busybox applet bypasses (validated by recursing on the applet)
         "busybox sort -o /etc/passwd /proc/mtd",
         "busybox busybox rm -rf /",
