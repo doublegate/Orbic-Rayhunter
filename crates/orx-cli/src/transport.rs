@@ -147,11 +147,18 @@ pub trait Shell {
 pub struct TcpShell {
     pub addr: SocketAddr,
     pub timeout: Duration,
+    /// Port the one-shot `put` data listener binds on the device (8081, as the
+    /// upstream installer uses). Overridable for loopback tests.
+    pub data_port: u16,
 }
 
 impl TcpShell {
     pub fn new(addr: SocketAddr, timeout: Duration) -> Self {
-        Self { addr, timeout }
+        Self {
+            addr,
+            timeout,
+            data_port: 8081,
+        }
     }
 
     fn connect(&self) -> Result<TcpStream, String> {
@@ -283,31 +290,58 @@ impl Shell for TcpShell {
         if !safe_remote(remote) {
             return Err(format!("unsafe remote path: {remote:?}"));
         }
-        let mut stream = self.connect()?;
-        // `cat > remote` then stream bytes; closing the write half is EOF to cat.
-        stream
-            .write_all(format!("cat > {remote}\n").as_bytes())
-            .map_err(|e| format!("write cmd: {e}"))?;
-        stream
-            .write_all(bytes)
+        // The control channel is `nc -ll -e /bin/sh`; streaming a bulk payload
+        // through `cat > file` is LOSSY -- the device nc drops bytes when its
+        // pipe to the shell backs up (verified: a 4 KiB payload arrived as
+        // ~3 KiB, independent of encoding). Instead use a one-shot device-side
+        // listener (upstream's installer mechanism): the data path is
+        // socket -> file with no shell pipe in it, which is lossless. send_file
+        // still verifies the device-side sha256 afterward, so any residual race
+        // (stale listener, port in use) fails closed rather than writing garbage.
+        let data_port = self.data_port;
+        let data_addr = SocketAddr::new(self.addr.ip(), data_port);
+        let marker = make_marker();
+        let mut ctl = self.connect()?;
+        // Start the listener; report its exit status after the transfer, in the
+        // same framing run() uses.
+        ctl.write_all(
+            format!("nc -l -p {data_port} > {remote}; printf '{marker} %s.' \"$?\"\n").as_bytes(),
+        )
+        .map_err(|e| format!("start device listener: {e}"))?;
+        // The listener needs a moment to bind; retry the data connect briefly.
+        let connect_deadline = Instant::now() + Duration::from_secs(5);
+        let mut data = loop {
+            match TcpStream::connect_timeout(&data_addr, Duration::from_secs(1)) {
+                Ok(s) => break s,
+                Err(e) => {
+                    if Instant::now() >= connect_deadline {
+                        return Err(format!("connect to device data port {data_port}: {e}"));
+                    }
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+        };
+        data.set_write_timeout(Some(self.timeout)).ok();
+        data.write_all(bytes)
             .map_err(|e| format!("write data: {e}"))?;
-        stream
-            .shutdown(Shutdown::Write)
-            .map_err(|e| format!("shutdown: {e}"))?;
-        // Drain until the device closes, bounded by the timeout, so the write lands.
+        data.shutdown(Shutdown::Write)
+            .map_err(|e| format!("data shutdown: {e}"))?;
+        drop(data); // EOF -> device nc writes the file and exits
+        // Wait for the control shell to report the listener finished.
         let deadline = Instant::now() + self.timeout;
-        let mut sink = [0u8; 4096];
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            stream.set_read_timeout(Some(remaining)).ok();
-            match stream.read(&mut sink) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => break,
-            }
+        let raw = Self::read_until(&mut ctl, &marker, deadline)?;
+        let text = String::from_utf8_lossy(&raw);
+        let at = text
+            .find(&marker)
+            .ok_or_else(|| "device listener did not report completion".to_string())?;
+        let status = text[at + marker.len()..]
+            .trim_start()
+            .split('.')
+            .next()
+            .and_then(|d| d.trim().parse::<i32>().ok())
+            .ok_or_else(|| "could not parse device listener status".to_string())?;
+        if status != 0 {
+            return Err(format!("device listener exited with status {status}"));
         }
         Ok(())
     }
@@ -475,6 +509,52 @@ mod tests {
         assert_eq!(r.output, "line1\nline2");
         assert_eq!(r.status, 3);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn tcpshell_put_uses_device_listener_losslessly() {
+        use std::net::TcpListener;
+        // Control channel (stands in for :24) and a free data port (for :8081).
+        let ctl = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ctl_addr = ctl.local_addr().unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").unwrap();
+        let data_port = data.local_addr().unwrap().port();
+        // A payload with the full byte range (the real bug ate bytes over the
+        // shell pipe); the device-listener path must deliver it exactly.
+        let payload: Vec<u8> = (0..6000u32).map(|i| (i % 256) as u8).collect();
+        let expect = payload.clone();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = ctl.accept().unwrap();
+            // Read the listener command line.
+            let mut cmd = Vec::new();
+            let mut b = [0u8; 1];
+            while c.read(&mut b).unwrap() == 1 {
+                cmd.push(b[0]);
+                if b[0] == b'\n' {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&cmd);
+            assert!(line.contains(&format!("nc -l -p {data_port}")));
+            let marker = line
+                .split("printf '")
+                .nth(1)
+                .and_then(|r| r.split(' ').next())
+                .unwrap()
+                .to_string();
+            // Accept the data connection and read the whole payload (no shell pipe).
+            let (mut d, _) = data.accept().unwrap();
+            let mut got = Vec::new();
+            d.read_to_end(&mut got).unwrap();
+            // Report the listener finished with status 0.
+            c.write_all(format!("{marker} 0.").as_bytes()).unwrap();
+            got
+        });
+        let mut sh = TcpShell::new(ctl_addr, Duration::from_secs(5));
+        sh.data_port = data_port;
+        sh.put("/data/rayhunter/x", &payload).unwrap();
+        let got = server.join().unwrap();
+        assert_eq!(got, expect, "device-listener put must be byte-exact");
     }
 
     #[test]
