@@ -51,7 +51,8 @@ READ_ENDPOINTS = {
 REFUSED = {"FotaGetVersionInfo": "asks the device to check for an OTA update"}
 
 SENSITIVE = re.compile(
-    r"imei|iccid|mdn|meid|imsi|msisdn|mac|serial|passw|pwd|key|token|secret|ssid|phone",
+    r"imei|iccid|mdn|meid|imsi|msisdn|mac|bssid|serial|\bsn\b|esn|passw|pwd|key|token|"
+    r"secret|ssid|phone|apn|\bpin\b|\bpuk\b|\bip\b|ipv4|ipv6|addr|gateway|dns",
     re.IGNORECASE,
 )
 
@@ -145,6 +146,11 @@ def selftest() -> int:
             "meid": 490154203237518,  # integer identifier under a sensitive key
             "ports": 8080,  # short integer, kept
             "clients": ["02:00:00:00:00:01", "ok"],  # MAC inside a list, innocuous key
+            "wanIp": "100.72.14.9",  # IPv4 value
+            "apn": "vzwinternet",  # sensitive key
+            "phone": "+1-555-123-4567",  # formatted phone
+            "hwVer": "V1.1",  # kept
+            "upTime": "12:34:56",  # kept (not an identifier)
         }
     )
     assert isinstance(red, dict)
@@ -158,6 +164,11 @@ def selftest() -> int:
         red["meid"].startswith("<redacted"),
         red["ports"] == 8080,
         red["clients"][0].startswith("<redacted") and red["clients"][1] == "ok",
+        red["wanIp"].startswith("<redacted"),
+        red["apn"].startswith("<redacted"),
+        red["phone"].startswith("<redacted"),
+        red["hwVer"] == "V1.1",
+        red["upTime"] == "12:34:56",
     ]
     if not all(checks):
         print(f"  FAIL  safe_view redaction: {red}")
@@ -249,19 +260,29 @@ class Session:
 # A value that LOOKS like a device identifier, redacted even when its key name is
 # not on the denylist (so an identifier in an unexpected field cannot leak): a
 # long digit run (IMEI/ICCID/MDN/MEID), a MAC, or a long hex/token string.
+# Searched (not anchored) so an identifier EMBEDDED in a longer string is caught.
 IDENTIFIER_VALUE = re.compile(
-    r"^\s*(\d{10,}|([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|[0-9A-Za-z+/_-]{20,})\s*$"
+    r"\d{10,}"  # IMEI/ICCID/MDN/MEID and other long digit runs
+    r"|([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"  # MAC/BSSID
+    r"|\b\d{1,3}(\.\d{1,3}){3}\b"  # IPv4
+    r"|([0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{0,4}"  # IPv6 (>= 4 colon groups)
+    r"|\+\d[\d -]{6,}\d"  # international phone (+1-555-123-4567)
+    r"|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"  # NANP phone (555-123-4567)
+    r"|\b[0-9A-Fa-f]{8,}\b"  # 8+ hex: serial/ESN/hash
+    r"|[0-9A-Za-z+/_-]{20,}"  # long opaque token
 )
 
 
 def _looks_like_identifier(value: object) -> bool:
-    """A leaf value shaped like a device identifier: a string matching
-    IDENTIFIER_VALUE, or an integer with 10+ digits (IMEI/ICCID/MDN)."""
+    """A leaf value shaped like a device identifier (IMEI, MAC, IP, phone, hex
+    serial, long token -- matched anywhere in the string), or an integer with 10+
+    digits. Redacting too eagerly is acceptable here: stdout is meant to be
+    pasteable into docs, so privacy fails closed."""
     if isinstance(value, bool):
         return False
     if isinstance(value, int):
         return len(str(abs(value))) >= 10
-    return isinstance(value, str) and IDENTIFIER_VALUE.match(value) is not None
+    return isinstance(value, str) and IDENTIFIER_VALUE.search(value) is not None
 
 
 def _redacted(value: object) -> str:

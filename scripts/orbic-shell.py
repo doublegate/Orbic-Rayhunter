@@ -28,6 +28,7 @@ the gitignored backups/ tree.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import socket
@@ -116,10 +117,14 @@ READ_COMMANDS = {
 # `ls \`nandwrite ...\`` -- runs arbitrary code; a backslash can also confuse the
 # lexer. Refused outright; recon never needs them.
 _INJECTION = re.compile(r"\$\(|`|\\")
-# `dmesg` is the one dual-use reader kept (the inventory pipes it); its ring-buffer
-# CLEAR flags are refused. Matched as a token regex so bundled/attached forms
-# (`-rc`, `-cr`) and the long flags are all caught; the inventory uses no dmesg flag.
-_DMESG_CLEAR = re.compile(r"^-[a-zA-Z]*[cC]|^--(clear|read-clear)$")
+# A program token must be a bare name or live under a trusted system bin dir --
+# never a `VAR=val` prefix, an `env`/`exec`/`nice`/`time` wrapper (which would run
+# the next word, defeating the allowlist and, for `LD_PRELOAD=...`/`exec`, injecting
+# code or replacing the shell), nor a path like `./cat` or `/tmp/cat` that runs a
+# planted binary with an allowed basename.
+_TRUSTED_PROG = re.compile(
+    r"[A-Za-z0-9._][A-Za-z0-9._-]*|/(bin|sbin|usr/bin|usr/sbin)/[A-Za-z0-9._-]+"
+)
 
 # Operator tokens shlex (punctuation_chars=True) emits. With that mode a RUN of the
 # chars `();<>|&` is returned as one token, so a combined operator like `;>` or a
@@ -130,9 +135,8 @@ _OP_CHARS = frozenset("();<>|&{}")
 _CMD_SEP = {"|", "||", "&&", ";", "&", "|&", ";;"}
 _OUT_FILE = {">", ">>", ">|", "&>", "&>>"}  # target must be /dev/null
 _DUP = {">&", "<&"}  # target: a bare fd (2>&1) or /dev/null
-_IN = {"<", "<<", "<<<"}  # input redirect: reading, target not a write
+_IN = {"<", "<<", "<<<"}  # input redirect (only plain `<` to a filename is allowed)
 _KNOWN_OPS = _CMD_SEP | _OUT_FILE | _DUP | _IN | {"<>"}
-_ASSIGN_OR_WRAP = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*=|exec$|env$|nice$|time$)")
 _FD = re.compile(r"\d+")
 
 
@@ -163,7 +167,13 @@ def _split_simple(tokens: list[str]) -> list[list[str]] | None:
         elif t == "<>":
             return None  # read-write
         elif t in _IN:
-            i += 2  # input redirect; reading is fine
+            # Only plain `<` to a real filename is a safe read. Reject heredocs
+            # (`<<`/`<<<`, which can swallow run_one's marker), and reject a `<`
+            # whose next token is missing or is an operator rather than a filename.
+            nxt = tokens[i + 1] if i + 1 < n else ""
+            if t != "<" or not nxt or nxt in _KNOWN_OPS:
+                return None
+            i += 2
         else:
             cur.append(t)
             i += 1
@@ -177,15 +187,16 @@ def _simple_ok(tokens: list[str], depth: int = 0) -> bool:
     not in a setter/writer form. `busybox <applet> ...` is validated by recursing
     on the applet, so `busybox sort -o f` or `busybox busybox rm` cannot smuggle a
     writer past the `busybox`-level checks."""
-    if depth > 4:
-        return False  # busybox busybox busybox ... -> fail closed
-    idx = 0
-    while idx < len(tokens) - 1 and _ASSIGN_OR_WRAP.match(tokens[idx]):
-        idx += 1  # skip VAR=val and exec/nice/time wrappers (never the last token)
-    if idx >= len(tokens):
+    if depth > 4 or not tokens:
+        return False  # busybox busybox busybox ... / empty -> fail closed
+    raw = tokens[0]
+    # No VAR=val prefix or env/exec/nice/time wrapper is skipped: such a token is
+    # simply the program, and since it is not an allowed reader it is refused. The
+    # program must also be a bare name or a trusted system path, never `/tmp/cat`.
+    if not _TRUSTED_PROG.fullmatch(raw):
         return False
-    prog = tokens[idx].rsplit("/", 1)[-1]
-    args = tokens[idx + 1 :]
+    prog = raw.rsplit("/", 1)[-1]
+    args = tokens[1:]
     if prog not in READ_COMMANDS:
         return False
     if prog == "busybox":
@@ -197,7 +208,9 @@ def _simple_ok(tokens: list[str], depth: int = 0) -> bool:
         if any(a not in ("--list", "--help") for a in args[:applet_at]):
             return False
         return _simple_ok(args[applet_at:], depth + 1)  # validate the applet itself
-    return not (prog == "dmesg" and any(_DMESG_CLEAR.match(a) for a in args))
+    # Any dmesg flag can clear or mutate console state (`-c`, `-n`, `-D`, `-E`);
+    # the inventory pipes bare `dmesg`, so refuse dmesg with any option.
+    return not (prog == "dmesg" and any(a.startswith("-") for a in args))
 
 
 def is_read_only(command: str) -> bool:
@@ -365,6 +378,19 @@ def selftest() -> int:
         "echo x&&>/etc/passwd",
         # a mid-word `#` is not a comment to /bin/sh, so the writer after it runs
         "cat /etc/foo#; nandwrite /dev/mtd0 x",
+        # VAR=val / wrapper prefixes and planted-path programs
+        "LD_PRELOAD=/tmp/x.so cat /proc/mtd",
+        "env PATH=/tmp cat /proc/mtd",
+        "exec cat /proc/mtd",
+        "/tmp/cat /proc/mtd",
+        "./cat /proc/mtd",
+        # `<` redirect must take a filename, not an operator or heredoc
+        "cat < ; rm -rf /",
+        "cat < > /etc/passwd",
+        "cat <<EOF",
+        # dmesg console-state flags beyond clear
+        "dmesg -n 1",
+        "dmesg -D",
         # busybox applet bypasses (validated by recursing on the applet)
         "busybox sort -o /etc/passwd /proc/mtd",
         "busybox busybox rm -rf /",
@@ -443,9 +469,14 @@ def main(argv: list[str]) -> int:
         print(f"== [{status}] {command}")
         print(output)
         if args.out_dir:
-            (args.out_dir / f"{n:03d}-{slug(command)}.txt").write_text(
-                header + f"\n# exit={status}\n"
-            )
+            # A transcript can capture /proc/cmdline (androidboot.serialno),
+            # /etc/passwd and any cat'd secret, so create it owner-only from the
+            # start rather than at the umask default.
+            target = args.out_dir / f"{n:03d}-{slug(command)}.txt"
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(header + f"\n# exit={status}\n")
         if status != 0:
             rc = 1
     return rc
