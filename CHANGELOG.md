@@ -17,7 +17,8 @@ Adds `orx verify` and the shared backup-gate, so a backup can be proven as a rol
   to verify, and is what the upcoming `orx install`/`uninstall` will call before any device write.
   Manifest parsing reads tokens by key, so both the Python and Rust manifest layouts verify. No
   device access; fully unit-tested (43 orx-cli tests). It fails closed throughout: `parse_manifest`
-  errors on a malformed row (< 3 fields, a non-`key=value` token, or a duplicate `size=`/`sha256=`);
+  errors on a malformed row (< 3 fields, a non-`key=value` token, an empty key, a non-`u64` `size=`,
+  a non-64-hex `sha256=`, a duplicate `size=`/`sha256=`, or any control character);
   a row without a valid `size=` + 64-hex `sha256=` is rejected unchecked; a recorded state other
   than `ok`/`ok-live` fails the entry; a duplicate rootfs `/` row is ambiguous; an archive that is
   a symlink or non-regular file is rejected (checked before open and re-checked on the open handle,

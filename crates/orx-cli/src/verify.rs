@@ -43,6 +43,15 @@ pub fn parse_manifest(text: &str) -> Result<Vec<ManifestEntry>, String> {
                 n + 1
             ));
         }
+        // Reject control characters anywhere on the line: fields are printed to
+        // the operator's terminal, and an ANSI escape in a tampered manifest
+        // could spoof `orx verify` output.
+        if f.iter().any(|t| t.bytes().any(|b| b.is_ascii_control())) {
+            return Err(format!(
+                "manifest line {}: contains a control character",
+                n + 1
+            ));
+        }
         // Parse key=val from the MIDDLE tokens only, so a row with no trailing
         // state cannot let its `sha256=` double as the state word. Every middle
         // token must be a non-empty key=val; `size`/`sha256` must not repeat and
@@ -75,6 +84,12 @@ pub fn parse_manifest(text: &str) -> Result<Vec<ManifestEntry>, String> {
                 "sha256" => {
                     if sha256.is_some() {
                         return Err(format!("manifest line {}: duplicate sha256= key", n + 1));
+                    }
+                    if !is_sha256_hex(v) {
+                        return Err(format!(
+                            "manifest line {}: sha256={v:?} is not 64 hex chars",
+                            n + 1
+                        ));
                     }
                     sha256 = Some(v.to_string());
                 }
@@ -243,11 +258,19 @@ pub fn gate_from_verdicts(entries: &[ManifestEntry], verdicts: &[Verdict]) -> Re
         return Err("internal error: entries/verdicts length mismatch".to_string());
     }
     let i = rootfs_index(entries)?;
-    let e = &entries[i];
-    if e.state != "ok" && e.state != "ok-live" {
-        return Err(format!("rootfs '/' state is {:?}, not ok/ok-live", e.state));
+    check_root_verdict(&entries[i], &verdicts[i])
+}
+
+/// The one policy both gates share: the rootfs state must be `ok`/`ok-live` and
+/// its archive must have verified.
+fn check_root_verdict(root: &ManifestEntry, verdict: &Verdict) -> Result<(), String> {
+    if root.state != "ok" && root.state != "ok-live" {
+        return Err(format!(
+            "rootfs '/' state is {:?}, not ok/ok-live",
+            root.state
+        ));
     }
-    match &verdicts[i] {
+    match verdict {
         Verdict::Ok => Ok(()),
         v => Err(format!(
             "rootfs '/' archive does not verify: {}",
@@ -273,22 +296,39 @@ fn rootfs_index(entries: &[ManifestEntry]) -> Result<usize, String> {
 /// an oversized file cannot exhaust memory.
 pub fn read_manifest_text(manifest: &Path) -> Result<String, String> {
     const MAX_MANIFEST: u64 = 1 << 20; // 1 MiB is enormous for a few-line manifest
+    // Pre-check rejects an obvious symlink/non-regular file...
     match std::fs::symlink_metadata(manifest) {
         Ok(m) if m.file_type().is_symlink() || !m.is_file() => {
             return Err(format!("{} is not a regular file", manifest.display()));
         }
-        Ok(m) if m.len() > MAX_MANIFEST => {
-            return Err(format!(
-                "{} is implausibly large ({} B)",
-                manifest.display(),
-                m.len()
-            ));
-        }
         Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("{} not found", manifest.display()));
+        }
         Err(e) => return Err(format!("cannot stat {}: {e}", manifest.display())),
     }
-    std::fs::read_to_string(manifest)
-        .map_err(|e| format!("cannot read {}: {e}", manifest.display()))
+    // ...and the OPEN handle is re-checked and the read is bounded, so a
+    // symlink/type swap after the pre-check or a growing/virtual file cannot
+    // slip past (same discipline as verify_entry).
+    let f = std::fs::File::open(manifest)
+        .map_err(|e| format!("cannot open {}: {e}", manifest.display()))?;
+    match f.metadata() {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Err(format!("{} is not a regular file", manifest.display())),
+        Err(e) => return Err(format!("cannot stat {}: {e}", manifest.display())),
+    }
+    let mut buf = Vec::new();
+    f.take(MAX_MANIFEST + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
+    if buf.len() as u64 > MAX_MANIFEST {
+        return Err(format!(
+            "{} is implausibly large (> {} B)",
+            manifest.display(),
+            MAX_MANIFEST
+        ));
+    }
+    String::from_utf8(buf).map_err(|_| format!("{} is not valid UTF-8", manifest.display()))
 }
 
 /// The backup-gate for write commands: a directory holds a usable rollback only
@@ -299,19 +339,7 @@ pub fn gate(dir: &Path) -> Result<(), String> {
     let entries = parse_manifest(&read_manifest_text(&dir.join("MANIFEST.txt"))?)?;
     let i = rootfs_index(&entries)?;
     let root = &entries[i];
-    if root.state != "ok" && root.state != "ok-live" {
-        return Err(format!(
-            "rootfs '/' state is {:?}, not ok/ok-live",
-            root.state
-        ));
-    }
-    match verify_entry(dir, root) {
-        Verdict::Ok => Ok(()),
-        v => Err(format!(
-            "rootfs '/' archive does not verify: {}",
-            v.describe()
-        )),
-    }
+    check_root_verdict(root, &verify_entry(dir, root))
 }
 
 #[cfg(test)]
@@ -340,16 +368,18 @@ mod tests {
 
     #[test]
     fn parse_reads_both_layouts_and_middle_tokens_only() {
-        let e = parse(&MANIFEST.replace("SHA", "deadbeef"));
+        let hex = "a".repeat(64);
+        let e = parse(&MANIFEST.replace("SHA", &hex));
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].mountpoint, "/");
         assert_eq!(e[0].size, Some(4096));
-        assert_eq!(e[0].sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(e[0].sha256.as_deref(), Some(hex.as_str()));
         assert_eq!(e[1].state, "ok-live"); // entries= did not confuse the state
         // A row with no trailing state must NOT let sha256= double as the state.
-        let e2 = parse("/ ubifs size=4096 sha256=abc");
-        assert_eq!(e2[0].state, "sha256=abc");
-        assert_eq!(e2[0].sha256, None); // sha256= was the state slot, not a middle token
+        // (`sha256=<64 hex>` as the last token is the STATE slot, not a middle token.)
+        let e2 = parse(&format!("/ ubifs size=4096 sha256={hex}"));
+        assert_eq!(e2[0].state, format!("sha256={hex}"));
+        assert_eq!(e2[0].sha256, None);
     }
 
     #[test]
@@ -378,17 +408,13 @@ mod tests {
     fn verify_entry_requires_valid_metadata() {
         let d = TempDir::new();
         std::fs::write(d.path().join("root.tar"), [7u8; 4096]).unwrap();
+        // A row with no sha256= at all parses but is unverifiable.
         assert_eq!(
             verify_entry(d.path(), &parse("/ ubifs size=4096 ok")[0]),
             Verdict::MissingMetadata
         );
-        assert_eq!(
-            verify_entry(
-                d.path(),
-                &parse("/ ubifs size=4096 sha256=notvalidhex ok")[0]
-            ),
-            Verdict::MissingMetadata
-        );
+        // A malformed sha256= is now rejected at parse time (accurate error).
+        assert!(parse_manifest("/ ubifs size=4096 sha256=notvalidhex ok").is_err());
     }
 
     #[test]
@@ -466,8 +492,13 @@ mod tests {
         // Missing MANIFEST.txt entirely.
         assert!(gate(d.path()).is_err());
         // No rootfs entry.
+        let hex = "a".repeat(64);
         assert!(
-            gate_entries(d.path(), &parse("/data ubifs size=4096 sha256=deadbeef ok")).is_err()
+            gate_entries(
+                d.path(),
+                &parse(&format!("/data ubifs size=4096 sha256={hex} ok"))
+            )
+            .is_err()
         );
         // Bad state.
         let sha = crate::sha256::hex(&[7u8; 4096]);
