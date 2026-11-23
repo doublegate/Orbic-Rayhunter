@@ -91,8 +91,9 @@ plus a per-filesystem result (`ok` / `MISSING` / `too small` / `size mismatch` /
 mismatch` / `no size=/sha256= in manifest`), and exits non-zero if any entry fails or the gate is
 not satisfied.
 
-Manual procedure until v0.6.0: [BACKUP-AND-RECOVERY.md](BACKUP-AND-RECOVERY.md) steps 1-7. Do
-not continue until the verification gate in step 6 passes.
+`orx backup`/`orx verify` automate this from v0.6.0/v0.7.0; the equivalent manual procedure is
+[BACKUP-AND-RECOVERY.md](BACKUP-AND-RECOVERY.md) steps 1-7. Do not continue until the
+verification gate (step 4 there, or `orx verify --dir`) passes.
 
 ## 3. Install upstream with the network installer (primary)
 

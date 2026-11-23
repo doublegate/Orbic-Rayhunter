@@ -16,10 +16,13 @@ Adds `orx verify` and the shared backup-gate, so a backup can be proven as a rol
   `orbic-ota-block.py`'s `_backup_gate`) requires rootfs `/` to be `ok`/`ok-live` AND its archive
   to verify, and is what the upcoming `orx install`/`uninstall` will call before any device write.
   Manifest parsing reads tokens by key, so both the Python and Rust manifest layouts verify. No
-  device access; fully unit-tested (40 orx-cli tests). It fails closed: a row with no valid
-  `size=` + 64-hex `sha256=` is rejected (never accepted unchecked), a recorded state other than
-  `ok`/`ok-live` fails the entry, and a duplicate rootfs `/` row is rejected as ambiguous
-  (hardening from the PR's Codex + Antigravity review).
+  device access; fully unit-tested (42 orx-cli tests). It fails closed throughout: `parse_manifest`
+  errors on a malformed row (< 3 fields, a non-`key=value` token, or a duplicate `size=`/`sha256=`);
+  a row without a valid `size=` + 64-hex `sha256=` is rejected unchecked; a recorded state other
+  than `ok`/`ok-live` fails the entry; a duplicate rootfs `/` row is ambiguous; archives are opened
+  `O_NOFOLLOW` and rejected if a symlink/non-regular file; and `orx verify` + `verify::gate()` share
+  one gate policy over verdicts computed once (the ~87 MB rootfs is hashed once). Hardening from the
+  PR's Codex + Antigravity review.
 
 ### Fixed
 

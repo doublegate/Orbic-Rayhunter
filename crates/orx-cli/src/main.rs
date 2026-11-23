@@ -198,30 +198,28 @@ fn cmd_verify(dir: &Path) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let entries = verify::parse_manifest(&text);
-    if entries.is_empty() {
-        eprintln!("error: {} has no filesystem entries", manifest.display());
-        return ExitCode::from(2);
-    }
+    // A manifest that does not parse is itself a failed-closed integrity signal.
+    let entries = match verify::parse_manifest(&text) {
+        Ok(e) if !e.is_empty() => e,
+        Ok(_) => {
+            eprintln!("error: {} has no filesystem entries", manifest.display());
+            return ExitCode::from(2);
+        }
+        Err(e) => {
+            eprintln!("error: {} is malformed: {e}", manifest.display());
+            return ExitCode::from(2);
+        }
+    };
+    // Hash every archive once, then share the single gate policy (no re-hash).
+    let verdicts = verify::verify_all(dir, &entries);
     let mut bad = false;
-    // Track the rootfs entry so the gate is derived from the verdict computed
-    // here -- the ~87 MB root.tar is hashed once, not again inside gate().
-    let mut root_count = 0usize;
-    let mut root_state_ok = false;
-    let mut root_verdict_ok = false;
-    for e in &entries {
-        let v = verify::verify_entry(dir, e);
+    for (e, v) in entries.iter().zip(&verdicts) {
         let state_ok = e.state == "ok" || e.state == "ok-live";
         // An entry passes only if its archive verifies AND its recorded state is
         // ok/ok-live: a `failed`/`ABORT` entry is never a backup, even if a stale
         // archive still hashes.
         if !v.is_ok() || !state_ok {
             bad = true;
-        }
-        if e.mountpoint == "/" {
-            root_count += 1;
-            root_state_ok = state_ok;
-            root_verdict_ok = v.is_ok();
         }
         let note = if state_ok {
             ""
@@ -236,20 +234,17 @@ fn cmd_verify(dir: &Path) -> ExitCode {
             note
         );
     }
-    let gate_ok = root_count == 1 && root_state_ok && root_verdict_ok;
-    if gate_ok {
-        println!("gate: rootfs backup verified -- device writes may proceed");
-    } else {
-        let why = match root_count {
-            0 => "no rootfs '/' entry".to_string(),
-            1 if !root_state_ok => "rootfs '/' state is not ok/ok-live".to_string(),
-            1 => "rootfs '/' archive did not verify".to_string(),
-            _ => "multiple rootfs '/' entries (ambiguous manifest)".to_string(),
-        };
-        println!("gate: NOT satisfied -- {why}");
-        bad = true;
+    let gate = verify::gate_from_verdicts(&entries, &verdicts);
+    match (&gate, bad) {
+        (Ok(()), false) => println!("gate: all archives verified -- device writes may proceed"),
+        // The rootfs gate can pass while a non-root archive failed; say so plainly
+        // rather than printing "may proceed" next to a non-zero exit.
+        (Ok(()), true) => println!(
+            "gate: rootfs gate satisfied, but some archives failed above -- NOT a complete backup"
+        ),
+        (Err(why), _) => println!("gate: NOT satisfied -- {why}"),
     }
-    if bad {
+    if bad || gate.is_err() {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -446,6 +441,15 @@ fn main() -> ExitCode {
             while let Some(arg) = rest.next() {
                 match arg.as_str() {
                     "--dir" => match rest.next() {
+                        Some(v) if dir.is_some() => {
+                            let _ = v;
+                            eprintln!("error: --dir given more than once\n\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                        Some(v) if v.is_empty() => {
+                            eprintln!("error: --dir value is empty\n\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
                         Some(v) => dir = Some(v.clone()),
                         None => {
                             eprintln!("error: --dir needs a value\n\n{USAGE}");
