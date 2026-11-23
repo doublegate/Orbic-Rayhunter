@@ -70,16 +70,40 @@ fn parse_hex_u16(s: &str) -> Option<u16> {
     u16::from_str_radix(s.trim(), 16).ok()
 }
 
+/// Byte offset of the last `_SN:` marker that starts `product` or follows
+/// whitespace. A marker in the middle of a word (`FOO_SN:`) is not one.
+fn sn_marker(product: &str) -> Option<usize> {
+    product.rmatch_indices("_SN:").map(|(i, _)| i).find(|&i| {
+        i == 0
+            || product[..i]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+    })
+}
+
 /// The serial embedded in a product string such as `MDM9207-MTP _SN:0123ABCD`.
 ///
 /// The RC400L (V1.2.0) exposes no `serial` sysfs attribute in normal mode and
 /// carries the serial here instead. Only a plain ASCII alphanumeric token of
-/// 1..=64 characters is accepted, so arbitrary product text is never reported
-/// as a serial.
+/// 1..=64 characters, directly after a word-start `_SN:`, is accepted, so
+/// arbitrary product text is never reported as a serial.
 pub fn serial_from_product(product: &str) -> Option<String> {
-    let tail = product.rsplit_once("_SN:")?.1.trim();
+    let tail = &product[sn_marker(product)? + "_SN:".len()..];
     (!tail.is_empty() && tail.len() <= 64 && tail.bytes().all(|b| b.is_ascii_alphanumeric()))
         .then(|| tail.to_string())
+}
+
+/// The product string without its `_SN:` serial suffix, for display.
+///
+/// The product string carries a device identifier on this hardware, so anything
+/// that prints or logs it should print this model text and the serial
+/// separately (so a redacting caller masks the one field that holds it).
+pub fn product_model(product: &str) -> &str {
+    match sn_marker(product) {
+        Some(i) if serial_from_product(product).is_some() => product[..i].trim_end(),
+        _ => product,
+    }
 }
 
 /// Read one sysfs USB device directory. Returns `None` for interfaces,
@@ -226,6 +250,40 @@ mod tests {
             serial_from_product(&format!("X _SN:{}", "A".repeat(65))),
             None
         );
+    }
+
+    #[test]
+    fn a_real_serial_attribute_wins_over_the_product_string() {
+        let t = TempDir::new("prec");
+        fake_dev(
+            &t.0,
+            "1-1",
+            &[
+                ("idVendor", "05c6"),
+                ("idProduct", "f626"),
+                ("product", "MDM9207-MTP _SN:FROMPRODUCT"),
+                ("serial", "FROMSYSFS"),
+            ],
+        );
+        assert_eq!(scan(&t.0).unwrap()[0].serial.as_deref(), Some("FROMSYSFS"));
+    }
+
+    #[test]
+    fn serial_token_bounds_and_position() {
+        let max = "A".repeat(64);
+        assert_eq!(serial_from_product(&format!("X _SN:{max}")), Some(max));
+        assert_eq!(serial_from_product("_SN:AB12"), Some("AB12".into()));
+        // `_SN:` must start the string or follow whitespace, and the token must follow it
+        // directly: mid-word markers and padded tokens are not serials.
+        assert_eq!(serial_from_product("FOO_SN:1234"), None);
+        assert_eq!(serial_from_product("X _SN: 1234"), None);
+    }
+
+    #[test]
+    fn model_strips_the_serial_from_the_product_string() {
+        assert_eq!(product_model("MDM9207-MTP _SN:0000TEST"), "MDM9207-MTP");
+        assert_eq!(product_model("MDM9207-MTP"), "MDM9207-MTP");
+        assert_eq!(product_model("FOO_SN:1234"), "FOO_SN:1234");
     }
 
     #[test]

@@ -116,8 +116,11 @@ Phase 0 (foundation) toward v0.1.0. Nothing here installs anything on a device y
 
 - `orx doctor` printed `serial=?` for the RC400L in normal mode, which exposes no `serial` sysfs
   attribute and carries the serial in its product string (`MDM9207-MTP _SN:<serial>`). It now
-  falls back to the `_SN:` token, accepted only as 1-64 ASCII alphanumerics (T-OR-106). Measured
-  on the unit during the T-OR-012 host-side recon.
+  falls back to the `_SN:` token. The token is accepted only directly after a word-start `_SN:`
+  marker, as 1-64 ASCII alphanumerics; a real `serial` attribute still takes precedence. The
+  printed product is the model alone (`product_model()`), so the serial appears once, in its own
+  field, where a redacting caller masks it (T-OR-106). Measured on the unit during the T-OR-012
+  host-side recon.
 - `scripts/apply-patches.sh` silently skipped every patch when staging inside this repository
   (the default `build/` layout): `git apply` discovered the superproject's `.git` and ignored
   patched paths outside its subdirectory while exiting 0. It now runs with
