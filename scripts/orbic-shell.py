@@ -132,6 +132,7 @@ _FORBIDDEN_FLAGS = {
 _NO_OPERAND = {"hostname"}
 
 # Tokens shlex (punctuation_chars=True) emits for shell operators.
+_GROUPING = frozenset("(){}")  # subshell, brace group, process subst, function def
 _CMD_SEP = {"|", "||", "&&", ";", "&", "|&", ";;"}
 _OUT_FILE = {">", ">>", ">|", "&>", "&>>"}  # target must be /dev/null
 _DUP = {">&", "<&"}  # target: a bare fd (2>&1) or /dev/null
@@ -212,6 +213,12 @@ def is_read_only(command: str) -> bool:
         tokens = list(lexer)
     except ValueError:
         return False  # unbalanced quotes / exotic syntax -> fail closed
+    # Reject shell grouping/definition syntax: a subshell `(reboot)`, process
+    # substitution `<(reboot)`, a brace group `{ reboot; }`, or a function
+    # definition `cat() (reboot)` would otherwise let a malicious command ride as
+    # an "argument" of an allowed program. Recon uses none of these.
+    if any(set(t) & _GROUPING for t in tokens):
+        return False
     simples = _split_simple(tokens)
     if not simples:
         return False
@@ -332,6 +339,11 @@ def selftest() -> int:
         "sort '-o' /etc/x /proc/mtd",
         "date -s '2020-01-01'",
         "hostname newname",
+        # shell grouping/definition/substitution syntax riding on an allowed program
+        "cat() (reboot); cat",
+        "cat <(reboot)",
+        "{ reboot; }",
+        "cat >(nandwrite /dev/mtd0 x)",
     ]
     for c in reads:
         if not is_read_only(c):

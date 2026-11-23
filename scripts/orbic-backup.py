@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import secrets
 import shlex
@@ -145,7 +146,11 @@ class ShellTar:
         end = time.monotonic() + self.deadline
         try:
             sock.sendall(command.encode() + f"; printf {marker.decode()}\n".encode())
-            with dest.open("wb") as fh:
+            # Owner-only from creation: the archive holds IMEI, Wi-Fi keys and other
+            # identifiers, so the temp file must never exist world-readable.
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as fh:
                 while time.monotonic() < end:
                     try:
                         chunk = sock.recv(1 << 16)
