@@ -268,20 +268,33 @@ fn usage_err(msg: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// `orx install`: deploy our firmware build to the device (dry-run unless --apply).
-fn cmd_install(
-    backup: &Path,
-    dist: &Path,
-    daemon: &Path,
-    ip: &str,
+/// Inputs for `orx install`, grouped so the command signature stays small.
+struct InstallOpts<'a> {
+    backup: &'a Path,
+    dist: &'a Path,
+    daemon: &'a Path,
+    config: &'a Path,
+    ip: &'a str,
     apply: bool,
     allow_unstripped: bool,
     allow_unverified: bool,
-) -> ExitCode {
+}
+
+/// `orx install`: deploy our firmware build to the device (dry-run unless --apply).
+fn cmd_install(o: &InstallOpts) -> ExitCode {
+    let InstallOpts {
+        backup,
+        dist,
+        daemon,
+        config,
+        ip,
+        apply,
+        allow_unstripped,
+        allow_unverified,
+    } = *o;
     let init = dist.join("scripts/rayhunter_daemon");
     let misc = dist.join("scripts/misc-daemon");
-    let config = dist.join("config.toml.in");
-    let steps = match install::install_plan(daemon, &init, &misc, &config) {
+    let steps = match install::install_plan(daemon, &init, &misc, config) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -635,6 +648,7 @@ fn main() -> ExitCode {
             let mut backup: Option<String> = None;
             let mut dist = "build/rayhunter/dist".to_string();
             let mut daemon = "dist/rayhunter-daemon".to_string();
+            let mut config = "device/config/config.orbic.toml".to_string();
             let mut apply = false;
             let mut allow_unstripped = false;
             let mut allow_unverified = false;
@@ -661,6 +675,10 @@ fn main() -> ExitCode {
                         Ok(v) => daemon = v,
                         Err(()) => return usage_err("--daemon needs a value"),
                     },
+                    "--config" if cmd == "install" => match need(rest.next()) {
+                        Ok(v) => config = v,
+                        Err(()) => return usage_err("--config needs a value"),
+                    },
                     other => return usage_err(&format!("unexpected argument {other:?}")),
                 }
             }
@@ -668,15 +686,16 @@ fn main() -> ExitCode {
                 return usage_err(&format!("{cmd} needs --dir <backup-dir>"));
             };
             if cmd == "install" {
-                cmd_install(
-                    Path::new(&backup),
-                    Path::new(&dist),
-                    Path::new(&daemon),
-                    &ip,
+                cmd_install(&InstallOpts {
+                    backup: Path::new(&backup),
+                    dist: Path::new(&dist),
+                    daemon: Path::new(&daemon),
+                    config: Path::new(&config),
+                    ip: &ip,
                     apply,
                     allow_unstripped,
                     allow_unverified,
-                )
+                })
             } else {
                 cmd_uninstall(Path::new(&backup), &ip, apply)
             }

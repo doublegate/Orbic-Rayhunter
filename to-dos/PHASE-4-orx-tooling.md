@@ -195,10 +195,14 @@ command is backup-gated, dry-run-first, atomic, and validates payloads; these ma
       present, (refusing if it is missing unless `--allow-unverified`) and refuses an unstripped (devel)
       daemon unless `--allow-unstripped` -- catching a corrupted/swapped/missing artifact and the
       ~16 MB debug build staged by mistake.
-- [ ] T-OR-036b: `--config <path>` and deploy our hardened `config.toml` (wifi_enabled = false,
-      retention/free-space thresholds) instead of bare upstream `config.toml.in`; ties to T-OR-040.
-- [ ] T-OR-036c: `/data` (and `/`) free-space preflight before staging a second copy of the daemon,
-      or stop `rayhunter_daemon` first (unlinked-but-open blocks hold space until reboot; #1192).
+- [x] T-OR-036b (v1.0.2): `orx install` deploys our hardened `device/config/config.orbic.toml` by
+      default (key_input_mode = 1, min_space 64/32 MiB, wifi_enabled = false, auto_check_updates =
+      false, full analyzer set), `--config <path>` override, `device = "orbic"` enforced.
+- [x] T-OR-036c (v1.0.2): `/data` free-space preflight on `--apply` -- `df /data` (row validated
+      against the mountpoint), refuse if it lacks the daemon + config + 8 MiB slack (#1192). Only
+      /data is gated (the KiB `/etc/init.d` writes are not; a full rootfs just fails the atomic
+      write), so uninstall is never blocked. Stopping the daemon first stays a future option if
+      measured growth needs it (T-OR-068).
 - [ ] T-OR-036d: bound the `orx install` data listener's lifetime and exposure (busybox `nc -w`
       idle-timeout and/or a `timeout` wrapper, and `-s` bind to the USB-side address if supported)
       -- needs on-device verification of the available busybox nc flags; the one-shot listener +

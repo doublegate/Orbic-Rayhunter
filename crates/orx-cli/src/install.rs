@@ -486,6 +486,86 @@ pub fn uninstall_plan(stock_misc_daemon: Vec<u8>) -> Vec<Step> {
 /// Execute a plan. Enforces the backup gate first. With `apply = false` it prints
 /// the plan and makes no device change. Each `Put` is atomic: send to
 /// `<remote>.orx-new`, chmod it, then `mv` into place.
+/// Available kibibytes parsed from a busybox `df -k <mount>`, validated to be a
+/// well-formed df row FOR `mount` (fail closed otherwise). The row is
+/// `Filesystem 1K-blocks Used Available Use% Mounted`; a long filesystem name may
+/// wrap to its own line, so anchor from the END and check: last token == mount,
+/// Use% is `<digits>%`, and the three size columns are numeric. The mount check
+/// also catches an unmounted `/data` that silently resolved to `/`.
+fn parse_df_available_kb(df_output: &str, mount: &str) -> Option<u64> {
+    let toks: Vec<&str> = df_output
+        .lines()
+        .skip(1) // header
+        .flat_map(|l| l.split_whitespace())
+        .collect();
+    let n = toks.len();
+    if n < 5 || toks[n - 1] != mount {
+        return None;
+    }
+    let use_pct = toks[n - 2];
+    if use_pct.len() < 2
+        || !use_pct.ends_with('%')
+        || !use_pct[..use_pct.len() - 1]
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    toks[n - 5].parse::<u64>().ok()?; // 1K-blocks must be numeric
+    toks[n - 4].parse::<u64>().ok()?; // Used must be numeric
+    toks[n - 3].parse::<u64>().ok() // Available
+}
+
+/// Bytes of headroom `/data` must have for the plan's writes landing there (each
+/// staged full-size as `.orx-new` before the mv) plus an 8 MiB slack. Only `/data`
+/// is preflighted: that is the #1192 failure mode (captures filling it), whereas
+/// the `/etc/init.d` init scripts are a few KiB and a full rootfs simply fails
+/// the atomic write. Uninstall writes nothing to `/data`, so it is not gated.
+fn space_needs(steps: &[Step]) -> Vec<(&'static str, u64)> {
+    let data: u64 = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Put { remote, bytes, .. } if remote.starts_with("/data") => {
+                Some(bytes.len() as u64)
+            }
+            _ => None,
+        })
+        .sum();
+    const SLACK: u64 = 8 * 1024 * 1024;
+    if data > 0 {
+        vec![("/data", data + SLACK)]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Refuse the write if `mount` has less than `need` bytes free on the device.
+fn check_free_space(shell: &mut dyn Shell, mount: &str, need: u64) -> Result<(), String> {
+    let r = shell.run(&format!("df -k {mount}"))?;
+    if r.status != 0 {
+        return Err(format!(
+            "df {mount} failed (status {}): {}",
+            r.status,
+            r.output.trim()
+        ));
+    }
+    let avail_kb = parse_df_available_kb(&r.output, mount).ok_or_else(|| {
+        format!(
+            "could not parse free space for {mount}: {}",
+            r.output.trim()
+        )
+    })?;
+    let avail = avail_kb.saturating_mul(1024);
+    if avail < need {
+        return Err(format!(
+            "{mount} has {} KiB free but the install needs {} KiB there -- free space first (#1192)",
+            avail_kb,
+            need / 1024
+        ));
+    }
+    Ok(())
+}
+
 pub fn execute(
     shell: &mut dyn Shell,
     steps: &[Step],
@@ -493,6 +573,14 @@ pub fn execute(
     apply: bool,
 ) -> Result<(), String> {
     gate().map_err(|e| format!("backup gate not satisfied, refusing to proceed: {e}"))?;
+    // Free-space preflight before any write (apply only): a full /data wedged the
+    // daemon and the hotspot (#1192), and the atomic staging writes a full copy of
+    // each file to `<path>.orx-new` before the mv.
+    if apply {
+        for (mount, need) in space_needs(steps) {
+            check_free_space(shell, mount, need)?;
+        }
+    }
     for s in steps {
         if !apply {
             println!("  [dry-run] {}", s.describe());
@@ -586,7 +674,58 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::CmdResult;
     use crate::transport::fake::FakeShell;
+
+    /// A FakeShell that answers `df -k` with ample free space on /data and /.
+    fn shell_with_space() -> FakeShell {
+        let mut sh = FakeShell::default();
+        let mk = |avail_kb: u64, mount: &str| CmdResult {
+            output: format!(
+                "Filesystem 1K-blocks Used Available Use% Mounted on\nubi0:x 500000 1000 {avail_kb} 1% {mount}\n"
+            ),
+            status: 0,
+        };
+        sh.responses
+            .insert("df -k /data".into(), mk(150_000, "/data"));
+        sh.responses.insert("df -k /".into(), mk(40_000, "/"));
+        sh
+    }
+
+    #[test]
+    fn parse_df_available_handles_normal_and_wrapped() {
+        let normal = "Filesystem 1K-blocks Used Available Use% Mounted on\nubi0:data 200000 50000 150000 25% /data\n";
+        assert_eq!(parse_df_available_kb(normal, "/data"), Some(150000));
+        // busybox wraps a long filesystem name onto its own line.
+        let wrapped = "Filesystem 1K-blocks Used Available Use% Mounted on\nubi0:userdata-very-long-name\n 200000 50000 150000 25% /data\n";
+        assert_eq!(parse_df_available_kb(wrapped, "/data"), Some(150000));
+        assert_eq!(parse_df_available_kb("garbage", "/data"), None);
+        // Mountpoint mismatch (e.g. /data unmounted, df fell back to /) -> None.
+        assert_eq!(parse_df_available_kb(normal, "/"), None);
+        // Malformed Use% or non-numeric column -> None (fail closed).
+        let bad_pct = "H\nubi0:data 200000 50000 150000 25 /data\n";
+        assert_eq!(parse_df_available_kb(bad_pct, "/data"), None);
+        let bad_num = "H\nubi0:data X 50000 150000 25% /data\n";
+        assert_eq!(parse_df_available_kb(bad_num, "/data"), None);
+    }
+
+    #[test]
+    fn execute_refuses_on_insufficient_space() {
+        let mut sh = FakeShell::default();
+        sh.responses.insert(
+            "df -k /data".into(),
+            CmdResult {
+                output: "Filesystem 1K-blocks Used Available Use% Mounted on\nubi0:x 200000 199000 1000 99% /data\n".into(),
+                status: 0,
+            },
+        );
+        let d = tmp();
+        write_artifacts(&d);
+        let err = execute(&mut sh, &plan(&d), || Ok(()), true).unwrap_err();
+        assert!(err.contains("free") && err.contains("/data"), "got: {err}");
+        assert!(sh.fs.is_empty()); // refused before any write
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn render_config_sets_device_once_in_root_before_sections() {
@@ -878,7 +1017,7 @@ mod tests {
 
     #[test]
     fn execute_apply_deploys_atomically_and_verifies() {
-        let mut sh = FakeShell::default();
+        let mut sh = shell_with_space();
         let d = tmp();
         write_artifacts(&d);
         execute(&mut sh, &plan(&d), || Ok(()), true).unwrap();
@@ -931,7 +1070,7 @@ mod tests {
 
     #[test]
     fn execute_apply_issues_expected_command_sequence() {
-        let mut sh = FakeShell::default();
+        let mut sh = shell_with_space();
         let d = tmp();
         write_artifacts(&d);
         execute(&mut sh, &plan(&d), || Ok(()), true).unwrap();
@@ -939,7 +1078,7 @@ mod tests {
         let seq: Vec<&String> = sh
             .cmds
             .iter()
-            .filter(|c| !c.starts_with("sha256sum"))
+            .filter(|c| !c.starts_with("sha256sum") && !c.starts_with("df "))
             .collect();
         assert!(seq[0].starts_with("mkdir -p /data/rayhunter"));
         assert!(
@@ -957,10 +1096,8 @@ mod tests {
 
     #[test]
     fn execute_cleans_up_temp_on_failed_send_file() {
-        let mut sh = FakeShell {
-            drop_writes: true, // put drops data -> device sha256 mismatch -> send_file fails
-            ..Default::default()
-        };
+        let mut sh = shell_with_space();
+        sh.drop_writes = true; // put drops data -> device sha256 mismatch -> send_file fails
         let d = tmp();
         write_artifacts(&d);
         assert!(execute(&mut sh, &plan(&d), || Ok(()), true).is_err());
@@ -974,7 +1111,7 @@ mod tests {
 
     #[test]
     fn execute_rejects_unsafe_remote_and_bad_mode() {
-        let mut bad_path = FakeShell::default();
+        let mut bad_path = shell_with_space();
         let steps = vec![Step::Put {
             desc: "x".into(),
             remote: "/etc/init.d/misc-daemon; rm -rf /".into(),
@@ -984,7 +1121,7 @@ mod tests {
         assert!(execute(&mut bad_path, &steps, || Ok(()), true).is_err());
         assert!(bad_path.fs.is_empty());
 
-        let mut bad_mode = FakeShell::default();
+        let mut bad_mode = shell_with_space();
         let steps = vec![Step::Put {
             desc: "x".into(),
             remote: "/data/rayhunter/x".into(),
@@ -996,7 +1133,7 @@ mod tests {
 
     #[test]
     fn uninstall_apply_restores_stock_and_removes_our_files() {
-        let mut sh = FakeShell::default();
+        let mut sh = shell_with_space();
         let steps = uninstall_plan(b"#!/bin/sh\nstock\n".to_vec());
         execute(&mut sh, &steps, || Ok(()), true).unwrap();
         assert!(sh.fs.contains_key("/etc/init.d/misc-daemon.orx-new"));
