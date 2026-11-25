@@ -220,9 +220,20 @@ pub fn verify_daemon_against_sums(daemon: &Path) -> Result<bool, String> {
         .ok_or_else(|| "daemon has no file name".to_string())?;
     let text =
         String::from_utf8(read(&sums)?).map_err(|_| format!("{} is not UTF-8", sums.display()))?;
+    // `sha256sum` lines are `<64-hex><sep><filename>`, where <sep> is two spaces
+    // (text mode, build.sh) or a space + `*` (binary mode). The release workflow
+    // runs `sha256sum -- ./*`, so entries carry a leading `./`; other tools may
+    // use a path. Parse by the fixed hash width and compare by basename so every
+    // form (`rayhunter-daemon`, `./rayhunter-daemon`, `*rayhunter-daemon`) matches.
     let want = text.lines().find_map(|l| {
-        let (hash, file) = l.split_once("  ")?;
-        (file.trim() == name).then(|| hash.trim().to_string())
+        let l = l.trim_end();
+        if l.len() < 66 || !l[..64].bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let (hash, rest) = l.split_at(64);
+        let file = rest.get(2..)?.trim(); // skip the 2-char separator
+        let base = Path::new(file).file_name()?.to_str()?;
+        (base == name).then(|| hash.to_string())
     });
     let want = want.ok_or_else(|| {
         format!(
@@ -569,10 +580,22 @@ mod tests {
         std::fs::write(&daemon, [7u8; 2048]).unwrap();
         // No SHA256SUMS -> Ok(false) (cannot verify).
         assert_eq!(verify_daemon_against_sums(&daemon), Ok(false));
-        // Matching entry -> Ok(true).
+        // Matching entry -> Ok(true), across the formats sha256sum / the release
+        // workflow (`./` prefix) / binary mode (`*`) produce.
         let good = crate::sha256::hex(&[7u8; 2048]);
-        std::fs::write(d.join("SHA256SUMS"), format!("{good}  rayhunter-daemon\n")).unwrap();
-        assert_eq!(verify_daemon_against_sums(&daemon), Ok(true));
+        for line in [
+            format!("{good}  rayhunter-daemon\n"),   // build.sh text mode
+            format!("{good}  ./rayhunter-daemon\n"), // release workflow (sha256sum -- ./*)
+            format!("{good} *rayhunter-daemon\n"),   // binary mode
+            format!("{good}  dist/rayhunter-daemon\n"), // a path prefix
+        ] {
+            std::fs::write(d.join("SHA256SUMS"), &line).unwrap();
+            assert_eq!(
+                verify_daemon_against_sums(&daemon),
+                Ok(true),
+                "line: {line:?}"
+            );
+        }
         // Wrong hash -> Err.
         std::fs::write(
             d.join("SHA256SUMS"),
