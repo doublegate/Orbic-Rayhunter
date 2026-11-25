@@ -106,43 +106,66 @@ pub fn check_inner(
     }
 
     // 3. Port posture. The daemon port should be open; the root shell and the
-    // installer transfer port should be CLOSED on a settled device -- an open
-    // one is a security exposure, so it fails the check rather than warning.
-    if probe::tcp_open(daemon, timeout) {
-        r.push(Level::Ok, format!("daemon port {} open", daemon.port()));
-    } else {
-        r.push(Level::Fail, format!("daemon port {} closed", daemon.port()));
-    }
-    if probe::tcp_open(rootshell, timeout) {
-        r.push(
+    // installer transfer port should be CLOSED on a settled device. These use a
+    // precise probe: a port is "closed" only when the connection is actively
+    // REFUSED. A timeout / filtered / unreachable result is indeterminate -- we
+    // cannot confirm a security-sensitive port is closed, so it fails closed
+    // rather than reporting a reassuring "[ok] closed".
+    match probe::tcp_probe(daemon, timeout) {
+        probe::PortState::Open => r.push(Level::Ok, format!("daemon port {} open", daemon.port())),
+        probe::PortState::Refused => r.push(
             Level::Fail,
-            format!(
-                "root shell port {} is OPEN (exposed; expected closed)",
-                rootshell.port()
-            ),
-        );
-    } else {
-        r.push(
-            Level::Ok,
-            format!("root shell port {} closed", rootshell.port()),
-        );
-    }
-    if probe::tcp_open(installer, timeout) {
-        r.push(
+            format!("daemon port {} closed (refused)", daemon.port()),
+        ),
+        probe::PortState::Unreachable => r.push(
             Level::Fail,
-            format!(
-                "installer port {} is OPEN (stale transfer listener?)",
-                installer.port()
-            ),
-        );
-    } else {
-        r.push(
-            Level::Ok,
-            format!("installer port {} closed", installer.port()),
-        );
+            format!("daemon port {} unreachable", daemon.port()),
+        ),
     }
+    report_closed_port(
+        &mut r,
+        "root shell",
+        rootshell,
+        "exposed; expected closed",
+        timeout,
+    );
+    report_closed_port(
+        &mut r,
+        "installer",
+        installer,
+        "stale transfer listener?",
+        timeout,
+    );
 
     r
+}
+
+/// Report a port that is EXPECTED to be closed. Only an actively refused
+/// connection confirms it; open is a security exposure and an unreachable
+/// (timeout/filtered) result cannot confirm closure -- both fail closed.
+fn report_closed_port(
+    r: &mut CheckReport,
+    label: &str,
+    addr: SocketAddr,
+    open_hint: &str,
+    timeout: Duration,
+) {
+    match probe::tcp_probe(addr, timeout) {
+        probe::PortState::Refused => {
+            r.push(Level::Ok, format!("{label} port {} closed", addr.port()))
+        }
+        probe::PortState::Open => r.push(
+            Level::Fail,
+            format!("{label} port {} is OPEN ({open_hint})", addr.port()),
+        ),
+        probe::PortState::Unreachable => r.push(
+            Level::Fail,
+            format!(
+                "{label} port {} unreachable (cannot confirm closed)",
+                addr.port()
+            ),
+        ),
+    }
 }
 
 /// Report the stats fields; returns whether the rayhunter version was present

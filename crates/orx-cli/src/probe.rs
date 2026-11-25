@@ -16,6 +16,30 @@ pub fn tcp_open(addr: SocketAddr, timeout: Duration) -> bool {
     TcpStream::connect_timeout(&addr, timeout).is_ok()
 }
 
+/// A more precise probe than [`tcp_open`]: it distinguishes a connection that
+/// was actively refused (the port is definitely closed) from one that could not
+/// be reached at all (timeout, filtered, host/network unreachable), which must
+/// NOT be treated as "closed" by a fail-closed caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortState {
+    /// The connection succeeded: a listener is present.
+    Open,
+    /// The connection was refused (RST): the port is confirmed closed.
+    Refused,
+    /// The connection could not be completed (timeout, unreachable, filtered):
+    /// the port's state is indeterminate.
+    Unreachable,
+}
+
+/// Probe `addr`, returning whether it is open, confirmed-closed, or unreachable.
+pub fn tcp_probe(addr: SocketAddr, timeout: Duration) -> PortState {
+    match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(_) => PortState::Open,
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => PortState::Refused,
+        Err(_) => PortState::Unreachable,
+    }
+}
+
 /// Parse `ip` and `port` into a socket address.
 pub fn socket(ip: &str, port: u16) -> Result<SocketAddr, String> {
     format!("{ip}:{port}")
@@ -149,6 +173,25 @@ mod tests {
         assert!(
             saw_closed,
             "a freed ephemeral port should refuse connections"
+        );
+    }
+
+    #[test]
+    fn tcp_probe_distinguishes_open_from_refused() {
+        // Open: a live listener -> Open.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        assert_eq!(tcp_probe(addr, Duration::from_millis(500)), PortState::Open);
+        // Refused: a freed loopback port rejects with RST (retry to dodge reuse).
+        let refused = (0..10).any(|_| {
+            let t = TcpListener::bind("127.0.0.1:0").unwrap();
+            let a = t.local_addr().unwrap();
+            drop(t);
+            tcp_probe(a, Duration::from_millis(200)) == PortState::Refused
+        });
+        assert!(
+            refused,
+            "a freed loopback port should refuse (not time out)"
         );
     }
 

@@ -14,7 +14,9 @@
   open, while the root shell (`:24`) and installer transfer port (`:8081`) should be closed on a
   settled device. It **fails closed**: an unreachable/unparsable API, a daemon with no (or empty)
   rayhunter version, a manifest with no `entries` array, and an exposed root shell or installer
-  port are all failures. Untrusted device strings are sanitized of control characters before
+  port are all failures. Port posture uses a precise probe: a security port counts as closed only
+  when the connection is actively refused -- a timeout/filtered/unreachable result is indeterminate
+  and fails closed rather than reporting a reassuring "closed". Untrusted device strings are sanitized of control characters before
   printing (no ANSI/forged-line injection from a compromised device).
   Prints an `[ok]/[warn]/[fail]` summary and exits non-zero on any failure. Reuses
   the std-only JSON reader and HTTP client; no new dependencies. Validated live (device healthy).
