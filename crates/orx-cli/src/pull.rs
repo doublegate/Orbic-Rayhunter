@@ -49,8 +49,11 @@ pub fn http_get_to(
     let mut stream =
         TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
     stream.set_write_timeout(Some(timeout)).ok();
+    // HTTP/1.1 so the daemon frames a streamed body with chunked encoding (an
+    // explicit 0-chunk terminator we can use to detect truncation), rather than
+    // HTTP/1.0 close-delimited, where a mid-transfer close looks like a clean EOF.
     let req =
-        format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\nAccept: */*\r\n\r\n");
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAccept: */*\r\n\r\n");
     stream
         .write_all(req.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
@@ -93,9 +96,10 @@ pub fn http_get_to(
     if status != 200 {
         return Err(format!("HTTP {status} (expected 200)"));
     }
-    // Refuse any transfer/content encoding we would otherwise write verbatim into
-    // the file, and fail closed on an invalid or conflicting Content-Length.
+    // Determine the body framing. Fail closed on an invalid/conflicting
+    // Content-Length or a content-encoding we would write verbatim.
     let mut content_length: Option<u64> = None;
+    let mut chunked = false;
     for line in head_str.lines().skip(1) {
         let Some((k, val)) = line.split_once(':') else {
             continue;
@@ -103,6 +107,7 @@ pub fn http_get_to(
         let key = k.trim().to_ascii_lowercase();
         let val = val.trim();
         match key.as_str() {
+            "transfer-encoding" if val.eq_ignore_ascii_case("chunked") => chunked = true,
             "transfer-encoding" if !val.is_empty() => {
                 return Err(format!("unsupported transfer-encoding: {val:?}"));
             }
@@ -122,34 +127,125 @@ pub fn http_get_to(
         }
     }
 
+    if chunked {
+        return read_chunked_body(&mut stream, body_start, sink, max, deadline);
+    }
+    // Not chunked: a Content-Length lets us verify completion; without one, an
+    // HTTP/1.1 close-delimited body cannot be told apart from a truncated one, so
+    // fail closed rather than record a possibly-partial file as complete.
+    let Some(expected) = content_length else {
+        return Err("response has neither Content-Length nor chunked encoding; \
+                    cannot verify a complete transfer"
+            .to_string());
+    };
     let mut written = 0u64;
-    let write_chunk =
-        |sink: &mut dyn Write, data: &[u8], written: &mut u64| -> Result<(), String> {
-            *written += data.len() as u64;
-            if *written > max {
-                return Err(format!("response exceeded {max} bytes"));
-            }
-            sink.write_all(data).map_err(|e| format!("write body: {e}"))
-        };
-    write_chunk(sink, &body_start, &mut written)?;
-    loop {
+    let mut emit = |data: &[u8], written: &mut u64| -> Result<(), String> {
+        *written += data.len() as u64;
+        if *written > max {
+            return Err(format!("response exceeded {max} bytes"));
+        }
+        sink.write_all(data).map_err(|e| format!("write body: {e}"))
+    };
+    emit(&body_start, &mut written)?;
+    while written < expected {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err("read: deadline exceeded in body".to_string());
         }
         stream.set_read_timeout(Some(remaining)).ok();
         match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => write_chunk(sink, &buf[..n], &mut written)?,
+            Ok(0) => return Err(format!("truncated: got {written} of {expected} bytes")),
+            Ok(n) => emit(&buf[..n], &mut written)?,
             Err(e) => return Err(format!("read body: {e}")),
         }
     }
-    // If the server declared a length, a short read is a truncated transfer --
-    // reject it so a partial file is never renamed into place or recorded as done.
-    if let Some(len) = content_length.filter(|&len| written != len) {
-        return Err(format!("truncated: got {written} of {len} bytes"));
+    if written != expected {
+        return Err(format!(
+            "overlong: got {written}, expected {expected} bytes"
+        ));
     }
     Ok(written)
+}
+
+/// Decode an HTTP/1.1 chunked body, streaming chunk data to `sink`. Requires the
+/// terminating zero-size chunk: a connection that closes before it is a
+/// truncated transfer (error), not a clean EOF.
+fn read_chunked_body(
+    stream: &mut TcpStream,
+    initial: Vec<u8>,
+    sink: &mut dyn Write,
+    max: u64,
+    deadline: Instant,
+) -> Result<u64, String> {
+    let mut buf = initial;
+    let mut rbuf = [0u8; 8192];
+    let mut written = 0u64;
+    // Read one more socket chunk into `buf`; Err if the peer closes early.
+    let mut fill = |stream: &mut TcpStream, buf: &mut Vec<u8>| -> Result<(), String> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("read: deadline exceeded in chunked body".to_string());
+        }
+        stream.set_read_timeout(Some(remaining)).ok();
+        match stream.read(&mut rbuf) {
+            Ok(0) => Err("truncated: connection closed mid-chunk".to_string()),
+            Ok(n) => {
+                buf.extend_from_slice(&rbuf[..n]);
+                Ok(())
+            }
+            Err(e) => Err(format!("read chunk: {e}")),
+        }
+    };
+    loop {
+        // Parse the chunk-size line.
+        let line_end = loop {
+            if let Some(p) = find_sub(&buf, b"\r\n") {
+                break p;
+            }
+            if buf.len() > 64 * 1024 {
+                return Err("chunk size line too long".to_string());
+            }
+            fill(stream, &mut buf)?;
+        };
+        let size_field = &buf[..line_end];
+        // A chunk-size line may carry `;ext`; take the hex before any ';'.
+        let hex = size_field
+            .split(|&b| b == b';')
+            .next()
+            .unwrap_or(size_field);
+        let hex = std::str::from_utf8(hex)
+            .map_err(|_| "bad chunk size".to_string())?
+            .trim();
+        let size = u64::from_str_radix(hex, 16).map_err(|_| format!("bad chunk size {hex:?}"))?;
+        buf.drain(..line_end + 2);
+        if size == 0 {
+            return Ok(written); // final chunk seen -> complete
+        }
+        // Stream `size` data bytes, reading more as needed.
+        let mut need = size;
+        while need > 0 {
+            if buf.is_empty() {
+                fill(stream, &mut buf)?;
+            }
+            let take = need.min(buf.len() as u64) as usize;
+            written += take as u64;
+            if written > max {
+                return Err(format!("response exceeded {max} bytes"));
+            }
+            sink.write_all(&buf[..take])
+                .map_err(|e| format!("write body: {e}"))?;
+            buf.drain(..take);
+            need -= take as u64;
+        }
+        // Consume the CRLF after the chunk data.
+        while buf.len() < 2 {
+            fill(stream, &mut buf)?;
+        }
+        if &buf[..2] != b"\r\n" {
+            return Err("malformed chunk terminator".to_string());
+        }
+        buf.drain(..2);
+    }
 }
 
 fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -348,25 +444,38 @@ pub fn pull_logs_at(
         if let (true, Some(sz)) = (r.completed && qmdl.is_file() && nd.is_file(), r.qmdl_size) {
             new_state.push((r.name.clone(), sz));
         }
-        for p in [&qmdl, &nd] {
-            if let Some(fname) = p
-                .is_file()
-                .then(|| p.file_name().and_then(|n| n.to_str()))
-                .flatten()
-            {
-                manifest_lines.push(format!("{}  {fname}", file_sha256(p)?));
-            }
+    }
+    // Build the manifest from EVERY .qmdl/.ndjson present in `dir`, not only this
+    // run's recordings, so a previously pulled capture that has since been purged
+    // off the device keeps its entry (its file is still here). Written atomically.
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let path = entry.map_err(|e| format!("read dir entry: {e}"))?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if path.is_file() && (name.ends_with(".qmdl") || name.ends_with(".ndjson")) {
+            manifest_lines.push(format!("{}  {name}", file_sha256(&path)?));
         }
     }
+    manifest_lines.sort();
     let manifest = format!(
-        "# orx pull-logs manifest\n# pulled {} recording file set(s)\n{}\n",
-        recordings.len(),
+        "# orx pull-logs manifest\n# {} file(s) held locally\n{}\n",
+        manifest_lines.len(),
         manifest_lines.join("\n")
     );
-    std::fs::write(dir.join("PULL-MANIFEST.txt"), manifest)
-        .map_err(|e| format!("write manifest: {e}"))?;
-    write_pull_state(&state_path, &new_state)?;
+    write_atomic(&dir.join("PULL-MANIFEST.txt"), manifest.as_bytes())?;
+    let state_text: String = new_state
+        .iter()
+        .map(|(n, s)| format!("{n}\t{s}\n"))
+        .collect();
+    write_atomic(&state_path, state_text.as_bytes())?;
     Ok(outcome)
+}
+
+/// Write `data` to `path` atomically (temp in the same dir, then rename), so a
+/// crash or ENOSPC never leaves a truncated manifest/state file.
+fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+    let tmp = Path::new(&format!("{}.tmp", path.display())).to_path_buf();
+    std::fs::write(&tmp, data).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", tmp.display()))
 }
 
 /// Read `name<TAB>qmdl_size_bytes` lines into a map (missing/garbled -> empty).
@@ -384,11 +493,6 @@ fn read_pull_state(path: &Path) -> std::collections::BTreeMap<String, u64> {
         }
     }
     map
-}
-
-fn write_pull_state(path: &Path, state: &[(String, u64)]) -> Result<(), String> {
-    let text: String = state.iter().map(|(n, s)| format!("{n}\t{s}\n")).collect();
-    std::fs::write(path, text).map_err(|e| format!("write pull state: {e}"))
 }
 
 #[cfg(test)]
@@ -450,12 +554,35 @@ mod tests {
     }
 
     #[test]
-    fn http_get_to_rejects_chunked() {
-        let addr =
-            serve_raw("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+    fn http_get_to_decodes_chunked() {
+        // Two chunks + terminator -> body "abcde".
+        let addr = serve_raw(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n",
+        );
+        let mut buf = Vec::new();
+        let n = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(buf, b"abcde");
+    }
+
+    #[test]
+    fn http_get_to_rejects_chunked_without_terminator() {
+        // Data chunk but the connection closes before the 0-chunk -> truncated.
+        let addr = serve_raw("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n");
         let mut buf = Vec::new();
         let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap_err();
-        assert!(err.contains("chunked"), "got: {err}");
+        assert!(
+            err.contains("truncated") || err.contains("mid-chunk"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn http_get_to_rejects_unframed_body() {
+        // HTTP/1.1 with neither Content-Length nor chunked -> cannot verify.
+        let addr = serve_raw("HTTP/1.1 200 OK\r\n\r\nabc");
+        let mut buf = Vec::new();
+        assert!(http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).is_err());
     }
 
     #[test]
@@ -502,9 +629,10 @@ mod tests {
                 let body = routes.iter().find(|(p, _)| *p == path).map(|(_, b)| *b);
                 let resp = match body {
                     Some(b) => format!(
-                        "HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n{b}"
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{b}",
+                        b.len()
                     ),
-                    None => "HTTP/1.0 404 Not Found\r\n\r\n".to_string(),
+                    None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string(),
                 };
                 let _ = s.write_all(resp.as_bytes());
             }
