@@ -88,10 +88,13 @@ pub fn http_get_to(
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| "malformed HTTP status line".to_string())?;
-    if !(200..300).contains(&status) {
-        return Err(format!("HTTP {status}"));
+    // Require exactly 200: 204 (no content) and 206 (partial) would otherwise
+    // save an empty/partial file and record it as a complete download.
+    if status != 200 {
+        return Err(format!("HTTP {status} (expected 200)"));
     }
-    // We cannot de-chunk; refuse rather than save chunk framing into the file.
+    // Refuse any transfer/content encoding we would otherwise write verbatim into
+    // the file, and fail closed on an invalid or conflicting Content-Length.
     let mut content_length: Option<u64> = None;
     for line in head_str.lines().skip(1) {
         let Some((k, val)) = line.split_once(':') else {
@@ -99,11 +102,23 @@ pub fn http_get_to(
         };
         let key = k.trim().to_ascii_lowercase();
         let val = val.trim();
-        if key == "transfer-encoding" && val.to_ascii_lowercase().contains("chunked") {
-            return Err("chunked transfer-encoding is not supported".to_string());
-        }
-        if key == "content-length" {
-            content_length = val.parse::<u64>().ok();
+        match key.as_str() {
+            "transfer-encoding" if !val.is_empty() => {
+                return Err(format!("unsupported transfer-encoding: {val:?}"));
+            }
+            "content-encoding" if !val.is_empty() && !val.eq_ignore_ascii_case("identity") => {
+                return Err(format!("unsupported content-encoding: {val:?}"));
+            }
+            "content-length" => {
+                let len = val
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid Content-Length: {val:?}"))?;
+                if content_length.is_some_and(|prev| prev != len) {
+                    return Err("conflicting Content-Length headers".to_string());
+                }
+                content_length = Some(len);
+            }
+            _ => {}
         }
     }
 
@@ -170,6 +185,7 @@ fn parse_manifest(body: &str) -> Result<Vec<Recording>, String> {
     // some daemon versions leave `stop_reason` null on finished entries too. A
     // recording in `entries` is final, so its `qmdl_size_bytes` is stable and the
     // skip-if-unchanged check is sound.
+    let mut seen = std::collections::BTreeSet::new();
     let mut take = |entry: &crate::json::Json, completed: bool| -> Result<(), String> {
         let name = entry
             .get("name")
@@ -178,6 +194,11 @@ fn parse_manifest(body: &str) -> Result<Vec<Recording>, String> {
             .to_string();
         if !safe_name(&name) {
             return Err(format!("unsafe recording name in manifest: {name:?}"));
+        }
+        // Duplicate names would make two recordings share one `<name>.qmdl` and
+        // corrupt PULL-MANIFEST.txt / .orx-pull-state -- fail closed.
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate recording name in manifest: {name:?}"));
         }
         let qmdl_size = entry.get("qmdl_size_bytes").and_then(|s| s.as_u64());
         out.push(Recording {
@@ -435,6 +456,24 @@ mod tests {
         let mut buf = Vec::new();
         let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap_err();
         assert!(err.contains("chunked"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_rejects_duplicate_names() {
+        let body =
+            r#"{"entries":[{"name":"1","qmdl_size_bytes":1},{"name":"1","qmdl_size_bytes":2}]}"#;
+        assert!(parse_manifest(body).is_err());
+        // A current_entry duplicating an entry name is also rejected.
+        let body2 = r#"{"entries":[{"name":"1","qmdl_size_bytes":1}],"current_entry":{"name":"1","qmdl_size_bytes":2}}"#;
+        assert!(parse_manifest(body2).is_err());
+    }
+
+    #[test]
+    fn http_get_to_requires_200() {
+        let addr = serve_raw("HTTP/1.0 204 No Content\r\n\r\n");
+        let mut buf = Vec::new();
+        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap_err();
+        assert!(err.contains("204"), "got: {err}");
     }
 
     #[test]
