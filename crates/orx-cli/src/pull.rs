@@ -50,17 +50,53 @@ impl From<&str> for PullError {
 /// which replies `202 Accepted`). The (bounded) response body is read and
 /// discarded. 404 maps to `PullError::NotFound`, like [`http_get_to`].
 pub fn http_post(addr: SocketAddr, path: &str, timeout: Duration) -> Result<u16, PullError> {
+    post_impl(addr, path, b"", None, timeout)
+}
+
+/// POST a JSON body and return the response status on a 2xx. Used for the
+/// daemon's config write (`/api/config`). 404 maps to `PullError::NotFound`.
+pub fn http_post_json(
+    addr: SocketAddr,
+    path: &str,
+    body: &str,
+    timeout: Duration,
+) -> Result<u16, PullError> {
+    post_impl(
+        addr,
+        path,
+        body.as_bytes(),
+        Some("application/json"),
+        timeout,
+    )
+}
+
+fn post_impl(
+    addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    content_type: Option<&str>,
+    timeout: Duration,
+) -> Result<u16, PullError> {
     const MAX_DRAIN: u64 = 64 * 1024;
     let deadline = Instant::now() + timeout;
     let mut stream =
         TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
     stream.set_write_timeout(Some(timeout)).ok();
+    let ct = content_type
+        .map(|c| format!("Content-Type: {c}\r\n"))
+        .unwrap_or_default();
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n{ct}Content-Length: {}\r\n\r\n",
+        body.len()
     );
     stream
         .write_all(req.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
+    if !body.is_empty() {
+        stream
+            .write_all(body)
+            .map_err(|e| format!("write body: {e}"))?;
+    }
 
     let mut head = Vec::new();
     let mut buf = [0u8; 8192];

@@ -17,6 +17,9 @@ ui_level = 1
 key_input_mode = 1
 
 # Notifications (upstream supports ntfy). Set a private, unguessable topic.
+# Uncomment ntfy_url to deliver alerts; then `orx alert status` shows it and
+# `orx alert test` sends a test notification. The daemon fires Warning on
+# analyzer detections and LowBattery, with debounce + retry, built in.
 # ntfy_url = "https://ntfy.sh/<private-topic>"
 enabled_notifications = ["Warning", "LowBattery"]
 

@@ -4,6 +4,7 @@
 //! web UI. Backup, install and verify commands land in later phases
 //! (see `to-dos/`).
 
+pub mod alert;
 pub mod backup;
 pub mod check;
 pub mod install;

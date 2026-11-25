@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, check, install, probe, pull, purge, rescue, transport, usb, verify};
+use orx_cli::{alert, backup, check, install, probe, pull, purge, rescue, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -22,6 +22,7 @@ USAGE:
     orx purge [--apply --pulled <dir>|--force] [--ip <addr>]
                                          Delete completed recordings (dry-run unless --apply; keeps active)
     orx rescue [--ip <addr>]             Read-only diagnostic over :24 when :8080 is down (df + recordings)
+    orx alert status|test [--ip <addr>]  Show the daemon's ntfy alerting config / send a test notification
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
                 [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
@@ -265,6 +266,60 @@ fn cmd_verify(dir: &Path) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Strip control characters from an untrusted device string before printing it.
+fn san_device(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(200).collect()
+}
+
+/// `orx alert`: inspect / exercise the daemon's built-in ntfy alerting.
+fn cmd_alert(ip: &str, sub: &str) -> ExitCode {
+    let timeout = Duration::from_secs(10);
+    match sub {
+        "status" => match alert::status(ip, timeout) {
+            Ok(s) => {
+                match &s.ntfy_url {
+                    Some(u) => println!("ntfy_url: {}", san_device(u)),
+                    None => println!(
+                        "ntfy_url: (not set) -- no alerts will be delivered until one is configured"
+                    ),
+                }
+                let types = if s.enabled.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    s.enabled
+                        .iter()
+                        .map(|e| san_device(e))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                println!("enabled notifications: {types}");
+                println!(
+                    "The daemon alerts on analyzer detections (Warning) and LowBattery when an \
+                     ntfy_url is set. Set one in the Rayhunter web UI, then `orx alert test`."
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        },
+        "test" => match alert::test(ip, timeout) {
+            Ok(()) => {
+                println!("test notification sent to the configured ntfy_url");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        },
+        other => usage_err(&format!(
+            "unknown alert subcommand {other:?} (use status|test)"
+        )),
     }
 }
 
@@ -798,6 +853,25 @@ fn main() -> ExitCode {
                     eprintln!("error: verify needs --dir <dir>\n\n{USAGE}");
                     ExitCode::from(2)
                 }
+            }
+        }
+        Some("alert") => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut sub: Option<String> = None;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--ip" => match rest.next() {
+                        Some(v) if !v.is_empty() => ip = v.clone(),
+                        _ => return usage_err("--ip needs a value"),
+                    },
+                    s @ ("status" | "test") if sub.is_none() => sub = Some(s.to_string()),
+                    other => return usage_err(&format!("unexpected argument {other:?}")),
+                }
+            }
+            match sub {
+                Some(s) => cmd_alert(&ip, &s),
+                None => usage_err("alert needs a subcommand: status or test"),
             }
         }
         Some("rescue") => {

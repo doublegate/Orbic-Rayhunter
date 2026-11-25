@@ -4,6 +4,28 @@
 
 - (nothing yet)
 
+## [1.1.0] - 2026-11-25
+
+### Added
+
+- `orx alert status|test [--ip <addr>]` (T-OR-044): host-side enablement of the daemon's BUILT-IN
+  ntfy alerting. Upstream v0.13.0 already sends a `Warning` notification on analyzer detections (and
+  `LowBattery`) to its configured `ntfy_url`, with per-type debounce and exponential-backoff retry.
+  `orx alert status` reads `/api/config` and shows the current `ntfy_url` and enabled notification
+  types (device strings sanitized before printing); `orx alert test` asks the daemon to POST a test
+  notification (reporting clearly when no `ntfy_url` is set). Validated live: the unit reports no
+  `ntfy_url` yet with `Warning, LowBattery` enabled -- alerting is one URL away.
+- A std-only JSON serializer (`Json::to_json`/`set`) and `pull::http_post_json`, groundwork for the
+  host-side config write (`orx alert set`, T-OR-046/v1.1.1).
+
+### Notes
+
+- Setting `ntfy_url` from the host restarts the daemon and the `/api/config` round-trip redacts
+  `wifi_password`, so `orx alert set` is deferred to v1.1.1 (validated as a careful read-modify-write
+  on-device). For now set `ntfy_url` in the Rayhunter web UI or in `config.orbic.toml` at install.
+- The daemon's alerting SINK extensions (webhook headers/auth, MQTT, Gotify, persistent queue;
+  T-OR-045..050, all upstream) move to v1.2.0 per the enable-now/patch-after decision.
+
 ## [1.0.6] - 2026-11-25
 
 ### Added
