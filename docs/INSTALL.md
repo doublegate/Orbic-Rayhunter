@@ -216,20 +216,22 @@ uses it. On a stock unit, run upstream's `installer orbic` (step 3) first if you
 ## 5. Post-install health check
 
 This is the ON-DEVICE health check after an install -- distinct from `orx verify --dir`, which
-checks a backup's integrity (section 2). It is planned as `orx check` (T-OR-037) and not yet
-implemented; for now run the manual equivalents.
+checks a backup's integrity (section 2).
 
 ```sh
-orx check                 # T-OR-037 (planned); manual equivalents below
+orx check [--ip <addr>]   # T-OR-037 (v1.0.4)
 ```
 
-Checks (manual equivalents in parentheses):
+`orx check` is read-only. It queries the daemon's `:8080` API for the rayhunter version, OS/arch,
+disk/memory/battery and recording status, and probes ports: the daemon port (`:8080`) should be
+open, while the root shell (`:24`) and installer transfer port (`:8081`) should be closed on a
+settled device. It prints an `[ok]/[warn]/[fail]` line per item and exits non-zero on any failure.
+
+Checks it does NOT cover yet (manual equivalents in parentheses) -- these need the `:24` root shell,
+which is not reboot-persistent:
 
 - [ ] Daemon hash equals `dist/SHA256SUMS` (`sha256sum /data/rayhunter/rayhunter-daemon` in the
       shell).
-- [ ] Web UI and API answer (`curl -s http://192.168.1.1:8080/api/system-stats`).
-- [ ] A recording is active (`curl -s http://192.168.1.1:8080/api/qmdl-manifest`) and the display
-      shows the status line (green with `ui_level = 1`).
 - [ ] The build identifier from T-OR-028 is reported.
 - [ ] After a reboot the daemon starts without intervention and a new recording appears.
 - [ ] The stock hotspot still works: a client joins the AP and `http://192.168.1.1/` loads.

@@ -4,6 +4,17 @@
 
 - (nothing yet)
 
+## [1.0.4] - 2026-11-25
+
+### Added
+
+- `orx check [--ip <addr>]` (T-OR-037): read-only device health report. Queries the daemon's
+  `:8080` API (`/api/system-stats`, `/api/qmdl-manifest`) for the rayhunter version, OS/arch,
+  disk/memory/battery and recording status, and probes ports -- the daemon port (`:8080`) should be
+  open, while the root shell (`:24`) and installer transfer port (`:8081`) should be closed on a
+  settled device. Prints an `[ok]/[warn]/[fail]` summary and exits non-zero on any failure. Reuses
+  the std-only JSON reader and HTTP client; no new dependencies. Validated live (device healthy).
+
 ## [1.0.3] - 2026-11-25
 
 ### Added
