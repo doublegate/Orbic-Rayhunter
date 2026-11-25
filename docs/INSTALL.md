@@ -325,3 +325,21 @@ Captures hold real identifiers (IMSI/IMEI/ICCID), so pull anything you want to k
 `orx pull-logs --to <dir>` before purging. If the daemon is in debug mode it refuses deletes with a
 `403`; `orx purge` reports that explicitly. Disk-pressure retention policies (by age, size or count)
 are a planned follow-up (T-OR-040b).
+
+## 9. Rescue a wedged device
+
+```sh
+orx rescue [--apply --keep <N>] [--ip <addr>]   # T-OR-041 (v1.0.6)
+```
+
+When the daemon's `:8080` API is unresponsive (for example `/data` filled up), `orx rescue` works
+over the `:24` root shell instead. By default it reports free space on `/data` and the stored
+recordings (oldest first). `--apply --keep <N>` stops the daemon and deletes the oldest recordings,
+keeping the newest N; it aborts before deleting anything if the daemon fails to stop. Pull anything
+you want to keep first with `orx pull-logs`.
+
+The `:24` root shell is not reboot-persistent. Re-open it before using `orx rescue`:
+
+```sh
+./upstream/target/release/installer util orbic-start-telnet --admin-password "$(cat ~/.claude-secrets/orbic-admin.txt)"
+```

@@ -156,8 +156,12 @@ cargo run -p orx-cli -- doctor
       hard error; a valid pull dir that lacks a given recording skips it. Dry run and the gate
       validated live on the unit; the delete path is unit-tested against a loopback server (real captures not deleted).
       Age/size/count policies and a "keep flagged" flag are a follow-up (T-OR-040b).
-- [ ] T-OR-041: `orx rescue`: when :8080 is down, use the network shell to report `df -h /data`,
-      stop the daemon, and move or delete the oldest recordings after confirmation
+- [x] T-OR-041 (v1.0.6): `orx rescue` uses the `:24` shell to report `df` on `/data` + the stored
+      recordings (oldest first, from `qmdl_store_path`); `--apply --keep <N>` stops the daemon
+      (`/etc/init.d/rayhunter_daemon stop`) and deletes the oldest recordings' file sets keeping the
+      newest N, aborting before any delete if the stop fails. Dry run validated live (187M free, 4
+      recordings); the delete path is unit-tested against a fake shell. The `:24` shell is not
+      reboot-persistent (re-open via `installer util orbic-start-telnet`).
 - [ ] T-OR-041: rehearse a controlled fill of `/data` to the configured threshold (not to 100
       percent) and confirm the guard and the rescue path
 

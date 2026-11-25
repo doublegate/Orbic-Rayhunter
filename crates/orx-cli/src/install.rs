@@ -492,7 +492,7 @@ pub fn uninstall_plan(stock_misc_daemon: Vec<u8>) -> Vec<Step> {
 /// wrap to its own line, so anchor from the END and check: last token == mount,
 /// Use% is `<digits>%`, and the three size columns are numeric. The mount check
 /// also catches an unmounted `/data` that silently resolved to `/`.
-fn parse_df_available_kb(df_output: &str, mount: &str) -> Option<u64> {
+pub fn parse_df_available_kb(df_output: &str, mount: &str) -> Option<u64> {
     let toks: Vec<&str> = df_output
         .lines()
         .skip(1) // header

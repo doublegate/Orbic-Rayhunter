@@ -4,6 +4,25 @@
 
 - (nothing yet)
 
+## [1.0.6] - 2026-11-25
+
+### Added
+
+- `orx rescue [--apply --keep <N>] [--ip <addr>]` (T-OR-041): recover a wedged device through the
+  `:24` root shell when the daemon's `:8080` API is unresponsive (e.g. `/data` filled up). Dry-run
+  by default -- it reports free space on `/data` and the stored recordings (oldest first, with
+  sizes), reading `qmdl_store_path` from the device config. `--apply --keep <N>` stops the daemon
+  (`/etc/init.d/rayhunter_daemon stop`) and deletes the OLDEST recordings' file sets
+  (`.qmdl.gz` + `.ndjson` + `-gps.ndjson`), keeping the newest N; it aborts before deleting anything
+  if the daemon fails to stop, and validates every device path. The `:24` shell is not
+  reboot-persistent (re-open it first; see INSTALL.md section 5). Dry run validated live; the delete
+  path is unit-tested against a fake shell (the device's recordings were not deleted).
+
+### Notes
+
+- Confirmed on the unit that `qmdl_size_bytes` in the daemon manifest is the COMPRESSED on-disk
+  size: recordings are stored as `<name>.qmdl.gz` and `1795442375.qmdl.gz` is exactly 869535 bytes.
+
 ## [1.0.5] - 2026-11-25
 
 ### Added

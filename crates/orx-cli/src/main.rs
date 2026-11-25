@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, check, install, probe, pull, purge, transport, usb, verify};
+use orx_cli::{backup, check, install, probe, pull, purge, rescue, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -21,6 +21,8 @@ USAGE:
     orx check [--ip <addr>]              Read-only device health report (daemon, stats, ports)
     orx purge [--apply --pulled <dir>|--force] [--ip <addr>]
                                          Delete completed recordings (dry-run unless --apply; keeps active)
+    orx rescue [--apply --keep <N>] [--ip <addr>]
+                                         Recover a wedged device over :24 (df + recordings; --apply deletes oldest)
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
                 [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
@@ -264,6 +266,83 @@ fn cmd_verify(dir: &Path) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `orx rescue`: recover a wedged device via the `:24` shell (df + stored
+/// recordings; with `--apply` stop the daemon and delete the oldest).
+fn cmd_rescue(ip: &str, apply: bool, keep: Option<usize>) -> ExitCode {
+    let addr = match probe::socket(ip, 24) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut shell = transport::TcpShell::new(addr, Duration::from_secs(120));
+    if !apply {
+        match rescue::plan(&mut shell) {
+            Ok(p) => {
+                match p.available_kb {
+                    Some(kb) => println!("{} free on {}", human_kib(kb), rescue::DATA_MOUNT),
+                    None => println!("free space on {} unknown", rescue::DATA_MOUNT),
+                }
+                println!(
+                    "{} recording(s) in {} ({} bytes), oldest first:",
+                    p.recordings.len(),
+                    p.store,
+                    p.total_bytes()
+                );
+                for r in &p.recordings {
+                    println!("  {} ({} bytes)", r.name, r.bytes);
+                }
+                println!(
+                    "Run `orx rescue --apply --keep <N>` to stop the daemon and delete the oldest, \
+                     keeping the newest N. Pull anything you want to keep first (orx pull-logs)."
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: {e}\n(the :24 root shell must be open; see docs/INSTALL.md section 5)"
+                );
+                ExitCode::from(1)
+            }
+        }
+    } else {
+        let Some(keep) = keep else {
+            return usage_err(
+                "rescue --apply needs --keep <N> (how many newest recordings to keep)",
+            );
+        };
+        match rescue::apply(&mut shell, keep) {
+            Ok(o) => {
+                println!(
+                    "rescue: {} deleted, {} failed, {} bytes freed",
+                    o.deleted, o.failed, o.freed_bytes
+                );
+                if o.failed > 0 {
+                    ExitCode::from(1)
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
+/// Format kibibytes as a short human string (device `df -k` is in KiB).
+fn human_kib(kb: u64) -> String {
+    if kb >= 1024 * 1024 {
+        format!("{:.1}G", kb as f64 / (1024.0 * 1024.0))
+    } else if kb >= 1024 {
+        format!("{:.1}M", kb as f64 / 1024.0)
+    } else {
+        format!("{kb}K")
     }
 }
 
@@ -743,6 +822,30 @@ fn main() -> ExitCode {
                     ExitCode::from(2)
                 }
             }
+        }
+        Some("rescue") => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut apply = false;
+            let mut keep: Option<usize> = None;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--apply" => apply = true,
+                    "--keep" => match rest.next() {
+                        Some(v) => match v.parse::<usize>() {
+                            Ok(n) => keep = Some(n),
+                            Err(_) => return usage_err("--keep needs a non-negative integer"),
+                        },
+                        None => return usage_err("--keep needs a value"),
+                    },
+                    "--ip" => match rest.next() {
+                        Some(v) if !v.is_empty() => ip = v.clone(),
+                        _ => return usage_err("--ip needs a value"),
+                    },
+                    other => return usage_err(&format!("unexpected argument {other:?}")),
+                }
+            }
+            cmd_rescue(&ip, apply, keep)
         }
         Some("purge") => {
             let mut ip = probe::DEFAULT_DEVICE_IP.to_string();

@@ -11,6 +11,7 @@ pub mod json;
 pub mod probe;
 pub mod pull;
 pub mod purge;
+pub mod rescue;
 pub mod sha256;
 pub mod transport;
 pub mod usb;
