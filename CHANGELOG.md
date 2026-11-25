@@ -13,8 +13,10 @@
   from the device's `:8080` API to a host directory, writes a `PULL-MANIFEST.txt` of SHA-256 sums,
   and skips completed recordings already pulled unchanged (tracked in a `.orx-pull-state` file).
   Streams each download to disk (bounded) so a large capture never buffers in memory, and validates
-  device-supplied recording names before using them in a path or URL. Validated live on the unit
-  (4 recordings pulled, then 3 skipped on re-run).
+  device-supplied recording names before using them in a path or URL. The manifest parse fails
+  closed (an `entries` array is required), downloads reject chunked encoding and a short
+  Content-Length, file hashing is incremental, and only fully-pulled completed recordings are
+  recorded as skippable. Validated live on the unit (4 recordings pulled, then 3 skipped on re-run).
 - A minimal std-only JSON reader (`json`) for the daemon's API responses, keeping orx-cli
   dependency-free.
 

@@ -81,14 +81,30 @@ pub fn http_get_to(
             Err(e) => return Err(format!("read: {e}")),
         }
     };
-    let status = std::str::from_utf8(&head)
-        .ok()
-        .and_then(|h| h.lines().next())
+    let head_str = std::str::from_utf8(&head).map_err(|_| "non-UTF-8 HTTP headers".to_string())?;
+    let status = head_str
+        .lines()
+        .next()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| "malformed HTTP status line".to_string())?;
     if !(200..300).contains(&status) {
         return Err(format!("HTTP {status}"));
+    }
+    // We cannot de-chunk; refuse rather than save chunk framing into the file.
+    let mut content_length: Option<u64> = None;
+    for line in head_str.lines().skip(1) {
+        let Some((k, val)) = line.split_once(':') else {
+            continue;
+        };
+        let key = k.trim().to_ascii_lowercase();
+        let val = val.trim();
+        if key == "transfer-encoding" && val.to_ascii_lowercase().contains("chunked") {
+            return Err("chunked transfer-encoding is not supported".to_string());
+        }
+        if key == "content-length" {
+            content_length = val.parse::<u64>().ok();
+        }
     }
 
     let mut written = 0u64;
@@ -113,6 +129,11 @@ pub fn http_get_to(
             Err(e) => return Err(format!("read body: {e}")),
         }
     }
+    // If the server declared a length, a short read is a truncated transfer --
+    // reject it so a partial file is never renamed into place or recorded as done.
+    if let Some(len) = content_length.filter(|&len| written != len) {
+        return Err(format!("truncated: got {written} of {len} bytes"));
+    }
     Ok(written)
 }
 
@@ -126,7 +147,9 @@ fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// One recording to pull, parsed from the manifest.
 struct Recording {
     name: String,
-    qmdl_size: u64,
+    /// Manifest-reported (compressed, on-device) size; `None` if the field is
+    /// absent -- then the recording is never treated as "unchanged" (no skip).
+    qmdl_size: Option<u64>,
     completed: bool,
 }
 
@@ -134,6 +157,13 @@ struct Recording {
 /// `entries` plus the live `current_entry` if present.
 fn parse_manifest(body: &str) -> Result<Vec<Recording>, String> {
     let v = crate::json::parse(body).map_err(|e| format!("manifest JSON: {e}"))?;
+    // Fail closed: the manifest must be an object with an `entries` array. A bare
+    // `{}` or an error object returned with 200 must not parse as "no recordings"
+    // (which would then overwrite the local state as empty).
+    let entries = v
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .ok_or_else(|| "manifest has no `entries` array (unexpected response?)".to_string())?;
     let mut out = Vec::new();
     // `completed` is determined by POSITION, not `stop_reason`: the daemon keeps
     // finished recordings in `entries` and the live one in `current_entry`, and
@@ -149,10 +179,7 @@ fn parse_manifest(body: &str) -> Result<Vec<Recording>, String> {
         if !safe_name(&name) {
             return Err(format!("unsafe recording name in manifest: {name:?}"));
         }
-        let qmdl_size = entry
-            .get("qmdl_size_bytes")
-            .and_then(|s| s.as_u64())
-            .unwrap_or(0);
+        let qmdl_size = entry.get("qmdl_size_bytes").and_then(|s| s.as_u64());
         out.push(Recording {
             name,
             qmdl_size,
@@ -160,10 +187,8 @@ fn parse_manifest(body: &str) -> Result<Vec<Recording>, String> {
         });
         Ok(())
     };
-    if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
-        for e in entries {
-            take(e, true)?;
-        }
+    for e in entries {
+        take(e, true)?;
     }
     if let Some(cur) = v.get("current_entry").filter(|c| !c.is_null()) {
         take(cur, false)?;
@@ -171,10 +196,49 @@ fn parse_manifest(body: &str) -> Result<Vec<Recording>, String> {
     Ok(out)
 }
 
-/// sha256 + byte count of a local file, for the host manifest.
-fn file_digest(path: &Path) -> Result<(String, u64), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    Ok((crate::sha256::hex(&bytes), bytes.len() as u64))
+/// Download `path` to `dest` atomically: stream to `<dest>.part`, then rename on
+/// a complete transfer; remove the temp on failure (so a partial file is never
+/// left as `dest`). Returns the number of bytes written.
+fn download_to(
+    addr: SocketAddr,
+    path: &str,
+    dest: &Path,
+    max: u64,
+    timeout: Duration,
+) -> Result<u64, String> {
+    let tmp = Path::new(&format!("{}.part", dest.display())).to_path_buf();
+    let mut f =
+        std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    match http_get_to(addr, path, &mut f, max, timeout) {
+        Ok(n) => {
+            drop(f);
+            std::fs::rename(&tmp, dest).map_err(|e| format!("rename {}: {e}", tmp.display()))?;
+            Ok(n)
+        }
+        Err(e) => {
+            drop(f);
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// sha256 of a local file, hashed incrementally in 64 KiB chunks (never loading
+/// the whole capture into RAM).
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut h = crate::sha256::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(crate::sha256::hex_of(h))
 }
 
 pub struct PullOutcome {
@@ -221,56 +285,55 @@ pub fn pull_logs_at(
     let mut new_state: Vec<(String, u64)> = Vec::new();
     for r in &recordings {
         let qmdl = dir.join(format!("{}.qmdl", r.name));
-        new_state.push((r.name.clone(), r.qmdl_size));
-        let up_to_date =
-            r.completed && prior.get(r.name.as_str()) == Some(&r.qmdl_size) && qmdl.is_file();
-        if up_to_date {
+        let nd = dir.join(format!("{}.ndjson", r.name));
+        let nd_path = format!("/api/analysis-report/{}", r.name);
+        // Skippable only when the recording is completed, its manifest size is
+        // known and unchanged since the last pull, and its QMDL is on disk.
+        let unchanged = r.completed
+            && r.qmdl_size.is_some()
+            && prior.get(r.name.as_str()).copied() == r.qmdl_size
+            && qmdl.is_file();
+        if unchanged {
             outcome.skipped += 1;
+            // Re-fetch the analysis report only if it's missing (a prior transient
+            // failure, or a live->completed transition left it absent/stale).
+            if !nd.is_file() {
+                // Best-effort re-fetch of a missing report; a still-absent one is fine.
+                outcome.bytes += download_to(addr, &nd_path, &nd, MAX_QMDL, timeout).unwrap_or(0);
+            }
         } else {
-            let tmp = dir.join(format!("{}.qmdl.part", r.name));
-            let mut f = std::fs::File::create(&tmp)
-                .map_err(|e| format!("create {}: {e}", tmp.display()))?;
-            let n = http_get_to(
+            let nq = download_to(
                 addr,
                 &format!("/api/qmdl/{}", r.name),
-                &mut f,
+                &qmdl,
                 MAX_QMDL,
                 timeout,
             )
             .map_err(|e| format!("download {}.qmdl: {e}", r.name))?;
-            drop(f);
-            std::fs::rename(&tmp, &qmdl).map_err(|e| format!("rename {}: {e}", tmp.display()))?;
             outcome.pulled += 1;
-            outcome.bytes += n;
-            // Analysis report (NDJSON) is best-effort: it may not exist yet.
-            let nd = dir.join(format!("{}.ndjson", r.name));
-            let ndtmp = dir.join(format!("{}.ndjson.part", r.name));
-            if let Ok(mut nf) = std::fs::File::create(&ndtmp) {
-                match http_get_to(
-                    addr,
-                    &format!("/api/analysis-report/{}", r.name),
-                    &mut nf,
-                    MAX_QMDL,
-                    timeout,
-                ) {
-                    Ok(nb) => {
-                        drop(nf);
-                        let _ = std::fs::rename(&ndtmp, &nd);
-                        outcome.bytes += nb;
-                    }
-                    Err(_) => {
-                        drop(nf);
-                        let _ = std::fs::remove_file(&ndtmp);
-                    }
+            outcome.bytes += nq;
+            // Analysis report (NDJSON) is best-effort (may not exist yet); never
+            // leave a stale/partial one from a previous run if it now fails.
+            match download_to(addr, &nd_path, &nd, MAX_QMDL, timeout) {
+                Ok(nb) => outcome.bytes += nb,
+                Err(_) => {
+                    let _ = std::fs::remove_file(&nd);
                 }
             }
         }
-        // Record digests of whatever is on disk for this recording.
-        for suffix in ["qmdl", "ndjson"] {
-            let p = dir.join(format!("{}.{suffix}", r.name));
-            if p.is_file() {
-                let (hash, _) = file_digest(&p)?;
-                manifest_lines.push(format!("{hash}  {}.{suffix}", r.name));
+        // Record skippable state ONLY for a completed recording that is fully
+        // present (QMDL + NDJSON) at a known size, so the live recording -- and
+        // any whose NDJSON is still missing -- is re-pulled next run.
+        if let (true, Some(sz)) = (r.completed && qmdl.is_file() && nd.is_file(), r.qmdl_size) {
+            new_state.push((r.name.clone(), sz));
+        }
+        for p in [&qmdl, &nd] {
+            if let Some(fname) = p
+                .is_file()
+                .then(|| p.file_name().and_then(|n| n.to_str()))
+                .flatten()
+            {
+                manifest_lines.push(format!("{}  {fname}", file_sha256(p)?));
             }
         }
     }
@@ -339,6 +402,48 @@ mod tests {
         let body =
             r#"{"entries":[{"name":"../../etc/passwd","qmdl_size_bytes":1,"stop_reason":"x"}]}"#;
         assert!(parse_manifest(body).is_err());
+    }
+
+    #[test]
+    fn parse_manifest_fails_closed_without_entries() {
+        // A bare object or an error object returned with 200 must NOT parse as
+        // "no recordings" (which would wipe local state).
+        assert!(parse_manifest("{}").is_err());
+        assert!(parse_manifest(r#"{"error":"nope"}"#).is_err());
+        // An empty entries array is valid (no completed recordings yet).
+        assert_eq!(parse_manifest(r#"{"entries":[]}"#).unwrap().len(), 0);
+    }
+
+    /// Serve one fully-custom raw HTTP response (headers + body) for one conn.
+    fn serve_raw(resp: &'static str) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = l.accept() {
+                let mut req = [0u8; 1024];
+                let _ = s.read(&mut req);
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn http_get_to_rejects_chunked() {
+        let addr =
+            serve_raw("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+        let mut buf = Vec::new();
+        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap_err();
+        assert!(err.contains("chunked"), "got: {err}");
+    }
+
+    #[test]
+    fn http_get_to_rejects_truncated_content_length() {
+        // Declares 100 bytes but sends 3, then closes -> must error, not accept.
+        let addr = serve_raw("HTTP/1.0 200 OK\r\nContent-Length: 100\r\n\r\nabc");
+        let mut buf = Vec::new();
+        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap_err();
+        assert!(err.contains("truncated"), "got: {err}");
     }
 
     /// Serve canned HTTP/1.0 responses keyed by request path, for `count` conns.

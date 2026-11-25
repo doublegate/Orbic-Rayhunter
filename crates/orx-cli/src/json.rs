@@ -59,7 +59,11 @@ impl Json {
 /// Parse a complete JSON document; trailing non-whitespace is an error.
 pub fn parse(input: &str) -> Result<Json, String> {
     let bytes = input.as_bytes();
-    let mut p = Parser { b: bytes, i: 0 };
+    let mut p = Parser {
+        b: bytes,
+        s: input,
+        i: 0,
+    };
     p.skip_ws();
     let v = p.value(0)?;
     p.skip_ws();
@@ -71,6 +75,7 @@ pub fn parse(input: &str) -> Result<Json, String> {
 
 struct Parser<'a> {
     b: &'a [u8],
+    s: &'a str, // same bytes as `b`, for O(1) scalar decode (input is valid UTF-8)
     i: usize,
 }
 
@@ -218,13 +223,15 @@ impl Parser<'_> {
                     return Err(format!("control char in string at {}", self.i));
                 }
                 Some(_) => {
-                    // Copy one UTF-8 scalar from the source.
-                    let rest = &self.b[self.i..];
-                    let s = std::str::from_utf8(rest).map_err(|_| "invalid UTF-8".to_string())?;
-                    let ch = s
+                    // Decode exactly one scalar in O(1). `self.s` is the same
+                    // already-valid UTF-8 as `self.b`, and `self.i` sits on a char
+                    // boundary (we only advance by whole tokens/chars), so slicing
+                    // is cheap and does NOT re-validate the rest of the document
+                    // (the previous from_utf8(tail) was O(N) per char -> O(N^2)).
+                    let ch = self.s[self.i..]
                         .chars()
                         .next()
-                        .ok_or_else(|| "empty string slice".to_string())?;
+                        .ok_or_else(|| "unexpected end of string".to_string())?;
                     out.push(ch);
                     self.i += ch.len_utf8();
                 }
