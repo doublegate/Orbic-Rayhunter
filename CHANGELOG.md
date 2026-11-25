@@ -4,6 +4,25 @@
 
 - (nothing yet)
 
+## [1.0.1] - 2026-11-25
+
+Install-safety hardening and a test-flake fix. No device-facing behaviour change beyond the new
+pre-install guards.
+
+### Added
+
+- `orx install` now guards the staged daemon before any device write (T-OR-036a): it verifies the
+  daemon against a `SHA256SUMS` beside it when present (catching a corrupted or swapped artifact),
+  and refuses an **unstripped** daemon -- the ~16 MB devel build left where the ~6 MB firmware
+  release was meant -- unless `--allow-unstripped` is passed. A missing `SHA256SUMS` warns rather
+  than blocks.
+
+### Fixed
+
+- `probe::tcp_open_detects_listener_and_closed_port` was flaky under parallel test runs (a
+  concurrent test could reuse the just-freed ephemeral port); it now retries with fresh ports and
+  is deterministic.
+
 ## [1.0.0] - 2026-11-23
 
 First stable release: a documented, reproducible, reversible install of our Rayhunter build,

@@ -16,7 +16,8 @@ USAGE:
     orx backup --out <dir> [--ip <addr>] [--allow-live]
                                          Archive each writable device filesystem (tar+SHA-256)
     orx verify --dir <dir>               Re-hash a backup dir against its MANIFEST.txt
-    orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>] [--apply]
+    orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
+                [--allow-unstripped] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
     orx uninstall --dir <backup> [--ip <addr>] [--apply]
                                          Reverse the install (dry-run unless --apply)
@@ -26,7 +27,9 @@ USAGE:
 Notes:
     install/uninstall WRITE to the device and reboot it; they are dry-run unless --apply,
     and always refuse unless `orx verify --dir <backup>` would pass. --dist defaults to
-    build/rayhunter/dist, --daemon to dist/rayhunter-daemon.
+    build/rayhunter/dist, --daemon to dist/rayhunter-daemon. install verifies the daemon
+    against a SHA256SUMS beside it and refuses an unstripped (devel) daemon unless
+    --allow-unstripped.
     backup needs the device root shell open on TCP 24 (see docs/BACKUP-AND-RECOVERY.md).
     It writes <dir>/<fs>.tar (0600) and <dir>/MANIFEST.txt; a live rw filesystem whose
     tar exits non-zero is only accepted with --allow-live (recorded as ok-live).
@@ -266,7 +269,14 @@ fn usage_err(msg: &str) -> ExitCode {
 }
 
 /// `orx install`: deploy our firmware build to the device (dry-run unless --apply).
-fn cmd_install(backup: &Path, dist: &Path, daemon: &Path, ip: &str, apply: bool) -> ExitCode {
+fn cmd_install(
+    backup: &Path,
+    dist: &Path,
+    daemon: &Path,
+    ip: &str,
+    apply: bool,
+    allow_unstripped: bool,
+) -> ExitCode {
     let init = dist.join("scripts/rayhunter_daemon");
     let misc = dist.join("scripts/misc-daemon");
     let config = dist.join("config.toml.in");
@@ -277,6 +287,39 @@ fn cmd_install(backup: &Path, dist: &Path, daemon: &Path, ip: &str, apply: bool)
             return ExitCode::from(2);
         }
     };
+    // Guard against pushing the wrong local artifact. SHA256SUMS (beside the
+    // daemon) catches a corrupted/swapped file; the unstripped check catches the
+    // ~16 MB devel build staged where the ~6 MB firmware release was meant.
+    match install::verify_daemon_against_sums(daemon) {
+        Ok(true) => println!("daemon verified against SHA256SUMS."),
+        Ok(false) => eprintln!(
+            "warning: no SHA256SUMS beside {} -- cannot verify the daemon's integrity",
+            daemon.display()
+        ),
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    match install::daemon_is_unstripped(daemon) {
+        Ok(true) if !allow_unstripped => {
+            eprintln!(
+                "error: {} is unstripped -- this looks like the devel build, not the firmware\n       \
+                 release. Build it with `scripts/build.sh firmware`, or pass --allow-unstripped to\n       \
+                 install it deliberately.",
+                daemon.display()
+            );
+            return ExitCode::from(1);
+        }
+        Ok(true) => {
+            eprintln!("warning: installing an unstripped (devel) daemon (--allow-unstripped).")
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    }
     // Refuse to install unless the backup can roll the install BACK: gate first,
     // then confirm it holds an unhooked stock misc-daemon (`orx uninstall`'s
     // restore source). A backup taken after an earlier install would pass the
@@ -577,11 +620,13 @@ fn main() -> ExitCode {
             let mut dist = "build/rayhunter/dist".to_string();
             let mut daemon = "dist/rayhunter-daemon".to_string();
             let mut apply = false;
+            let mut allow_unstripped = false;
             let mut rest = args[1..].iter();
             while let Some(arg) = rest.next() {
                 let need = |o: Option<&String>| -> Result<String, ()> { o.cloned().ok_or(()) };
                 match arg.as_str() {
                     "--apply" => apply = true,
+                    "--allow-unstripped" if cmd == "install" => allow_unstripped = true,
                     "--ip" => match need(rest.next()) {
                         Ok(v) => ip = v,
                         Err(()) => return usage_err("--ip needs a value"),
@@ -611,6 +656,7 @@ fn main() -> ExitCode {
                     Path::new(&daemon),
                     &ip,
                     apply,
+                    allow_unstripped,
                 )
             } else {
                 cmd_uninstall(Path::new(&backup), &ip, apply)

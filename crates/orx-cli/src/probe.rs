@@ -133,11 +133,23 @@ mod tests {
 
     #[test]
     fn tcp_open_detects_listener_and_closed_port() {
+        // Open: a live listener is detected.
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         assert!(tcp_open(addr, Duration::from_millis(500)));
-        drop(l);
-        assert!(!tcp_open(addr, Duration::from_millis(500)));
+        // Closed: a port with no listener refuses. Retry with a fresh ephemeral
+        // port each time, so a concurrent test reusing the just-freed port (the
+        // tests run in parallel and all bind 127.0.0.1:0) cannot make this flake.
+        let saw_closed = (0..10).any(|_| {
+            let t = TcpListener::bind("127.0.0.1:0").unwrap();
+            let a = t.local_addr().unwrap();
+            drop(t);
+            !tcp_open(a, Duration::from_millis(200))
+        });
+        assert!(
+            saw_closed,
+            "a freed ephemeral port should refuse connections"
+        );
     }
 
     /// Serve one canned HTTP response on a loopback port, then return its addr.

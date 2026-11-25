@@ -164,6 +164,88 @@ fn is_arm32_elf(bytes: &[u8]) -> bool {
     (e_type == 2 || e_type == 3) && e_machine == 40
 }
 
+/// Whether a 32-bit LE ELF carries a symbol table (`SHT_SYMTAB`), i.e. is NOT
+/// stripped. The firmware (release) profile strips; the devel profile does not,
+/// so an unstripped daemon is the ~16 MB debug build staged by mistake rather
+/// than the ~6 MB release build. Returns false when the section headers cannot
+/// be parsed (don't block on uncertainty -- `is_arm32_elf` already vouched it is
+/// a real ARM ELF).
+fn elf32_has_symbol_table(bytes: &[u8]) -> bool {
+    // ELF32 header: e_shoff@0x20 (u32), e_shentsize@0x2e (u16), e_shnum@0x30 (u16).
+    if bytes.len() < 0x34 {
+        return false;
+    }
+    let e_shoff = u32::from_le_bytes([bytes[0x20], bytes[0x21], bytes[0x22], bytes[0x23]]) as usize;
+    let e_shentsize = u16::from_le_bytes([bytes[0x2e], bytes[0x2f]]) as usize;
+    let e_shnum = u16::from_le_bytes([bytes[0x30], bytes[0x31]]) as usize;
+    if e_shoff == 0 || e_shentsize < 8 {
+        return false;
+    }
+    for i in 0..e_shnum {
+        let off = e_shoff.saturating_add(i.saturating_mul(e_shentsize));
+        if off.saturating_add(8) > bytes.len() {
+            return false;
+        }
+        // sh_type is the u32 at offset 4 of each section header; SHT_SYMTAB == 2.
+        let sh_type = u32::from_le_bytes([
+            bytes[off + 4],
+            bytes[off + 5],
+            bytes[off + 6],
+            bytes[off + 7],
+        ]);
+        if sh_type == 2 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Verify `daemon` against a `SHA256SUMS` beside it (the format `build.sh` writes:
+/// `<64-hex>  <basename>`), when that file exists. Returns:
+/// - `Ok(true)`  -- SHA256SUMS present and the daemon's hash matches its entry;
+/// - `Ok(false)` -- no SHA256SUMS beside the daemon (cannot verify);
+/// - `Err`       -- SHA256SUMS present but the daemon is absent from it or its
+///   hash does not match (a corrupted or swapped artifact) -- fail closed.
+pub fn verify_daemon_against_sums(daemon: &Path) -> Result<bool, String> {
+    let sums = match daemon.parent() {
+        Some(dir) => dir.join("SHA256SUMS"),
+        None => return Ok(false),
+    };
+    if !sums.is_file() {
+        return Ok(false);
+    }
+    let name = daemon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "daemon has no file name".to_string())?;
+    let text =
+        String::from_utf8(read(&sums)?).map_err(|_| format!("{} is not UTF-8", sums.display()))?;
+    let want = text.lines().find_map(|l| {
+        let (hash, file) = l.split_once("  ")?;
+        (file.trim() == name).then(|| hash.trim().to_string())
+    });
+    let want = want.ok_or_else(|| {
+        format!(
+            "{} does not list {name} (stale or wrong SHA256SUMS?)",
+            sums.display()
+        )
+    })?;
+    let got = crate::sha256::hex(&read(daemon)?);
+    if got != want {
+        return Err(format!(
+            "{} hash {got} does not match SHA256SUMS entry {want} (corrupt or swapped artifact)",
+            daemon.display()
+        ));
+    }
+    Ok(true)
+}
+
+/// Whether `daemon` is an unstripped build (carries a symbol table): the devel
+/// profile, not the stripped ~6 MB firmware release. Reads the file.
+pub fn daemon_is_unstripped(daemon: &Path) -> Result<bool, String> {
+    Ok(elf32_has_symbol_table(&read(daemon)?))
+}
+
 /// Build the install step plan. Validates every source (fail before any device
 /// write); remote paths are the fixed constants above.
 pub fn install_plan(
@@ -454,6 +536,54 @@ mod tests {
         b[16] = 2; // e_type = ET_EXEC
         b[18] = 40; // EM_ARM (little end of e_machine)
         b
+    }
+
+    /// An ARM32 ELF whose section-header table has, optionally, a SHT_SYMTAB.
+    fn elf_with_sections(with_symtab: bool) -> Vec<u8> {
+        let mut b = fake_arm_elf();
+        let shoff = 512usize;
+        let shentsize = 40usize;
+        let n = if with_symtab { 2 } else { 1 };
+        b[0x20..0x24].copy_from_slice(&(shoff as u32).to_le_bytes()); // e_shoff
+        b[0x2e..0x30].copy_from_slice(&(shentsize as u16).to_le_bytes()); // e_shentsize
+        b[0x30..0x32].copy_from_slice(&(n as u16).to_le_bytes()); // e_shnum
+        // Section 0: NULL (sh_type 0); section 1 (optional): SHT_SYMTAB (2).
+        if with_symtab {
+            let off = shoff + shentsize; // second header
+            b[off + 4..off + 8].copy_from_slice(&2u32.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn elf32_symbol_table_detection() {
+        assert!(elf32_has_symbol_table(&elf_with_sections(true)));
+        assert!(!elf32_has_symbol_table(&elf_with_sections(false)));
+        assert!(!elf32_has_symbol_table(&fake_arm_elf())); // no section headers
+    }
+
+    #[test]
+    fn verify_daemon_against_sums_cases() {
+        let d = tmp();
+        let daemon = d.join("rayhunter-daemon");
+        std::fs::write(&daemon, [7u8; 2048]).unwrap();
+        // No SHA256SUMS -> Ok(false) (cannot verify).
+        assert_eq!(verify_daemon_against_sums(&daemon), Ok(false));
+        // Matching entry -> Ok(true).
+        let good = crate::sha256::hex(&[7u8; 2048]);
+        std::fs::write(d.join("SHA256SUMS"), format!("{good}  rayhunter-daemon\n")).unwrap();
+        assert_eq!(verify_daemon_against_sums(&daemon), Ok(true));
+        // Wrong hash -> Err.
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{}  rayhunter-daemon\n", "0".repeat(64)),
+        )
+        .unwrap();
+        assert!(verify_daemon_against_sums(&daemon).is_err());
+        // Present but daemon not listed -> Err.
+        std::fs::write(d.join("SHA256SUMS"), format!("{good}  something-else\n")).unwrap();
+        assert!(verify_daemon_against_sums(&daemon).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn write_artifacts(d: &Path) {
