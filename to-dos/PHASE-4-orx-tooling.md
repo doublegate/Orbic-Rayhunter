@@ -156,8 +156,16 @@ cargo run -p orx-cli -- doctor
       hard error; a valid pull dir that lacks a given recording skips it. Dry run and the gate
       validated live on the unit; the delete path is unit-tested against a loopback server (real captures not deleted).
       Age/size/count policies and a "keep flagged" flag are a follow-up (T-OR-040b).
-- [ ] T-OR-041: `orx rescue`: when :8080 is down, use the network shell to report `df -h /data`,
-      stop the daemon, and move or delete the oldest recordings after confirmation
+- [x] T-OR-041 (v1.0.6): `orx rescue` is a READ-ONLY diagnostic over the `:24` shell -- it reports
+      `df` on `/data` + the stored recordings (oldest first, from `qmdl_store_path`), fails closed if
+      `/data` is unmounted or the store is missing, lists the store directly (no glob -> ARG_MAX
+      safe), accepts only numeric `<ts>.qmdl.gz` names, and rejects duplicates. Validated live (189M
+      free, 4 recordings). The `:24` shell is not reboot-persistent (re-open via
+      `installer util orbic-start-telnet`).
+- [ ] T-OR-041b: `orx rescue --apply` to delete the oldest recordings. Deferred from v1.0.6 because
+      safe deletion must stop the daemon, remove files AND reconcile the daemon's `manifest.toml`
+      (dangling-entry startup behaviour unverified), restart, and be validated on a genuinely wedged
+      device -- not from a read of a healthy one. Manual recovery steps are in INSTALL.md section 9.
 - [ ] T-OR-041: rehearse a controlled fill of `/data` to the configured threshold (not to 100
       percent) and confirm the guard and the rescue path
 

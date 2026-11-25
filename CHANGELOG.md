@@ -4,6 +4,28 @@
 
 - (nothing yet)
 
+## [1.0.6] - 2026-11-25
+
+### Added
+
+- `orx rescue [--ip <addr>]` (T-OR-041): a READ-ONLY diagnostic over the `:24` root shell for when
+  the daemon's `:8080` API is unresponsive (e.g. `/data` filled up). It reports free space on
+  `/data` and the stored recordings (oldest first, with sizes), reading `qmdl_store_path` from the
+  device config. It fails closed if `/data` is not mounted or the store is missing, lists the store
+  directory directly (no shell glob, so an unbounded file count cannot exceed `ARG_MAX`), accepts
+  only numeric `<timestamp>.qmdl.gz` names, and rejects duplicate names. Device output is parsed
+  defensively. The `:24` shell is not reboot-persistent (re-open it first; see INSTALL.md section 5).
+  Validated live on the unit.
+- Confirmed on the unit that `qmdl_size_bytes` in the daemon manifest is the COMPRESSED on-disk size
+  (recordings are stored as `<name>.qmdl.gz`; `1795442375.qmdl.gz` is exactly 869535 bytes).
+
+### Notes
+
+- Deleting recordings from `orx rescue` is deliberately deferred (T-OR-041b): doing it safely means
+  stopping the daemon, removing files AND reconciling the daemon's `manifest.toml`, restarting, and
+  verifying recovery -- a destructive path that must be validated on a genuinely wedged device. For
+  now `orx rescue` reports; the manual free-space-and-recover steps are in INSTALL.md section 9.
+
 ## [1.0.5] - 2026-11-25
 
 ### Added

@@ -139,7 +139,7 @@ Goal: every manual procedure from Phases 1-3 is a fail-closed `orx` subcommand.
 | T-OR-038 | v1.0.3 | `orx pull-logs`: download recordings (QMDL, ndjson; GPS follow-up) with manifest and hashes | host | done |
 | T-OR-039 | v0.8.0 | `orx restore` / `orx uninstall`: remove Rayhunter, restore stock `misc-daemon` and other replaced files, verify against backup | host | open |
 | T-OR-040 | v1.0.5 | `orx purge`: delete completed recordings (dry-run default, --apply); keeps active | host | done |
-| T-OR-041 | v0.9.0 | `orx rescue`: free `/data` over the network shell when the daemon and web UI are down (#1192 failure mode) | host | open |
+| T-OR-041 | v1.0.6 | `orx rescue`: free `/data` over the network shell when the daemon and web UI are down (#1192 failure mode) | host | done |
 
 Exit criteria per release: subcommand has unit tests on fake sysfs/fake shell, fails closed on
 missing backup or hash mismatch, and is documented in [docs/INSTALL.md](docs/INSTALL.md) or

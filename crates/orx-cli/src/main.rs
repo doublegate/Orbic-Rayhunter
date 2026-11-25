@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, check, install, probe, pull, purge, transport, usb, verify};
+use orx_cli::{backup, check, install, probe, pull, purge, rescue, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -21,6 +21,7 @@ USAGE:
     orx check [--ip <addr>]              Read-only device health report (daemon, stats, ports)
     orx purge [--apply --pulled <dir>|--force] [--ip <addr>]
                                          Delete completed recordings (dry-run unless --apply; keeps active)
+    orx rescue [--ip <addr>]             Read-only diagnostic over :24 when :8080 is down (df + recordings)
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
                 [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
@@ -264,6 +265,61 @@ fn cmd_verify(dir: &Path) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `orx rescue`: read-only diagnostic over the `:24` shell (free space + stored
+/// recordings) for when the `:8080` API is down. Deletion is a follow-up
+/// (T-OR-041b); the manual recovery steps are printed and in INSTALL.md.
+fn cmd_rescue(ip: &str) -> ExitCode {
+    let addr = match probe::socket(ip, 24) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut shell = transport::TcpShell::new(addr, Duration::from_secs(120));
+    match rescue::plan(&mut shell) {
+        Ok(p) => {
+            println!(
+                "{} free on {}",
+                human_kib(p.available_kb),
+                rescue::DATA_MOUNT
+            );
+            println!(
+                "{} recording(s) in {} ({} bytes), oldest first:",
+                p.recordings.len(),
+                p.store,
+                p.total_bytes()
+            );
+            for r in &p.recordings {
+                println!("  {} ({} bytes)", r.name, r.bytes);
+            }
+            println!(
+                "To free space: prefer `orx purge` over :8080 when the daemon is reachable. Only \
+                 if the API is down, follow the manual stop -> delete oldest -> restart -> close-:24 \
+                 procedure in docs/INSTALL.md section 9 (stopping the daemon FIRST)."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!(
+                "error: {e}\n(the :24 root shell must be open; see docs/INSTALL.md section 5)"
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Format kibibytes as a short human string (device `df -k` is in KiB).
+fn human_kib(kb: u64) -> String {
+    if kb >= 1024 * 1024 {
+        format!("{:.1}G", kb as f64 / (1024.0 * 1024.0))
+    } else if kb >= 1024 {
+        format!("{:.1}M", kb as f64 / 1024.0)
+    } else {
+        format!("{kb}K")
     }
 }
 
@@ -743,6 +799,20 @@ fn main() -> ExitCode {
                     ExitCode::from(2)
                 }
             }
+        }
+        Some("rescue") => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--ip" => match rest.next() {
+                        Some(v) if !v.is_empty() => ip = v.clone(),
+                        _ => return usage_err("--ip needs a value"),
+                    },
+                    other => return usage_err(&format!("unexpected argument {other:?}")),
+                }
+            }
+            cmd_rescue(&ip)
         }
         Some("purge") => {
             let mut ip = probe::DEFAULT_DEVICE_IP.to_string();

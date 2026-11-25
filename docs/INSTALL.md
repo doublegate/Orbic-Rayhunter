@@ -325,3 +325,72 @@ Captures hold real identifiers (IMSI/IMEI/ICCID), so pull anything you want to k
 `orx pull-logs --to <dir>` before purging. If the daemon is in debug mode it refuses deletes with a
 `403`; `orx purge` reports that explicitly. Disk-pressure retention policies (by age, size or count)
 are a planned follow-up (T-OR-040b).
+
+## 9. Rescue a wedged device
+
+```sh
+orx rescue [--ip <addr>]   # T-OR-041 (v1.0.6), read-only
+```
+
+When the daemon's `:8080` API is unresponsive (for example `/data` filled up), `orx rescue` works
+over the `:24` root shell instead. It is **read-only**: it reports free space on `/data` and the
+stored recordings (oldest first, with sizes), and fails closed if `/data` is not mounted or the
+store is missing. It does not delete anything.
+
+The `:24` root shell is not reboot-persistent. Re-open it before using `orx rescue`:
+
+```sh
+./upstream/target/release/installer util orbic-start-telnet --admin-password "$(cat ~/.claude-secrets/orbic-admin.txt)"
+```
+
+### Freeing space and recovering
+
+**Prefer `orx purge` whenever the daemon's `:8080` API is reachable** — it deletes recordings
+through the daemon, which keeps `manifest.toml` consistent. Use the manual steps below only when the
+API is genuinely down and `orx purge` cannot run.
+
+> **Warning — last resort, and the deleted recordings are gone for good.** This procedure deletes
+> capture data to free space; that data is unrecoverable (that is the point), so only delete
+> recordings you have accepted losing. The daemon records each capture in `manifest.toml`; deleting
+> a `.qmdl.gz` by hand leaves a dangling manifest entry whose Rayhunter v0.13.0 startup tolerance is
+> **unverified**. So the one thing you CAN undo — the daemon's bookkeeping — is backed up first
+> (step 1), and a safe tooled version that reconciles the manifest is the deferred `orx rescue
+> --apply` (T-OR-041b).
+
+Over the `:24` shell, in this order:
+
+```sh
+# 1. STOP the daemon FIRST (unlinking files it holds open frees nothing until it
+#    exits, and risks corrupting an active write); confirm it is gone; and back
+#    up the manifest so its bookkeeping can be restored if startup fails. The
+#    manifest lives INSIDE the store (/data/rayhunter/qmdl/manifest.toml); copy
+#    it to tmpfs (/var/volatile is RAM, independent of the full /data) and VERIFY
+#    the copy is non-empty before deleting -- a copy onto the full /data could be
+#    a 0-byte ENOSPC file that would wipe the manifest if later restored:
+/etc/init.d/rayhunter_daemon stop; ps | grep rayhunter-daemon
+cp /data/rayhunter/qmdl/manifest.toml /var/volatile/manifest.toml.bak && \
+  test -s /var/volatile/manifest.toml.bak && echo "manifest backed up" || \
+  echo "BACKUP FAILED -- do not delete anything"
+# 2. Only if the backup succeeded: delete the OLDEST recordings' file sets (keep
+#    the newest you care about). Each recording is three files in the store:
+rm -f -- /data/rayhunter/qmdl/<ts>.qmdl.gz /data/rayhunter/qmdl/<ts>.ndjson /data/rayhunter/qmdl/<ts>-gps.ndjson
+# 3. Restart the daemon:
+/etc/init.d/rayhunter_daemon restart
+```
+
+Then verify recovery with `orx check` (expect the daemon reachable again). **If it does not come
+back**, a dangling manifest entry is the likely cause: restore the bookkeeping with
+`cp /var/volatile/manifest.toml.bak /data/rayhunter/qmdl/manifest.toml` and restart, or consult the
+upstream project before editing the manifest by hand. (Note: `/var/volatile` is cleared on reboot,
+so restore before rebooting.)
+
+Finally **close the `:24` shell** to restore the hardened posture, and VERIFY it closed:
+
+```sh
+# in the :24 shell, kill its listener. busybox may lack pkill or match its own
+# command line, so fall back to killing the PID from `ps` if needed:
+pkill -f 'nc -ll -p 24' || kill "$(ps | grep '[n]c -ll -p 24' | awk '{print $1}')"
+```
+
+Then confirm from the host that it is gone — `orx check` must report `root shell port 24 closed`
+(a `[fail] ... is OPEN` means the listener is still up; kill it by PID over the shell and re-check).
