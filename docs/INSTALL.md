@@ -317,7 +317,9 @@ orx purge [--apply] [--ip <addr>]   # T-OR-040 (v1.0.5)
 
 `orx purge` deletes COMPLETED recordings from the device (`POST /api/delete-recording/{name}`) and
 never the active recording. It is dry-run by default: it lists the recordings that would be deleted
-and reminds you to pull them first. Add `--apply` to perform the deletions.
+and reminds you to pull them first. To delete, add `--apply` with a safety gate: `--pulled <dir>` deletes only recordings verified
+present in that `orx pull-logs` directory (SHA-256 matched against its `PULL-MANIFEST.txt`), or
+`--force` to delete without keeping a local copy. `--apply` on its own is refused.
 
 Captures hold real identifiers (IMSI/IMEI/ICCID), so pull anything you want to keep with
 `orx pull-logs --to <dir>` before purging. If the daemon is in debug mode it refuses deletes with a

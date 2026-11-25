@@ -64,7 +64,9 @@ pub fn http_post(addr: SocketAddr, path: &str, timeout: Duration) -> Result<u16,
 
     let mut head = Vec::new();
     let mut buf = [0u8; 8192];
-    loop {
+    // Decode ONLY the header block as text: body bytes may share the same read()
+    // and need not be UTF-8 (and a multi-byte char could straddle the boundary).
+    let hdr_end = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err("read: deadline exceeded in headers".into());
@@ -74,8 +76,8 @@ pub fn http_post(addr: SocketAddr, path: &str, timeout: Duration) -> Result<u16,
             Ok(0) => return Err("connection closed before headers completed".into()),
             Ok(n) => {
                 head.extend_from_slice(&buf[..n]);
-                if find_sub(&head, b"\r\n\r\n").is_some() {
-                    break;
+                if let Some(pos) = find_sub(&head, b"\r\n\r\n") {
+                    break pos + 4;
                 }
                 if head.len() > 64 * 1024 {
                     return Err("HTTP headers too large".into());
@@ -83,8 +85,9 @@ pub fn http_post(addr: SocketAddr, path: &str, timeout: Duration) -> Result<u16,
             }
             Err(e) => return Err(format!("read: {e}").into()),
         }
-    }
-    let head_str = std::str::from_utf8(&head).map_err(|_| "non-UTF-8 HTTP headers".to_string())?;
+    };
+    let head_str =
+        std::str::from_utf8(&head[..hdr_end]).map_err(|_| "non-UTF-8 HTTP headers".to_string())?;
     let status = head_str
         .lines()
         .next()
@@ -450,7 +453,7 @@ fn download_to(
 
 /// sha256 of a local file, hashed incrementally in 64 KiB chunks (never loading
 /// the whole capture into RAM).
-fn file_sha256(path: &Path) -> Result<String, String> {
+pub fn file_sha256(path: &Path) -> Result<String, String> {
     let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut h = crate::sha256::Sha256::new();
     let mut buf = [0u8; 64 * 1024];
