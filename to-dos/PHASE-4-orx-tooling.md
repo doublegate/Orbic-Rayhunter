@@ -198,10 +198,11 @@ command is backup-gated, dry-run-first, atomic, and validates payloads; these ma
 - [x] T-OR-036b (v1.0.2): `orx install` deploys our hardened `device/config/config.orbic.toml` by
       default (key_input_mode = 1, min_space 64/32 MiB, wifi_enabled = false, auto_check_updates =
       false, full analyzer set), `--config <path>` override, `device = "orbic"` enforced.
-- [x] T-OR-036c (v1.0.2): `/data` (and `/`) free-space preflight on `--apply` -- `df` each mount,
-      refuse if it lacks room for its files + 8 MiB slack (#1192). The watchdog + size-gate already
-      cap the staged `.orx-new`; stopping the daemon first stays a future option if measured growth
-      needs it (T-OR-068).
+- [x] T-OR-036c (v1.0.2): `/data` free-space preflight on `--apply` -- `df /data` (row validated
+      against the mountpoint), refuse if it lacks the daemon + config + 8 MiB slack (#1192). Only
+      /data is gated (the KiB `/etc/init.d` writes are not; a full rootfs just fails the atomic
+      write), so uninstall is never blocked. Stopping the daemon first stays a future option if
+      measured growth needs it (T-OR-068).
 - [ ] T-OR-036d: bound the `orx install` data listener's lifetime and exposure (busybox `nc -w`
       idle-timeout and/or a `timeout` wrapper, and `-s` bind to the USB-side address if supported)
       -- needs on-device verification of the available busybox nc flags; the one-shot listener +

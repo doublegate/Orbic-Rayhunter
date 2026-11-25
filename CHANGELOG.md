@@ -16,9 +16,11 @@ More `orx install` hardening: deploy our hardened config, and a free-space prefl
   `auto_check_updates = false` and the full analyzer set. Override with `--config <path>`;
   `device = "orbic"` is always enforced.
 - Free-space preflight before any device write (T-OR-036c): on `--apply`, install runs `df` on
-  `/data` and `/` and refuses if a filesystem lacks room for its files plus an 8 MiB slack, so a
-  nearly-full `/data` cannot wedge the daemon and hotspot mid-write (#1192). `df` output is parsed
-  robustly (anchored from the end, tolerating a wrapped filesystem name).
+  `/data` and refuses if it lacks room for the daemon + config plus an 8 MiB slack, so a nearly-full
+  `/data` cannot wedge the daemon and hotspot mid-write (#1192). The `df` row is validated against
+  the mountpoint (fail closed on malformed output), tolerating a wrapped filesystem name. The
+  few-KiB `/etc/init.d` writes are not preflighted (a full rootfs simply fails the atomic write),
+  so `uninstall` is never blocked.
 
 ## [1.0.1] - 2026-11-25
 
