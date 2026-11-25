@@ -90,15 +90,27 @@ detections (`Warning`) and low battery (`LowBattery`), with per-type debounce an
 exponential-backoff retry. To enable it, uncomment `ntfy_url` in `config.orbic.toml` before install,
 or set it in the Rayhunter web UI on a running device.
 
-From the host (v1.1.0, T-OR-044):
+From the host:
 
 ```sh
-orx alert status [--ip <addr>]   # show the configured ntfy_url + enabled notification types
-orx alert test   [--ip <addr>]   # ask the daemon to send a test notification to that URL
+orx alert status [--ip <addr>]                 # show the configured ntfy_url + enabled types (v1.1.0)
+orx alert test   [--ip <addr>]                 # ask the daemon to send a test notification (v1.1.0)
+orx alert set --ntfy-url <url> [--apply]       # write the ntfy_url (v1.1.1, T-OR-107)
+orx alert set --clear [--apply]                # remove the ntfy_url (disable delivery)
 ```
 
 `orx alert test` is outward-facing (the device POSTs to your `ntfy_url`); it reports clearly when no
-URL is set. Setting `ntfy_url` from the host (`orx alert set`) is deferred to v1.1.1 because the
-config write restarts the daemon and the `/api/config` round-trip redacts `wifi_password`. The
-daemon's additional sink types (webhook auth/headers, MQTT, Gotify) and a persistent retry queue are
-`[UPSTREAM]` work scheduled for v1.2.0 (T-OR-045..050).
+URL is set.
+
+`orx alert set` (v1.1.1, T-OR-107) writes `ntfy_url` without the web UI. It is a dry-run preview
+unless `--apply`, because the write restarts the daemon (briefly interrupting the active recording).
+It does not reconstruct the config: `POST /api/config` takes the full config and `GET /api/config`
+redacts `wifi_password` to `null`, so `set` round-trips the exact object the GET returned and
+replaces only the `ntfy_url` key -- byte-for-byte what the web UI's config form POSTs when you change
+the notification URL. The daemon strips the Wi-Fi fields before writing `config.toml` (they live in
+`wpa_sta.conf`), so the write cannot clobber the Wi-Fi password; `set` still warns when Wi-Fi client
+mode is active, since the restart re-applies `wpa_sta.conf`. The URL is validated as an http(s) URL
+with a host before anything is sent.
+
+The daemon's additional sink types (webhook auth/headers, MQTT, Gotify) and a persistent retry queue
+are `[UPSTREAM]` work scheduled for v1.2.0 (T-OR-045..050).

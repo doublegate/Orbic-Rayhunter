@@ -4,6 +4,35 @@
 
 - (nothing yet)
 
+## [1.1.1] - 2026-11-25
+
+### Added
+
+- `orx alert set --ntfy-url <url>|--clear [--apply] [--ip <addr>]` (T-OR-107): write or clear the
+  daemon's `ntfy_url` from the host, so alerting can be turned on without the Rayhunter web UI.
+  It is a dry-run preview unless `--apply` (the write restarts the daemon, briefly interrupting the
+  active recording). The URL is validated as an http(s) URL with a host before anything is sent.
+- `Json::as_bool` on the std-only JSON helper.
+
+### How it stays safe
+
+- `POST /api/config` takes the FULL config and `GET /api/config` redacts `wifi_password` to `null`,
+  so `set` does not reconstruct a config: it round-trips the exact object the GET returned and
+  replaces only the `ntfy_url` key. This is byte-for-byte what the upstream web UI's config form
+  POSTs when you change the notification URL (it, too, sends `wifi_password: null`). The daemon's
+  `set_config` strips the Wi-Fi fields before writing `config.toml` (they live in `wpa_sta.conf`),
+  so the write cannot clobber a password that `config.toml` never held. `set` refuses to write back
+  a body that does not look like Rayhunter's config, and warns when Wi-Fi client mode is active.
+- Validated live on the unit (ORB400L_V1.2.0_BVZRT): apply pointed `ntfy_url` at a loopback
+  self-test URL, a full before/after config diff showed **only** `ntfy_url` changed (every other
+  key, including the nested `webdav`/`analyzers` objects and the null `wifi_password`, preserved
+  byte-for-byte), and `--clear --apply` returned the config identical to the baseline.
+
+### Fixed
+
+- The v1.1.0 notes referred to the host-side config write as "T-OR-046"; that ID is the upstream
+  notification-auth sink in [ROADMAP.md](ROADMAP.md). The `orx alert set` ticket is **T-OR-107**.
+
 ## [1.1.0] - 2026-11-25
 
 ### Added

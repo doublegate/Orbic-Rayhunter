@@ -5,7 +5,19 @@ storage self-limiting. Tickets T-OR-045..T-OR-068 ([ROADMAP.md](../ROADMAP.md)).
 is `[UPSTREAM]`: before each ticket, search EFForg/rayhunter issues and PRs and link the result
 in the patch body.
 
-## Sprint 5.1: Alerting (v1.1.0)
+## Sprint 5.1: Alerting
+
+Host-side enablement shipped first (no firmware rebuild needed): upstream v0.13.0 already delivers
+`Warning`/`LowBattery` notifications to `ntfy_url` with debounce + backoff, so these just surface and
+drive that path over `:8080`.
+
+- [x] T-OR-044 (v1.1.0): `orx alert status`/`test` -- show the configured `ntfy_url` + enabled types
+      and send a test notification.
+- [x] T-OR-107 (v1.1.1): `orx alert set --ntfy-url <url>|--clear [--apply]` -- write/clear `ntfy_url`
+      via a faithful read-modify-write of `/api/config` (dry-run unless `--apply`; validated live
+      with a full before/after config diff showing only `ntfy_url` changed).
+
+The daemon sink EXTENSIONS below are `[UPSTREAM]` and move to v1.2.0 (patch + firmware rebuild):
 
 - [ ] T-OR-045: ntfy `Title`, `Priority`, `Tags` headers derived from severity and notification
       type; absent config keeps today's plain POST

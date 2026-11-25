@@ -44,6 +44,12 @@ impl Json {
             _ => None,
         }
     }
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
     pub fn is_null(&self) -> bool {
         matches!(self, Json::Null)
     }
