@@ -281,7 +281,7 @@ fn cmd_purge(ip: &str, gate: Option<purge::PurgeGate>) -> ExitCode {
                         "purge (dry run): {} completed recording(s) would be deleted:",
                         plan.completed.len()
                     );
-                    for name in &plan.completed {
+                    for (name, _size) in &plan.completed {
                         println!("  {name}");
                     }
                 }

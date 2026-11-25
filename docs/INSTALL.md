@@ -312,7 +312,7 @@ repo (see [SECURITY-MODEL.md](SECURITY-MODEL.md)).
 ## 8. Purge recordings from the device
 
 ```sh
-orx purge [--apply] [--ip <addr>]   # T-OR-040 (v1.0.5)
+orx purge [--apply --pulled <dir>|--force] [--ip <addr>]   # T-OR-040 (v1.0.5)
 ```
 
 `orx purge` deletes COMPLETED recordings from the device (`POST /api/delete-recording/{name}`) and

@@ -12,8 +12,9 @@ use std::time::Duration;
 const MAX_MANIFEST: usize = 4 * 1024 * 1024;
 
 pub struct PurgePlan {
-    /// Completed recordings eligible for deletion (the active one is excluded).
-    pub completed: Vec<String>,
+    /// Completed recordings eligible for deletion (the active one is excluded),
+    /// each with its current manifest `qmdl_size_bytes` (compressed, on-device).
+    pub completed: Vec<(String, u64)>,
     /// The active recording's name, if any (never deleted).
     pub active: Option<String>,
 }
@@ -55,7 +56,13 @@ fn plan(addr: SocketAddr, timeout: Duration) -> Result<PurgePlan, String> {
         if !pull::safe_name(name) {
             return Err(format!("unsafe recording name in manifest: {name:?}"));
         }
-        completed.push(name.to_string());
+        // Fail closed if the size is absent/invalid: the verified-pull gate needs
+        // it to confirm the pulled copy is the current completed recording.
+        let size = e
+            .get("qmdl_size_bytes")
+            .and_then(Json::as_u64)
+            .ok_or_else(|| format!("manifest entry {name:?} has no valid qmdl_size_bytes"))?;
+        completed.push((name.to_string(), size));
     }
     // A present current_entry must carry a safe string name -- fail closed on a
     // malformed one rather than silently treating it as "no active recording",
@@ -76,7 +83,7 @@ fn plan(addr: SocketAddr, timeout: Duration) -> Result<PurgePlan, String> {
     // Belt and braces: never offer the active recording for deletion even if the
     // daemon ever lists it in `entries` too.
     if let Some(a) = &active {
-        completed.retain(|n| n != a);
+        completed.retain(|(n, _)| n != a);
     }
     Ok(PurgePlan { completed, active })
 }
@@ -105,15 +112,16 @@ pub fn apply_at(
         failed: 0,
         skipped: 0,
     };
-    for name in &plan.completed {
+    for (name, size) in &plan.completed {
         // Safety gate: under VerifiedPull, only delete a recording we hold a
-        // hash-verified local copy of; skip (never delete) anything unverified.
+        // hash-verified local copy of that corresponds to THIS completed
+        // recording; skip (never delete) anything unverified.
         if let PurgeGate::VerifiedPull(dir) = gate {
-            match verify_pulled(dir, name) {
+            match verify_pulled(dir, name, *size) {
                 Ok(true) => {}
                 Ok(false) => {
                     eprintln!(
-                        "skip {name}: not verified in pull dir {} (pull it first)",
+                        "skip {name}: no verified current pull in {} (pull it first)",
                         dir.display()
                     );
                     out.skipped += 1;
@@ -149,13 +157,38 @@ pub fn apply_at(
     Ok(out)
 }
 
-/// Whether `<dir>/<name>.qmdl` exists and its SHA-256 matches the hash recorded
-/// for it in `<dir>/PULL-MANIFEST.txt` -- i.e. a verified pulled copy exists.
-fn verify_pulled(dir: &std::path::Path, name: &str) -> Result<bool, String> {
+/// Whether `<dir>` holds a verified copy of the CURRENT completed recording
+/// `name` (current manifest size `current_size`). Two conditions, both required:
+///
+///  1. `<dir>/.orx-pull-state` records `name` at a size equal to `current_size`.
+///     `orx pull-logs` records that state only for recordings it pulled while
+///     they were already COMPLETED (not the live one), so this proves the copy
+///     is of a finished recording and that the recording has not changed since
+///     (its compressed on-device size is unchanged). A copy pulled while the
+///     recording was still active -- which could be shorter than the finished
+///     recording -- has no such state entry and is rejected.
+///  2. `<dir>/<name>.qmdl` exists and its SHA-256 matches `PULL-MANIFEST.txt`
+///     (local integrity since the pull).
+///
+/// (We cannot compare the local byte length to `qmdl_size_bytes`: the manifest
+/// size is the COMPRESSED on-device size while the pulled file is decompressed.)
+fn verify_pulled(dir: &std::path::Path, name: &str, current_size: u64) -> Result<bool, String> {
     let qmdl = dir.join(format!("{name}.qmdl"));
     if !qmdl.is_file() {
         return Ok(false);
     }
+    // (1) pulled as a completed recording, unchanged since.
+    let state = dir.join(".orx-pull-state");
+    let state_text =
+        std::fs::read_to_string(&state).map_err(|e| format!("read {}: {e}", state.display()))?;
+    let pulled_size = state_text.lines().find_map(|l| {
+        let (n, s) = l.split_once('\t')?;
+        (n == name).then(|| s.trim().parse::<u64>().ok()).flatten()
+    });
+    if pulled_size != Some(current_size) {
+        return Ok(false);
+    }
+    // (2) local integrity since the pull.
     let actual = pull::file_sha256(&qmdl)?;
     let manifest = dir.join("PULL-MANIFEST.txt");
     let text = std::fs::read_to_string(&manifest)
@@ -227,7 +260,7 @@ mod tests {
     #[test]
     fn force_deletes_completed_only() {
         let (addr, deleted) = serve(
-            r#"{"entries":[{"name":"1795"},{"name":"1796"}],"current_entry":{"name":"1797"}}"#,
+            r#"{"entries":[{"name":"1795","qmdl_size_bytes":100},{"name":"1796","qmdl_size_bytes":200}],"current_entry":{"name":"1797","qmdl_size_bytes":5}}"#,
         );
         let out = apply_at(addr, &PurgeGate::Force, Duration::from_secs(2)).unwrap();
         assert_eq!(out.deleted, 2);
@@ -249,19 +282,32 @@ mod tests {
         d
     }
 
-    #[test]
-    fn verified_pull_deletes_only_verified_and_skips_the_rest() {
-        let (addr, deleted) =
-            serve(r#"{"entries":[{"name":"1795"},{"name":"1796"}],"current_entry":null}"#);
-        let dir = tmpdir("vp");
-        std::fs::write(dir.join("1795.qmdl"), b"AAAAA").unwrap();
-        let hash = crate::sha256::hex(b"AAAAA");
+    /// Write a pull dir holding `<name>.qmdl` with the given bytes, a matching
+    /// PULL-MANIFEST.txt, and a .orx-pull-state recording `name` at `pulled_size`.
+    fn pulled_dir(tag: &str, name: &str, bytes: &[u8], pulled_size: u64) -> std::path::PathBuf {
+        let dir = tmpdir(tag);
+        std::fs::write(dir.join(format!("{name}.qmdl")), bytes).unwrap();
+        let hash = crate::sha256::hex(bytes);
         std::fs::write(
             dir.join("PULL-MANIFEST.txt"),
-            format!("{hash}  1795.qmdl\n"),
+            format!("{hash}  {name}.qmdl\n"),
         )
         .unwrap();
+        std::fs::write(
+            dir.join(".orx-pull-state"),
+            format!("{name}\t{pulled_size}\n"),
+        )
+        .unwrap();
+        dir
+    }
 
+    #[test]
+    fn verified_pull_deletes_only_verified_and_skips_the_rest() {
+        let (addr, deleted) = serve(
+            r#"{"entries":[{"name":"1795","qmdl_size_bytes":100},{"name":"1796","qmdl_size_bytes":200}],"current_entry":null}"#,
+        );
+        // 1795 is pulled at the current size (100); 1796 is not pulled.
+        let dir = pulled_dir("vp", "1795", b"AAAAA", 100);
         let out = apply_at(
             addr,
             &PurgeGate::VerifiedPull(dir.clone()),
@@ -281,10 +327,10 @@ mod tests {
 
     #[test]
     fn verified_pull_skips_on_hash_mismatch() {
-        let (addr, deleted) = serve(r#"{"entries":[{"name":"1795"}],"current_entry":null}"#);
-        let dir = tmpdir("mm");
-        std::fs::write(dir.join("1795.qmdl"), b"AAAAA").unwrap();
-        // Manifest records a DIFFERENT hash -> not verified -> skipped.
+        let (addr, deleted) =
+            serve(r#"{"entries":[{"name":"1795","qmdl_size_bytes":100}],"current_entry":null}"#);
+        let dir = pulled_dir("mm", "1795", b"AAAAA", 100);
+        // Corrupt the manifest hash -> local integrity check fails -> skip.
         std::fs::write(dir.join("PULL-MANIFEST.txt"), "deadbeef  1795.qmdl\n").unwrap();
         let out = apply_at(
             addr,
@@ -299,9 +345,67 @@ mod tests {
     }
 
     #[test]
+    fn verified_pull_skips_when_recording_changed_since_pull() {
+        // Current completed size (200) differs from the pulled size (100): the
+        // local copy is a stale/partial pull -> must NOT delete the larger
+        // completed recording. This is the silent-data-loss guard.
+        let (addr, deleted) =
+            serve(r#"{"entries":[{"name":"1795","qmdl_size_bytes":200}],"current_entry":null}"#);
+        let dir = pulled_dir("changed", "1795", b"AAAAA", 100);
+        let out = apply_at(
+            addr,
+            &PurgeGate::VerifiedPull(dir.clone()),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(
+            out.deleted, 0,
+            "a recording changed since the pull must not be deleted"
+        );
+        assert_eq!(out.skipped, 1);
+        assert!(deleted.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verified_pull_skips_without_pull_state() {
+        // A dir with the file + manifest but no state entry (e.g. pulled while the
+        // recording was still active) is not a verified completed pull -> skip.
+        let (addr, _deleted) =
+            serve(r#"{"entries":[{"name":"1795","qmdl_size_bytes":100}],"current_entry":null}"#);
+        let dir = tmpdir("nostate");
+        std::fs::write(dir.join("1795.qmdl"), b"AAAAA").unwrap();
+        let hash = crate::sha256::hex(b"AAAAA");
+        std::fs::write(
+            dir.join("PULL-MANIFEST.txt"),
+            format!("{hash}  1795.qmdl\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join(".orx-pull-state"), "").unwrap(); // no entry for 1795
+        let out = apply_at(
+            addr,
+            &PurgeGate::VerifiedPull(dir.clone()),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(out.deleted, 0);
+        assert_eq!(out.skipped, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn plan_fails_closed_without_entries() {
         let (addr, _) = serve("{}");
         assert!(plan(addr, Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn plan_fails_closed_without_size() {
+        let (addr, _) = serve(r#"{"entries":[{"name":"1795"}],"current_entry":null}"#);
+        assert!(
+            plan(addr, Duration::from_secs(2)).is_err(),
+            "an entry with no qmdl_size_bytes must fail closed"
+        );
     }
 
     #[test]
@@ -316,12 +420,12 @@ mod tests {
     #[test]
     fn plan_excludes_active_even_if_in_entries() {
         let (addr, _) = serve(
-            r#"{"entries":[{"name":"1795"},{"name":"1797"}],"current_entry":{"name":"1797"}}"#,
+            r#"{"entries":[{"name":"1795","qmdl_size_bytes":100},{"name":"1797","qmdl_size_bytes":5}],"current_entry":{"name":"1797","qmdl_size_bytes":5}}"#,
         );
         let p = plan(addr, Duration::from_secs(2)).unwrap();
         assert_eq!(
             p.completed,
-            vec!["1795".to_string()],
+            vec![("1795".to_string(), 100)],
             "active 1797 excluded from completed"
         );
     }
