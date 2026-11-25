@@ -171,32 +171,54 @@ fn is_arm32_elf(bytes: &[u8]) -> bool {
 /// - `None`        -- the section table is malformed or points past EOF (a
 ///   truncated/corrupt binary) -- the caller must fail closed.
 fn elf32_symbol_table(bytes: &[u8]) -> Option<bool> {
+    // Every read is bounds-checked and returns None (fail closed) on any surprise.
+    let rd_u32 = |o: usize| -> Option<u32> {
+        bytes
+            .get(o..o + 4)
+            .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+    };
+    let rd_u16 = |o: usize| -> Option<u16> {
+        bytes
+            .get(o..o + 2)
+            .map(|s| u16::from_le_bytes(s.try_into().unwrap()))
+    };
     // ELF32 header: e_shoff@0x20 (u32), e_shentsize@0x2e (u16), e_shnum@0x30 (u16).
     if bytes.len() < 0x34 {
-        return Some(false);
+        return None; // too short to be the ELF32 we vet -> corrupt/truncated
     }
-    let e_shoff = u32::from_le_bytes([bytes[0x20], bytes[0x21], bytes[0x22], bytes[0x23]]) as usize;
-    let e_shentsize = u16::from_le_bytes([bytes[0x2e], bytes[0x2f]]) as usize;
-    let e_shnum = u16::from_le_bytes([bytes[0x30], bytes[0x31]]) as usize;
+    let e_shoff = rd_u32(0x20)? as usize;
+    let e_shentsize = rd_u16(0x2e)? as usize;
+    let mut e_shnum = rd_u16(0x30)? as usize;
     if e_shoff == 0 {
-        return Some(false); // no section table at all -> treat as stripped
+        // Valid only with e_shnum == 0 (genuinely no section table -> stripped);
+        // e_shoff==0 with e_shnum!=0 is inconsistent.
+        return if e_shnum == 0 { Some(false) } else { None };
     }
-    if e_shentsize < 8 {
-        return None; // malformed section header size
+    if e_shentsize != 40 {
+        return None; // Elf32_Shdr is exactly 40 bytes
+    }
+    // Section header 0 must be fully present before we can trust the table.
+    if bytes.len() < e_shoff.checked_add(e_shentsize)? {
+        return None;
+    }
+    if e_shnum == 0 {
+        // Extended numbering (SHN_XINDEX): the real count is section 0's sh_size
+        // (Elf32_Shdr offset 0x14).
+        e_shnum = rd_u32(e_shoff + 0x14)? as usize;
+        if e_shnum == 0 {
+            return None;
+        }
+    }
+    // The WHOLE section table must be in bounds before we scan it, so a truncated
+    // table can never be partially scanned and an early SHT_SYMTAB accepted.
+    let table_end = e_shoff.checked_add(e_shnum.checked_mul(e_shentsize)?)?;
+    if table_end > bytes.len() {
+        return None;
     }
     for i in 0..e_shnum {
-        let off = e_shoff.saturating_add(i.saturating_mul(e_shentsize));
-        if off.saturating_add(8) > bytes.len() {
-            return None; // section table runs past EOF -> truncated/corrupt
-        }
+        let off = e_shoff + i * e_shentsize;
         // sh_type is the u32 at offset 4 of each section header; SHT_SYMTAB == 2.
-        let sh_type = u32::from_le_bytes([
-            bytes[off + 4],
-            bytes[off + 5],
-            bytes[off + 6],
-            bytes[off + 7],
-        ]);
-        if sh_type == 2 {
+        if rd_u32(off + 4)? == 2 {
             return Some(true);
         }
     }
@@ -620,6 +642,21 @@ mod tests {
         trunc[0x20..0x24].copy_from_slice(&0x7fff_ffffu32.to_le_bytes()); // e_shoff past EOF
         assert_eq!(elf32_symbol_table(&trunc), None);
         assert!(daemon_is_unstripped(&trunc).is_err());
+        // Too short to be a valid ELF32 we vet -> None (not Some(false)).
+        assert_eq!(elf32_symbol_table(&[0u8; 20]), None);
+        // e_shentsize != 40 -> None.
+        let mut bad_ent = elf_with_sections(true);
+        bad_ent[0x2e..0x30].copy_from_slice(&8u16.to_le_bytes());
+        assert_eq!(elf32_symbol_table(&bad_ent), None);
+        // A huge e_shnum pushing the table past EOF -> None, even though a
+        // SHT_SYMTAB sits early (no partial scan / early accept).
+        let mut big = elf_with_sections(true);
+        big[0x30..0x32].copy_from_slice(&0xffffu16.to_le_bytes());
+        assert_eq!(elf32_symbol_table(&big), None);
+        // e_shoff == 0 but e_shnum != 0 is inconsistent -> None.
+        let mut incons = fake_arm_elf();
+        incons[0x30..0x32].copy_from_slice(&3u16.to_le_bytes());
+        assert_eq!(elf32_symbol_table(&incons), None);
     }
 
     #[test]
