@@ -200,9 +200,14 @@ With `--apply` it, in order:
 The daemon binary and both init scripts are validated before any write: the daemon must be a
 32-bit little-endian ARM ELF, the init scripts must have a `#!/bin/sh` shebang with no CRLF/NUL and
 valid UTF-8, the `rayhunter_daemon` init must reference `/data/rayhunter/rayhunter-daemon`, and the
-`misc-daemon` must reference `rayhunter_daemon` (the hook). The backup -- not a `.prev` copy -- is the
-rollback; `orx uninstall` (section 6) uses it. On a stock unit, run upstream's `installer orbic`
-(step 3) first if you prefer, then `orx install --apply` to replace its build with ours.
+`misc-daemon` must reference `rayhunter_daemon` (the hook). The daemon is also verified against a
+`SHA256SUMS` beside it; a corrupted, swapped, or **missing** `SHA256SUMS` is refused (pass
+`--allow-unverified` to install without it), and an unstripped (devel) daemon is refused unless
+`--allow-unstripped` -- so a stale ~16 MB debug build cannot be pushed where the ~6 MB firmware
+release was meant. These checks run on the exact bytes that will be pushed. The backup -- not a
+`.prev` copy -- is the rollback; `orx uninstall` (section 6)
+uses it. On a stock unit, run upstream's `installer orbic` (step 3) first if you prefer, then
+`orx install --apply` to replace its build with ours.
 
 ## 5. Post-install health check
 

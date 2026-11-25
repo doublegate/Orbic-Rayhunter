@@ -164,6 +164,175 @@ fn is_arm32_elf(bytes: &[u8]) -> bool {
     (e_type == 2 || e_type == 3) && e_machine == 40
 }
 
+/// Inspect a 32-bit LE ELF's section table for a symbol table (`SHT_SYMTAB`):
+/// - `Some(true)`  -- has a `SHT_SYMTAB` (NOT stripped -- a devel build);
+/// - `Some(false)` -- no section table (`e_shoff == 0`) or none is `SHT_SYMTAB`
+///   (a stripped release build);
+/// - `None`        -- the section table is malformed or points past EOF (a
+///   truncated/corrupt binary) -- the caller must fail closed.
+fn elf32_symbol_table(bytes: &[u8]) -> Option<bool> {
+    // Every read is bounds-checked and returns None (fail closed) on any surprise.
+    let rd_u32 = |o: usize| -> Option<u32> {
+        bytes
+            .get(o..o.checked_add(4)?)?
+            .try_into()
+            .ok()
+            .map(u32::from_le_bytes)
+    };
+    let rd_u16 = |o: usize| -> Option<u16> {
+        bytes
+            .get(o..o.checked_add(2)?)?
+            .try_into()
+            .ok()
+            .map(u16::from_le_bytes)
+    };
+    // ELF32 header: e_shoff@0x20 (u32), e_shentsize@0x2e (u16), e_shnum@0x30 (u16).
+    if bytes.len() < 0x34 {
+        return None; // too short to be the ELF32 we vet -> corrupt/truncated
+    }
+    let e_shoff = rd_u32(0x20)? as usize;
+    let e_shentsize = rd_u16(0x2e)? as usize;
+    let mut e_shnum = rd_u16(0x30)? as usize;
+    if e_shoff == 0 {
+        // Valid only with e_shnum == 0 (genuinely no section table -> stripped);
+        // e_shoff==0 with e_shnum!=0 is inconsistent.
+        return if e_shnum == 0 { Some(false) } else { None };
+    }
+    if e_shentsize != 40 {
+        return None; // Elf32_Shdr is exactly 40 bytes
+    }
+    // Section header 0 must be fully present before we can trust the table.
+    if bytes.len() < e_shoff.checked_add(e_shentsize)? {
+        return None;
+    }
+    if e_shnum == 0 {
+        // Extended numbering (SHN_XINDEX): the real count is section 0's sh_size
+        // (Elf32_Shdr offset 0x14).
+        e_shnum = rd_u32(e_shoff + 0x14)? as usize;
+        if e_shnum == 0 {
+            return None;
+        }
+    }
+    // The WHOLE section table must be in bounds before we scan it, so a truncated
+    // table can never be partially scanned and an early SHT_SYMTAB accepted.
+    let table_end = e_shoff.checked_add(e_shnum.checked_mul(e_shentsize)?)?;
+    if table_end > bytes.len() {
+        return None;
+    }
+    for i in 0..e_shnum {
+        let off = e_shoff + i * e_shentsize;
+        // sh_type is the u32 at offset 4 of each section header; SHT_SYMTAB == 2.
+        if rd_u32(off + 4)? == 2 {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// Verify `daemon` against a `SHA256SUMS` beside it (the format `build.sh` writes:
+/// `<64-hex>  <basename>`), when that file exists. Returns:
+/// - `Ok(true)`  -- SHA256SUMS present and the daemon's hash matches its entry;
+/// - `Ok(false)` -- no SHA256SUMS beside the daemon (cannot verify);
+/// - `Err`       -- SHA256SUMS present but the daemon is absent from it or its
+///   hash does not match (a corrupted or swapped artifact) -- fail closed.
+pub fn verify_daemon_against_sums(daemon: &Path, daemon_bytes: &[u8]) -> Result<bool, String> {
+    let sums = match daemon.parent() {
+        Some(dir) => dir.join("SHA256SUMS"),
+        None => return Ok(false),
+    };
+    // Only a genuine absence (NotFound) downgrades to "cannot verify"; a broken
+    // symlink or an unreadable file must fail closed, not be treated as absent.
+    match std::fs::symlink_metadata(&sums) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("cannot stat {}: {e}", sums.display())),
+        Ok(_) => {}
+    }
+    let name = daemon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "daemon has no file name".to_string())?;
+    let text =
+        String::from_utf8(read(&sums)?).map_err(|_| format!("{} is not UTF-8", sums.display()))?;
+    // `sha256sum` lines are `<64-hex><sep><filename>`, where <sep> is two spaces
+    // (text mode, build.sh) or a space + `*` (binary mode). The release workflow
+    // runs `sha256sum -- ./*`, so entries carry a leading `./`. Match the daemon's
+    // exact name, allowing only that leading `./` -- NOT an arbitrary directory
+    // prefix (an entry for `other/dir/<name>` is for a different file).
+    let matches: Vec<&str> = text
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_end();
+            // Check the raw bytes BEFORE slicing: `l[..64]` would panic if byte 64
+            // fell mid-character. Once bytes 0..64 are all ASCII hex (single-byte
+            // chars), 64 is a char boundary and split_at(64) is safe.
+            let b = l.as_bytes();
+            if b.len() < 66 || !b[..64].iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            let (hash, rest) = l.split_at(64);
+            // The separator must be exactly two spaces (text) or space+`*`
+            // (binary). This also rejects a SHA-512 line, whose 65th/66th chars
+            // are hex, not a separator.
+            if rest.as_bytes()[0] != b' ' || !matches!(rest.as_bytes()[1], b' ' | b'*') {
+                return None;
+            }
+            let file = rest[2..].trim();
+            let file = file.strip_prefix("./").unwrap_or(file);
+            (file == name).then_some(hash)
+        })
+        .collect();
+    let want = match matches.as_slice() {
+        [] => {
+            return Err(format!(
+                "{} does not list {name} (stale or wrong SHA256SUMS?)",
+                sums.display()
+            ));
+        }
+        [one] => *one,
+        _ => {
+            return Err(format!(
+                "{} has multiple entries for {name} (ambiguous); refusing",
+                sums.display()
+            ));
+        }
+    };
+    let got = crate::sha256::hex(daemon_bytes);
+    // sha256sum manifests may use uppercase hex; compare case-insensitively.
+    if !got.eq_ignore_ascii_case(want) {
+        return Err(format!(
+            "{} hash {got} does not match SHA256SUMS entry {want} (corrupt or swapped artifact)",
+            daemon.display()
+        ));
+    }
+    Ok(true)
+}
+
+/// Whether `daemon_bytes` is an unstripped build (carries a symbol table): the
+/// devel profile, not the stripped ~6 MB firmware release. `Err` if the ELF
+/// section table is truncated/corrupt, so the caller fails closed rather than
+/// treating a damaged binary as a clean stripped release.
+pub fn daemon_is_unstripped(daemon_bytes: &[u8]) -> Result<bool, String> {
+    // Self-contained: validate ELF identity here too, so a caller that did not go
+    // through install_plan cannot feed a non-ELF buffer (e.g. all-zero bytes,
+    // which have e_shoff == e_shnum == 0) and have it read as a stripped release.
+    if !is_arm32_elf(daemon_bytes) {
+        return Err("daemon is not a 32-bit little-endian ARM ELF".to_string());
+    }
+    elf32_symbol_table(daemon_bytes).ok_or_else(|| {
+        "daemon ELF section table is out of bounds (truncated or corrupt)".to_string()
+    })
+}
+
+/// The daemon payload captured in a plan built by `install_plan` -- the exact
+/// bytes that will be pushed -- so pre-write checks verify what is deployed
+/// instead of re-reading the file (no extra I/O, no TOCTOU gap).
+pub fn plan_daemon_bytes(steps: &[Step]) -> Option<&[u8]> {
+    steps.iter().find_map(|s| match s {
+        Step::Put { remote, bytes, .. } if remote == DAEMON_REMOTE => Some(bytes.as_slice()),
+        _ => None,
+    })
+}
+
 /// Build the install step plan. Validates every source (fail before any device
 /// write); remote paths are the fixed constants above.
 pub fn install_plan(
@@ -454,6 +623,138 @@ mod tests {
         b[16] = 2; // e_type = ET_EXEC
         b[18] = 40; // EM_ARM (little end of e_machine)
         b
+    }
+
+    /// An ARM32 ELF whose section-header table has, optionally, a SHT_SYMTAB.
+    fn elf_with_sections(with_symtab: bool) -> Vec<u8> {
+        let mut b = fake_arm_elf();
+        let shoff = 512usize;
+        let shentsize = 40usize;
+        let n = if with_symtab { 2 } else { 1 };
+        b[0x20..0x24].copy_from_slice(&(shoff as u32).to_le_bytes()); // e_shoff
+        b[0x2e..0x30].copy_from_slice(&(shentsize as u16).to_le_bytes()); // e_shentsize
+        b[0x30..0x32].copy_from_slice(&(n as u16).to_le_bytes()); // e_shnum
+        // Section 0: NULL (sh_type 0); section 1 (optional): SHT_SYMTAB (2).
+        if with_symtab {
+            let off = shoff + shentsize; // second header
+            b[off + 4..off + 8].copy_from_slice(&2u32.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn elf32_symbol_table_detection() {
+        assert_eq!(elf32_symbol_table(&elf_with_sections(true)), Some(true));
+        assert_eq!(elf32_symbol_table(&elf_with_sections(false)), Some(false));
+        assert_eq!(elf32_symbol_table(&fake_arm_elf()), Some(false)); // no section headers
+        // A section table pointing past EOF is corrupt -> None (caller fails closed).
+        let mut trunc = elf_with_sections(true);
+        trunc[0x20..0x24].copy_from_slice(&0x7fff_ffffu32.to_le_bytes()); // e_shoff past EOF
+        assert_eq!(elf32_symbol_table(&trunc), None);
+        assert!(daemon_is_unstripped(&trunc).is_err());
+        // Too short to be a valid ELF32 we vet -> None (not Some(false)).
+        assert_eq!(elf32_symbol_table(&[0u8; 20]), None);
+        // e_shentsize != 40 -> None.
+        let mut bad_ent = elf_with_sections(true);
+        bad_ent[0x2e..0x30].copy_from_slice(&8u16.to_le_bytes());
+        assert_eq!(elf32_symbol_table(&bad_ent), None);
+        // A huge e_shnum pushing the table past EOF -> None, even though a
+        // SHT_SYMTAB sits early (no partial scan / early accept).
+        let mut big = elf_with_sections(true);
+        big[0x30..0x32].copy_from_slice(&0xffffu16.to_le_bytes());
+        assert_eq!(elf32_symbol_table(&big), None);
+        // e_shoff == 0 but e_shnum != 0 is inconsistent -> None.
+        let mut incons = fake_arm_elf();
+        incons[0x30..0x32].copy_from_slice(&3u16.to_le_bytes());
+        assert_eq!(elf32_symbol_table(&incons), None);
+        // daemon_is_unstripped validates ELF identity itself: a non-ELF buffer
+        // (e.g. all zero) is rejected, not read as a clean stripped release.
+        assert!(daemon_is_unstripped(&[0u8; 2048]).is_err());
+        assert_eq!(daemon_is_unstripped(&fake_arm_elf()), Ok(false));
+        assert_eq!(daemon_is_unstripped(&elf_with_sections(true)), Ok(true));
+    }
+
+    #[test]
+    fn verify_daemon_against_sums_cases() {
+        let d = tmp();
+        let daemon = d.join("rayhunter-daemon");
+        std::fs::write(&daemon, [7u8; 2048]).unwrap();
+        let bytes = [7u8; 2048];
+        // No SHA256SUMS -> Ok(false) (cannot verify).
+        assert_eq!(verify_daemon_against_sums(&daemon, &bytes), Ok(false));
+        // Matching entry -> Ok(true), across the formats sha256sum / the release
+        // workflow (`./` prefix) / binary mode (`*`) produce.
+        let good = crate::sha256::hex(&[7u8; 2048]);
+        for line in [
+            format!("{good}  rayhunter-daemon\n"),   // build.sh text mode
+            format!("{good}  ./rayhunter-daemon\n"), // release workflow (sha256sum -- ./*)
+            format!("{good} *rayhunter-daemon\n"),   // binary mode
+        ] {
+            std::fs::write(d.join("SHA256SUMS"), &line).unwrap();
+            assert_eq!(
+                verify_daemon_against_sums(&daemon, &bytes),
+                Ok(true),
+                "line: {line:?}"
+            );
+        }
+        // Wrong hash -> Err.
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{}  rayhunter-daemon\n", "0".repeat(64)),
+        )
+        .unwrap();
+        assert!(verify_daemon_against_sums(&daemon, &bytes).is_err());
+        // Present but daemon not listed -> Err.
+        std::fs::write(d.join("SHA256SUMS"), format!("{good}  something-else\n")).unwrap();
+        assert!(verify_daemon_against_sums(&daemon, &bytes).is_err());
+        // A corrupt line with a multi-byte char straddling byte 64 must not panic
+        // (fail-closed on file input); the valid line is still found.
+        let junk = format!("{}\u{00e9}junk\n", "a".repeat(63)); // 'é' spans bytes 63-64
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{junk}{good}  rayhunter-daemon\n"),
+        )
+        .unwrap();
+        assert_eq!(verify_daemon_against_sums(&daemon, &bytes), Ok(true));
+        // Uppercase hex digest still matches (case-insensitive).
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{}  rayhunter-daemon\n", good.to_uppercase()),
+        )
+        .unwrap();
+        assert_eq!(verify_daemon_against_sums(&daemon, &bytes), Ok(true));
+        // Duplicate entries for the daemon -> ambiguous -> Err.
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{good}  rayhunter-daemon\n{good}  ./rayhunter-daemon\n"),
+        )
+        .unwrap();
+        assert!(verify_daemon_against_sums(&daemon, &bytes).is_err());
+        // A SHA-512 line (128 hex, no valid 2-char separator at byte 64) is not a match.
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{}  rayhunter-daemon\n", "a".repeat(128)),
+        )
+        .unwrap();
+        assert!(verify_daemon_against_sums(&daemon, &bytes).is_err());
+        // An entry under a different directory (not just a leading `./`) is for a
+        // different file -> not a match -> Err.
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{good}  other/dir/rayhunter-daemon\n"),
+        )
+        .unwrap();
+        assert!(verify_daemon_against_sums(&daemon, &bytes).is_err());
+        // A broken-symlink SHA256SUMS must fail closed (not be treated as absent).
+        #[cfg(unix)]
+        {
+            let link = d.join("SHA256SUMS");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(d.join("does-not-exist"), &link).unwrap();
+            assert!(verify_daemon_against_sums(&daemon, &bytes).is_err());
+            let _ = std::fs::remove_file(&link);
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn write_artifacts(d: &Path) {
