@@ -486,47 +486,57 @@ pub fn uninstall_plan(stock_misc_daemon: Vec<u8>) -> Vec<Step> {
 /// Execute a plan. Enforces the backup gate first. With `apply = false` it prints
 /// the plan and makes no device change. Each `Put` is atomic: send to
 /// `<remote>.orx-new`, chmod it, then `mv` into place.
-/// Available kibibytes parsed from a busybox `df -k <mount>`. The row layout is
+/// Available kibibytes parsed from a busybox `df -k <mount>`, validated to be a
+/// well-formed df row FOR `mount` (fail closed otherwise). The row is
 /// `Filesystem 1K-blocks Used Available Use% Mounted`; a long filesystem name may
-/// wrap to its own line, so anchor from the END (mount = last, Use% = last-1,
-/// Available = last-2) rather than by column index.
-fn parse_df_available_kb(df_output: &str) -> Option<u64> {
+/// wrap to its own line, so anchor from the END and check: last token == mount,
+/// Use% is `<digits>%`, and the three size columns are numeric. The mount check
+/// also catches an unmounted `/data` that silently resolved to `/`.
+fn parse_df_available_kb(df_output: &str, mount: &str) -> Option<u64> {
     let toks: Vec<&str> = df_output
         .lines()
         .skip(1) // header
         .flat_map(|l| l.split_whitespace())
         .collect();
     let n = toks.len();
-    if n < 3 {
+    if n < 5 || toks[n - 1] != mount {
         return None;
     }
-    toks[n - 3].parse::<u64>().ok()
+    let use_pct = toks[n - 2];
+    if use_pct.len() < 2
+        || !use_pct.ends_with('%')
+        || !use_pct[..use_pct.len() - 1]
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    toks[n - 5].parse::<u64>().ok()?; // 1K-blocks must be numeric
+    toks[n - 4].parse::<u64>().ok()?; // Used must be numeric
+    toks[n - 3].parse::<u64>().ok() // Available
 }
 
-/// Bytes of headroom each mount must have for the plan's writes: the sum of the
-/// `Put` payloads landing on that mount (each is staged full-size as `.orx-new`
-/// before the mv) plus an 8 MiB slack. Mount is derived from the target path.
+/// Bytes of headroom `/data` must have for the plan's writes landing there (each
+/// staged full-size as `.orx-new` before the mv) plus an 8 MiB slack. Only `/data`
+/// is preflighted: that is the #1192 failure mode (captures filling it), whereas
+/// the `/etc/init.d` init scripts are a few KiB and a full rootfs simply fails
+/// the atomic write. Uninstall writes nothing to `/data`, so it is not gated.
 fn space_needs(steps: &[Step]) -> Vec<(&'static str, u64)> {
-    let mut data = 0u64;
-    let mut root = 0u64;
-    for s in steps {
-        if let Step::Put { remote, bytes, .. } = s {
-            if remote.starts_with("/data") {
-                data += bytes.len() as u64;
-            } else {
-                root += bytes.len() as u64; // /etc/init.d/* etc. live on rootfs
+    let data: u64 = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Put { remote, bytes, .. } if remote.starts_with("/data") => {
+                Some(bytes.len() as u64)
             }
-        }
-    }
+            _ => None,
+        })
+        .sum();
     const SLACK: u64 = 8 * 1024 * 1024;
-    let mut needs = Vec::new();
     if data > 0 {
-        needs.push(("/data", data + SLACK));
+        vec![("/data", data + SLACK)]
+    } else {
+        Vec::new()
     }
-    if root > 0 {
-        needs.push(("/", root + SLACK));
-    }
-    needs
 }
 
 /// Refuse the write if `mount` has less than `need` bytes free on the device.
@@ -539,7 +549,7 @@ fn check_free_space(shell: &mut dyn Shell, mount: &str, need: u64) -> Result<(),
             r.output.trim()
         ));
     }
-    let avail_kb = parse_df_available_kb(&r.output).ok_or_else(|| {
+    let avail_kb = parse_df_available_kb(&r.output, mount).ok_or_else(|| {
         format!(
             "could not parse free space for {mount}: {}",
             r.output.trim()
@@ -685,11 +695,18 @@ mod tests {
     #[test]
     fn parse_df_available_handles_normal_and_wrapped() {
         let normal = "Filesystem 1K-blocks Used Available Use% Mounted on\nubi0:data 200000 50000 150000 25% /data\n";
-        assert_eq!(parse_df_available_kb(normal), Some(150000));
+        assert_eq!(parse_df_available_kb(normal, "/data"), Some(150000));
         // busybox wraps a long filesystem name onto its own line.
         let wrapped = "Filesystem 1K-blocks Used Available Use% Mounted on\nubi0:userdata-very-long-name\n 200000 50000 150000 25% /data\n";
-        assert_eq!(parse_df_available_kb(wrapped), Some(150000));
-        assert_eq!(parse_df_available_kb("garbage"), None);
+        assert_eq!(parse_df_available_kb(wrapped, "/data"), Some(150000));
+        assert_eq!(parse_df_available_kb("garbage", "/data"), None);
+        // Mountpoint mismatch (e.g. /data unmounted, df fell back to /) -> None.
+        assert_eq!(parse_df_available_kb(normal, "/"), None);
+        // Malformed Use% or non-numeric column -> None (fail closed).
+        let bad_pct = "H\nubi0:data 200000 50000 150000 25 /data\n";
+        assert_eq!(parse_df_available_kb(bad_pct, "/data"), None);
+        let bad_num = "H\nubi0:data X 50000 150000 25% /data\n";
+        assert_eq!(parse_df_available_kb(bad_num, "/data"), None);
     }
 
     #[test]

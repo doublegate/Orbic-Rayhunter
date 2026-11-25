@@ -196,9 +196,9 @@ With `--apply` it, in order:
    Each transfer streams over a one-shot device-side `nc -l` listener on TCP 8081 (the data path is
    socket -> file, no shell pipe): the control shell on TCP 24 drops bytes on a bulk `cat >` write,
    so this is required for a lossless binary transfer. The device re-hashes each file before the `mv`.
-   Before any write (on `--apply`), install checks free space on `/data` and `/` via `df` and
-   refuses if a filesystem lacks room for its files plus an 8 MiB slack (a full `/data` wedged the
-   daemon and the hotspot, #1192).
+   Before any write (on `--apply`), install checks free space on `/data` via `df` and refuses if
+   it lacks room for the daemon + config plus an 8 MiB slack (a full `/data` wedged the daemon and
+   the hotspot, #1192); the `df` row is validated against the mountpoint before it is trusted.
 3. Runs `sync`, then reboots.
 
 The daemon binary and both init scripts are validated before any write: the daemon must be a
