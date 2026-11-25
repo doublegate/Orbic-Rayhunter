@@ -3,8 +3,8 @@
 Single source of truth for the current state of Orbic-Rayhunter. Other files point here instead
 of restating status. Updated at every sprint and phase boundary.
 
-- Last updated: 2026-11-25 (v1.1.0 -- orx alert; host-side alerting enablement)
-- Version: 1.1.0 (`Cargo.toml` `workspace.package.version = "1.1.0"`)
+- Last updated: 2026-11-25 (v1.1.1 -- orx alert set; host-side ntfy_url write)
+- Version: 1.1.1 (`Cargo.toml` `workspace.package.version = "1.1.1"`)
 - Upstream pin: EFForg/rayhunter v0.13.0 (cd462a1)
 - Target: Orbic RC400L, `ORB400L_V1.2.0_BVZRT`
 
@@ -30,7 +30,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | 2 | v0.3.0 | Stock upstream install | installed & validated on-device 2026-11-23 (web UI, recording, reboot-persistent, rayhunter-check); released 2026-11-23 | [to-dos/PHASE-2-stock-install.md](to-dos/PHASE-2-stock-install.md) |
 | 3 | v0.4.0 | Reproducible patched build | **released 2026-11-23** (firmware build reproduces upstream to within 384 B; releases now ship it) | [to-dos/PHASE-3-reproducible-build.md](to-dos/PHASE-3-reproducible-build.md) |
 | 4 | v0.5.0..v1.0.0 | orx tooling + v1.0.0 baseline | **v1.0.0 released 2026-11-23** (install milestone: our build installed + validated on the unit); core orx ops done (doctor, transport, backup, verify, install, uninstall); `pull-logs`/`check`/`purge` remain as Phase 4 follow-ups | [to-dos/PHASE-4-orx-tooling.md](to-dos/PHASE-4-orx-tooling.md) |
-| 5 | v1.1.0..v1.3.0 | Alerting, analyzers, storage | not started | [to-dos/PHASE-5-v1.1-v1.3-features.md](to-dos/PHASE-5-v1.1-v1.3-features.md) |
+| 5 | v1.1.0..v1.3.0 | Alerting, analyzers, storage | in progress (v1.1.0 `orx alert status/test` + v1.1.1 `orx alert set` released; daemon sinks + analyzers remain) | [to-dos/PHASE-5-v1.1-v1.3-features.md](to-dos/PHASE-5-v1.1-v1.3-features.md) |
 | 6 | v1.4.0..v1.6.0 | Performance, UI/UX, security | not started | [to-dos/PHASE-6-v1.4-v1.6-performance-hardening.md](to-dos/PHASE-6-v1.4-v1.6-performance-hardening.md) |
 | 7 | v1.7.0..v2.0.0 | Host pipeline, firmware, soak, release | not started | [to-dos/PHASE-7-v1.7-v2.0-pipeline-firmware-release.md](to-dos/PHASE-7-v1.7-v2.0-pipeline-firmware-release.md) |
 
@@ -48,7 +48,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Verified device backup | on-device `tar` archives of every writable fs captured and verified (`backups/2026-11-23-V1.2.0/fs/`, two-pass + tar-exit-status + readable); encrypted off-repo copy on the DS-1621+ (GPG to the owner's key) | T-OR-015..T-OR-017 done | gates every device write |
 | OTA block | applied & reboot-persistent (oma_dm/dmclient/mdm-daemon disabled) | T-OR-018 | reversible; undo manifest in backups/ |
 | Rayhunter on device | **our reproducible build installed & validated** (reboot-persistent, capturing; device-side SHA-256 verified at install) | T-OR-022, T-OR-036 | replaced upstream v0.13.0 on 2026-11-23 |
-| `orx` ops: doctor/backup/verify/install/uninstall/pull-logs/check/purge | present (zero-dep, 107 tests, backup-gated) | T-OR-032..T-OR-036, T-OR-037 (check), T-OR-038 (pull-logs), T-OR-039, T-OR-040 (purge) | rescue (T-OR-041) and retention policy (T-OR-040b) remain |
+| `orx` ops: doctor/backup/verify/install/uninstall/pull-logs/check/purge/rescue/alert | present (zero-dep, 132 tests, backup-gated) | T-OR-032..T-OR-036, T-OR-037 (check), T-OR-038 (pull-logs), T-OR-039, T-OR-040 (purge), T-OR-041 (rescue), T-OR-044 (alert status/test), T-OR-107 (alert set) | rescue is read-only (destructive `--apply` = T-OR-041b); retention policy (T-OR-040b) remains |
 | New analyzers | absent | T-OR-051..T-OR-064 | |
 
 ## Metrics snapshot
@@ -56,12 +56,12 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 106 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-036, T-OR-039, T-OR-106 (0x11EB-empirical part of T-OR-019 deferred) | [ROADMAP.md](ROADMAP.md) |
+| Tickets | 107 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-106, T-OR-107 (0x11EB-empirical part of T-OR-019 deferred; rescue delete T-OR-041b and retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 0 | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
-| Host unit tests | 124 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
+| Host unit tests | 132 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
-| Latest release | v1.1.0 (2026-11-25, via PR) | `gh release list` |
+| Latest release | v1.1.1 (2026-11-25, via PR) | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |
 | Device firmware | `ORB400L_V1.2.0_BVZRT` | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
 | Device backup | verified (`backups/2026-11-23-V1.2.0/fs/`) + encrypted off-repo copy | `backups/` |

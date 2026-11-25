@@ -34,7 +34,8 @@ v0.13.0 (`upstream/`, commit cd462a1).
 | v0.8.0 | `orx pull-logs` and `orx restore` / uninstall | 4 | T-OR-038 .. T-OR-039 |
 | v0.9.0 | Retention and purge for disk-full | 4 | T-OR-040 .. T-OR-041 |
 | v1.0.0 | Baseline release | 4 | T-OR-042 .. T-OR-044 |
-| v1.1.0 | Alerting (host enablement: orx alert) | 5 | T-OR-044 |
+| v1.1.0 | Alerting (host enablement: orx alert status/test) | 5 | T-OR-044 |
+| v1.1.1 | `orx alert set` (host-side ntfy_url write) | 5 | T-OR-107 |
 | v1.2.0 | Alerting daemon sinks + analyzers | 5 | T-OR-045 .. T-OR-064 |
 | v1.2.0 | Analyzers | 5 | T-OR-051 .. T-OR-064 |
 | v1.3.0 | Storage and retention | 5 | T-OR-065 .. T-OR-068 |
@@ -169,7 +170,8 @@ existing path; the sink-type and queue extensions below (all `[UPSTREAM]`) move 
 
 | ID | Ticket | Tag | Status |
 |---|---|---|---|
-| T-OR-044 | `orx alert status`/`test`: surface the daemon's ntfy config and send a test via `:8080` (host-side enablement; `set` is T-OR-046/v1.1.1) | host | done (v1.1.0) |
+| T-OR-044 | `orx alert status`/`test`: surface the daemon's ntfy config and send a test via `:8080` (host-side enablement; `set` is T-OR-107/v1.1.1) | host | done (v1.1.0) |
+| T-OR-107 | `orx alert set --ntfy-url <url>\|--clear [--apply]`: write the daemon's `ntfy_url` via a faithful read-modify-write of `/api/config` (host-side; dry-run unless `--apply`) | host | done (v1.1.1) |
 | T-OR-045 | ntfy title, priority and tags headers mapped from event severity | [UPSTREAM] (v1.2.0) | open |
 | T-OR-046 | Notification endpoint authentication (bearer token or basic auth) | [UPSTREAM] | open |
 | T-OR-047 | Generic webhook sink with a JSON body (severity, analyzer, recording, timestamp; no identifiers) | [UPSTREAM] | open |
