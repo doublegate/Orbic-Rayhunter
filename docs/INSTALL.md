@@ -349,17 +349,22 @@ The `:24` root shell is not reboot-persistent. Re-open it before using `orx resc
 through the daemon, which keeps `manifest.toml` consistent. Use the manual steps below only when the
 API is genuinely down and `orx purge` cannot run.
 
-> **Warning.** The daemon records each capture in `manifest.toml`. Deleting a `.qmdl.gz` by hand
-> leaves a dangling manifest entry, and whether Rayhunter v0.13.0 tolerates that on startup is
-> **unverified**. Manual deletion is a last resort; after it, confirm the daemon actually came back
-> (next step). Reconciling the manifest is why `orx rescue --apply` is deferred (T-OR-041b).
+> **Warning — last resort, and the deleted recordings are gone for good.** This procedure deletes
+> capture data to free space; that data is unrecoverable (that is the point), so only delete
+> recordings you have accepted losing. The daemon records each capture in `manifest.toml`; deleting
+> a `.qmdl.gz` by hand leaves a dangling manifest entry whose Rayhunter v0.13.0 startup tolerance is
+> **unverified**. So the one thing you CAN undo — the daemon's bookkeeping — is backed up first
+> (step 1), and a safe tooled version that reconciles the manifest is the deferred `orx rescue
+> --apply` (T-OR-041b).
 
 Over the `:24` shell, in this order:
 
 ```sh
-# 1. STOP the daemon FIRST (unlinking files it holds open will not free space
-#    until it exits, and risks corrupting an active write), then confirm it is gone:
+# 1. STOP the daemon FIRST (unlinking files it holds open frees nothing until it
+#    exits, and risks corrupting an active write); confirm it is gone; and back
+#    up the manifest (tiny) so its bookkeeping can be restored if startup fails:
 /etc/init.d/rayhunter_daemon stop; ps | grep rayhunter-daemon
+cp /data/rayhunter/manifest.toml /data/rayhunter/manifest.toml.bak
 # 2. Delete the OLDEST recordings' file sets (keep the newest you care about).
 #    Each recording is three files in the store:
 rm -f -- /data/rayhunter/qmdl/<ts>.qmdl.gz /data/rayhunter/qmdl/<ts>.ndjson /data/rayhunter/qmdl/<ts>-gps.ndjson
@@ -367,12 +372,18 @@ rm -f -- /data/rayhunter/qmdl/<ts>.qmdl.gz /data/rayhunter/qmdl/<ts>.ndjson /dat
 /etc/init.d/rayhunter_daemon restart
 ```
 
-Then verify recovery with `orx check` (expect the daemon reachable again). If it does not come back,
-a dangling `manifest.toml` entry may be the cause — restore a recording you backed up, or seek the
-upstream guidance before editing the manifest. Finally **close the `:24` shell** to restore the
-hardened posture:
+Then verify recovery with `orx check` (expect the daemon reachable again). **If it does not come
+back**, a dangling `manifest.toml` entry is the likely cause: restore the bookkeeping with
+`cp /data/rayhunter/manifest.toml.bak /data/rayhunter/manifest.toml` and restart, or consult the
+upstream project before editing the manifest by hand.
+
+Finally **close the `:24` shell** to restore the hardened posture, and VERIFY it closed:
 
 ```sh
-# in the :24 shell, kill its own listener:
-pkill -f 'nc -ll -p 24'
+# in the :24 shell, kill its listener. busybox may lack pkill or match its own
+# command line, so fall back to killing the PID from `ps` if needed:
+pkill -f 'nc -ll -p 24' || kill "$(ps | grep '[n]c -ll -p 24' | awk '{print $1}')"
 ```
+
+Then confirm from the host that it is gone — `orx check` must report `root shell port 24 closed`
+(a `[fail] ... is OPEN` means the listener is still up; kill it by PID over the shell and re-check).

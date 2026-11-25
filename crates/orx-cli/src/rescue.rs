@@ -70,11 +70,16 @@ fn store_path(shell: &mut dyn Shell) -> Result<String, String> {
 /// `/data/` and no `..` segment (fail closed). A trailing slash is trimmed.
 fn validate_store(p: &str) -> Result<String, String> {
     let p = p.trim_end_matches('/');
-    let under_data = p
-        .strip_prefix("/data/")
-        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'));
-    let no_dotdot = !p.split('/').any(|seg| seg == "..");
-    if safe_remote(p) && under_data && no_dotdot {
+    // Must be under /data/ with at least one component, and EVERY component must
+    // be a clean name -- no empty (`//`), `.`, or `..` segment (which could
+    // resolve back to the /data mount root or escape it).
+    let under_data = p.strip_prefix("/data/").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .split('/')
+                .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+    });
+    if safe_remote(p) && under_data {
         Ok(p.to_string())
     } else {
         Err(format!(
@@ -139,12 +144,15 @@ pub fn plan(shell: &mut dyn Shell) -> Result<RescuePlan, String> {
     }
     let available_kb = crate::install::parse_df_available_kb(&df.output, DATA_MOUNT)
         .ok_or_else(|| format!("could not read free space on {DATA_MOUNT} (is it mounted?)"))?;
-    // The store must exist. `echo OK` runs only if the dir exists, so require
-    // BOTH a zero exit AND an exact "OK" (so a store path or error text that
-    // merely contains "OK" cannot pass).
-    let test = shell.run(&format!("test -d {store} && echo OK"))?;
+    // The store must exist AND be a real directory, not a symlink: `test -d`
+    // follows a symlink (so a symlinked store would pass), but then `ls -l`
+    // would list the symlink entry itself and parse_ls would silently see zero
+    // recordings. `! test -L` fails closed on that. Require exit 0 + exact "OK".
+    let test = shell.run(&format!("test -d {store} && ! test -L {store} && echo OK"))?;
     if test.status != 0 || test.output.trim() != "OK" {
-        return Err(format!("recording store {store} not found on the device"));
+        return Err(format!(
+            "recording store {store} is missing or a symlink (refusing)"
+        ));
     }
     // List the directory itself (no shell glob) so an unbounded number of files
     // cannot exceed ARG_MAX; parse_ls filters for `*.qmdl.gz`. A non-zero ls
@@ -222,6 +230,18 @@ mod tests {
         assert!(validate_store("/data").is_err());
         assert!(validate_store("/etc/passwd").is_err(), "not under /data/");
         assert!(validate_store("/data/../etc").is_err(), "dotdot rejected");
+        assert!(
+            validate_store("/data/.").is_err(),
+            "dot segment -> /data root"
+        );
+        assert!(
+            validate_store("/data/./.").is_err(),
+            "dot segments rejected"
+        );
+        assert!(
+            validate_store("/data//qmdl").is_err(),
+            "empty segment rejected"
+        );
     }
 
     fn shell_with(df_avail_kb: u64, recs: &[(u64, &str)], store_ok: bool) -> FakeShell {
@@ -243,7 +263,7 @@ mod tests {
             },
         );
         sh.responses.insert(
-            "test -d /data/rayhunter/qmdl && echo OK".into(),
+            "test -d /data/rayhunter/qmdl && ! test -L /data/rayhunter/qmdl && echo OK".into(),
             CmdResult {
                 output: if store_ok {
                     "OK\n".into()
