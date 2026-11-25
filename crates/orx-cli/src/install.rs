@@ -227,7 +227,11 @@ pub fn verify_daemon_against_sums(daemon: &Path) -> Result<bool, String> {
     // form (`rayhunter-daemon`, `./rayhunter-daemon`, `*rayhunter-daemon`) matches.
     let want = text.lines().find_map(|l| {
         let l = l.trim_end();
-        if l.len() < 66 || !l[..64].bytes().all(|b| b.is_ascii_hexdigit()) {
+        // Check the raw bytes BEFORE slicing: `l[..64]` would panic if byte 64
+        // fell mid-character. Once bytes 0..64 are all ASCII hex (single-byte
+        // chars), 64 is a char boundary and split_at(64) is safe.
+        let b = l.as_bytes();
+        if b.len() < 66 || !b[..64].iter().all(u8::is_ascii_hexdigit) {
             return None;
         }
         let (hash, rest) = l.split_at(64);
@@ -606,6 +610,15 @@ mod tests {
         // Present but daemon not listed -> Err.
         std::fs::write(d.join("SHA256SUMS"), format!("{good}  something-else\n")).unwrap();
         assert!(verify_daemon_against_sums(&daemon).is_err());
+        // A corrupt line with a multi-byte char straddling byte 64 must not panic
+        // (fail-closed on file input); the valid line is still found.
+        let junk = format!("{}\u{00e9}junk\n", "a".repeat(63)); // 'é' spans bytes 63-64
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{junk}{good}  rayhunter-daemon\n"),
+        )
+        .unwrap();
+        assert_eq!(verify_daemon_against_sums(&daemon), Ok(true));
         let _ = std::fs::remove_dir_all(&d);
     }
 
