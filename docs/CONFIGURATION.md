@@ -80,5 +80,25 @@ Identical to upstream in v1.0.0. Descriptions and planned additions:
 - On the device, the web UI's config form writes `config.toml` through `POST /api/config` and
   restarts the daemon logic in-process. Anyone on the hotspot LAN can do the same, because the API
   is unauthenticated ([SECURITY-MODEL.md](SECURITY-MODEL.md)).
-- New keys introduced by `[UPSTREAM]` patches (for example notification sinks in v1.1, T-OR-045..
+- New keys introduced by `[UPSTREAM]` patches (for example notification sinks in v1.2, T-OR-045..
   T-OR-050, or retention in v1.3, T-OR-065) must default to the current behavior when absent.
+
+## Alerting (ntfy)
+
+The daemon has built-in alerting: when `ntfy_url` is set it POSTs a notification on analyzer
+detections (`Warning`) and low battery (`LowBattery`), with per-type debounce and
+exponential-backoff retry. To enable it, uncomment `ntfy_url` in `config.orbic.toml` before install,
+or set it in the Rayhunter web UI on a running device.
+
+From the host (v1.1.0, T-OR-044):
+
+```sh
+orx alert status [--ip <addr>]   # show the configured ntfy_url + enabled notification types
+orx alert test   [--ip <addr>]   # ask the daemon to send a test notification to that URL
+```
+
+`orx alert test` is outward-facing (the device POSTs to your `ntfy_url`); it reports clearly when no
+URL is set. Setting `ntfy_url` from the host (`orx alert set`) is deferred to v1.1.1 because the
+config write restarts the daemon and the `/api/config` round-trip redacts `wifi_password`. The
+daemon's additional sink types (webhook auth/headers, MQTT, Gotify) and a persistent retry queue are
+`[UPSTREAM]` work scheduled for v1.2.0 (T-OR-045..050).

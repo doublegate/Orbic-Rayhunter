@@ -54,6 +54,76 @@ impl Json {
             _ => None,
         }
     }
+    /// Insert/replace a key in an object (no-op on non-objects).
+    pub fn set(&mut self, key: &str, value: Json) {
+        if let Json::Obj(m) = self {
+            m.insert(key.to_string(), value);
+        }
+    }
+    /// Serialize back to compact JSON. Round-trips what [`parse`] accepts; keys
+    /// come out sorted (BTreeMap), which is fine for a config body.
+    pub fn to_json(&self) -> String {
+        let mut s = String::new();
+        self.write_json(&mut s);
+        s
+    }
+    fn write_json(&self, out: &mut String) {
+        match self {
+            Json::Null => out.push_str("null"),
+            Json::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Json::Num(n) => {
+                // Emit integers without a trailing ".0"; finite only (JSON has no
+                // NaN/Inf -- emit null, which serde rejects into a clean error).
+                if !n.is_finite() {
+                    out.push_str("null");
+                } else if n.fract() == 0.0 && n.abs() < 1e15 {
+                    out.push_str(&format!("{}", *n as i64));
+                } else {
+                    out.push_str(&format!("{n}"));
+                }
+            }
+            Json::Str(st) => write_json_string(st, out),
+            Json::Arr(v) => {
+                out.push('[');
+                for (i, e) in v.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    e.write_json(out);
+                }
+                out.push(']');
+            }
+            Json::Obj(m) => {
+                out.push('{');
+                for (i, (k, val)) in m.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write_json_string(k, out);
+                    out.push(':');
+                    val.write_json(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
+/// Write a JSON string literal with the mandatory escapes.
+fn write_json_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 /// Parse a complete JSON document; trailing non-whitespace is an error.
@@ -305,6 +375,36 @@ mod tests {
         assert!(parse("1 2").is_err()); // trailing data
         assert!(parse("").is_err());
         assert!(parse("nul").is_err());
+    }
+
+    #[test]
+    fn round_trips_through_to_json() {
+        for s in [
+            r#"{"a":1,"b":[true,null,"x"],"c":{"d":-2}}"#,
+            r#"{"enabled_notifications":["Warning","LowBattery"],"ntfy_url":"https://ntfy.sh/foo"}"#,
+            r#"{"s":"a\nb\t\"q\""}"#,
+        ] {
+            let v = parse(s).unwrap();
+            let out = v.to_json();
+            // Re-parse the output and compare the VALUE (key order may differ).
+            assert_eq!(parse(&out).unwrap(), v, "round-trip of {s}");
+        }
+    }
+
+    #[test]
+    fn set_and_serialize() {
+        let mut v = parse(r#"{"ntfy_url":null,"x":1}"#).unwrap();
+        v.set("ntfy_url", Json::Str("https://ntfy.sh/t".into()));
+        let back = parse(&v.to_json()).unwrap();
+        assert_eq!(
+            back.get("ntfy_url").unwrap().as_str(),
+            Some("https://ntfy.sh/t")
+        );
+        assert_eq!(
+            back.get("x").unwrap().as_u64(),
+            Some(1),
+            "other fields preserved"
+        );
     }
 
     #[test]

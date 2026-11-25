@@ -34,7 +34,8 @@ v0.13.0 (`upstream/`, commit cd462a1).
 | v0.8.0 | `orx pull-logs` and `orx restore` / uninstall | 4 | T-OR-038 .. T-OR-039 |
 | v0.9.0 | Retention and purge for disk-full | 4 | T-OR-040 .. T-OR-041 |
 | v1.0.0 | Baseline release | 4 | T-OR-042 .. T-OR-044 |
-| v1.1.0 | Alerting | 5 | T-OR-045 .. T-OR-050 |
+| v1.1.0 | Alerting (host enablement: orx alert) | 5 | T-OR-044 |
+| v1.2.0 | Alerting daemon sinks + analyzers | 5 | T-OR-045 .. T-OR-064 |
 | v1.2.0 | Analyzers | 5 | T-OR-051 .. T-OR-064 |
 | v1.3.0 | Storage and retention | 5 | T-OR-065 .. T-OR-068 |
 | v1.4.0 | Performance and battery | 6 | T-OR-069 .. T-OR-074 |
@@ -161,10 +162,15 @@ filled; release checklist passes.
 ## v1.1.0 Alerting
 
 Goal: extend upstream's ntfy path (plain `POST` body, no headers) without duplicating it.
+Upstream v0.13.0 ALREADY sends a `Warning` notification on analyzer detections (and `LowBattery`)
+to `ntfy_url` with per-type debounce and backoff retry, so v1.1.0 is host-side ENABLEMENT of that
+existing path; the sink-type and queue extensions below (all `[UPSTREAM]`) move to v1.2.0 per the
+2026-11-25 decision (enable now, patch the daemon after).
 
 | ID | Ticket | Tag | Status |
 |---|---|---|---|
-| T-OR-045 | ntfy title, priority and tags headers mapped from event severity | [UPSTREAM] | open |
+| T-OR-044 | `orx alert status`/`test`: surface the daemon's ntfy config and send a test via `:8080` (host-side enablement; `set` is T-OR-046/v1.1.1) | host | done (v1.1.0) |
+| T-OR-045 | ntfy title, priority and tags headers mapped from event severity | [UPSTREAM] (v1.2.0) | open |
 | T-OR-046 | Notification endpoint authentication (bearer token or basic auth) | [UPSTREAM] | open |
 | T-OR-047 | Generic webhook sink with a JSON body (severity, analyzer, recording, timestamp; no identifiers) | [UPSTREAM] | open |
 | T-OR-048 | MQTT sink (discuss with upstream first; dependency weight on armv7) | [UPSTREAM] | open |
