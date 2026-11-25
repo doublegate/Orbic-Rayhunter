@@ -89,8 +89,11 @@ diff <(sort backups/<date>-V1.2.0/MANIFEST.sha256) <(sort backups/<date>-V1.2.0-
 - [x] T-OR-036: refuses unless `verify::gate()` passes (a verified rootfs backup); dry-run
       validated on the unit against the Sprint 1.3 backup. (A separate post-install on-device
       health check is the planned `orx check`, T-OR-037, not yet implemented)
-- [ ] T-OR-037: `orx check` (on-device post-install health: installed hashes, daemon process,
-      API, active recording, init hooks, no port 24/8081 listener) -- still to do
+- [x] T-OR-037 (v1.0.4): `orx check` reports device health from the `:8080` API (daemon reachable,
+      rayhunter version/OS/arch, disk/memory/battery, active recording + stored count) and probes
+      ports (daemon :8080 open; root shell :24 and installer :8081 expected closed). Read-only;
+      `[ok]/[warn]/[fail]` summary; exits non-zero on any failure. Validated live (device healthy).
+      Installed-hash and init-hook checks need the :24 shell (not reboot-persistent) -- deferred.
 
 Acceptance criteria: install and verify on the real unit from the Phase 2 state; refusal paths
 covered by unit tests.

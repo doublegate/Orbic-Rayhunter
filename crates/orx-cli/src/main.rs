@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, install, probe, pull, transport, usb, verify};
+use orx_cli::{backup, check, install, probe, pull, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -18,6 +18,7 @@ USAGE:
     orx verify --dir <dir>               Re-hash a backup dir against its MANIFEST.txt
     orx pull-logs --to <dir> [--ip <addr>]
                                          Download recordings (QMDL + analysis ndjson) from :8080
+    orx check [--ip <addr>]              Read-only device health report (daemon, stats, ports)
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
                 [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
@@ -261,6 +262,28 @@ fn cmd_verify(dir: &Path) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `orx check`: read-only device health report (daemon + ports).
+fn cmd_check(ip: &str) -> ExitCode {
+    match check::check(ip, Duration::from_secs(10)) {
+        Ok(report) => {
+            for (level, msg) in &report.items {
+                println!("{} {msg}", level.tag());
+            }
+            if report.healthy() {
+                println!("check: device healthy");
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("check: one or more failures");
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -664,6 +687,20 @@ fn main() -> ExitCode {
                     ExitCode::from(2)
                 }
             }
+        }
+        Some("check") => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--ip" => match rest.next() {
+                        Some(v) if !v.is_empty() => ip = v.clone(),
+                        _ => return usage_err("--ip needs a value"),
+                    },
+                    other => return usage_err(&format!("unexpected argument {other:?}")),
+                }
+            }
+            cmd_check(&ip)
         }
         Some("pull-logs") => {
             let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
