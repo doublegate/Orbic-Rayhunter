@@ -77,51 +77,59 @@ fn validate_store(p: &str) -> Result<String, String> {
     }
 }
 
-/// Parse a busybox `ls -l` listing of `*.qmdl.gz` into (name, size) pairs. A
-/// line is `<perms> <links> <owner> <group> <size> <mon> <day> <time> <path>`;
-/// we take a numeric size column and the basename minus `.qmdl.gz`. Lines that
-/// do not parse (totals, errors) are skipped.
-fn parse_ls(output: &str) -> Vec<Recording> {
+/// Parse a busybox `ls -ld` listing into (name, size) pairs. A regular-file row
+/// is EXACTLY `<perms> <links> <owner> <group> <size> <mon> <day> <time> <path>`
+/// -- nine whitespace tokens. Any row with a different field count (a name with
+/// whitespace would split into more), a non-regular type, a path that is not a
+/// direct child of `store`, or a duplicate name is rejected rather than guessed,
+/// so a crafted or odd listing cannot inflate the plan or delete the wrong file.
+fn parse_ls(output: &str, store: &str) -> Result<Vec<Recording>, String> {
+    let prefix = format!("{store}/");
     let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for line in output.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 9 {
+        // Exactly nine fields: more means whitespace in the name (ambiguous) or a
+        // symlink's ` -> target`; fewer means a total/error line.
+        if fields.len() != 9 {
             continue;
         }
-        // Regular files only: skip directories ('d'), symlinks ('l', whose last
-        // field is the link target), etc. `ls -ld` lists each entry itself.
+        // Regular files only ('-'); skip directories ('d'), symlinks ('l'), etc.
         if !fields[0].starts_with('-') {
             continue;
         }
-        let Some(path) = fields.last() else { continue };
-        let Some(file) = path.rsplit('/').next() else {
-            continue;
+        let path = fields[8];
+        let Some(file) = path.strip_prefix(&prefix) else {
+            continue; // not under the store
         };
+        if file.contains('/') {
+            continue; // not a direct child of the store
+        }
         let Some(name) = file.strip_suffix(".qmdl.gz") else {
             continue;
         };
-        // The size is the last all-digit field before the date columns (index 4
-        // in the canonical layout, but owner/group can shift it); scan for it.
-        let Some(bytes) = fields[2..fields.len() - 4]
-            .iter()
-            .rev()
-            .find_map(|f| f.parse::<u64>().ok())
-        else {
+        if name.is_empty() {
             continue;
-        };
-        if !name.is_empty() {
-            out.push(Recording {
-                name: name.to_string(),
-                bytes,
-            });
         }
+        let Ok(bytes) = fields[4].parse::<u64>() else {
+            continue; // size column not numeric -> not a file row we understand
+        };
+        if !seen.insert(name.to_string()) {
+            return Err(format!(
+                "duplicate recording name in device listing: {name}"
+            ));
+        }
+        out.push(Recording {
+            name: name.to_string(),
+            bytes,
+        });
     }
     // Oldest first. Sort NUMERICALLY by the timestamp name: lexicographic order
     // would misrank pre-NITZ/NTP captures with short timestamps (e.g. "3600")
     // against normal 10-digit ones and could classify a newer capture as oldest.
     // Non-numeric names sort last (treated as newest, so kept).
     out.sort_by_key(|r| (r.name.parse::<u64>().unwrap_or(u64::MAX), r.name.clone()));
-    out
+    Ok(out)
 }
 
 /// Build the rescue plan: free space on the data partition + stored recordings.
@@ -132,7 +140,7 @@ pub fn plan(shell: &mut dyn Shell) -> Result<RescuePlan, String> {
     // `ls -ld -- <store>/*.qmdl.gz`: -d lists each match itself (never a dir's
     // contents), -- ends options; a non-zero status (no matches) yields no rows.
     let ls = shell.run(&format!("ls -ld -- {store}/*.qmdl.gz 2>/dev/null"))?;
-    let recordings = parse_ls(&ls.output);
+    let recordings = parse_ls(&ls.output, &store)?;
     Ok(RescuePlan {
         store,
         available_kb,
@@ -198,8 +206,22 @@ pub fn apply(shell: &mut dyn Shell, keep: usize) -> Result<RescueOutcome, String
 /// Whether the rayhunter daemon process is currently running on the device.
 fn daemon_running(shell: &mut dyn Shell) -> Result<bool, String> {
     let ps = shell.run("ps")?;
-    // The daemon's argv contains the binary name; `ps` lists the command.
-    Ok(ps.output.contains("rayhunter-daemon"))
+    // Fail closed if we cannot get a trustworthy process listing: a non-zero
+    // status or an empty/one-line output means we cannot confirm the daemon is
+    // gone, so we must not proceed to delete under a possibly-live writer.
+    if ps.status != 0 {
+        return Err(format!(
+            "could not list processes (ps exited {}); refusing to delete",
+            ps.status
+        ));
+    }
+    if ps.output.lines().filter(|l| !l.trim().is_empty()).count() < 2 {
+        return Err("process listing was empty or unreadable; refusing to delete".to_string());
+    }
+    // Match "rayhunter" (its argv is /data/rayhunter/rayhunter-daemon ...): the
+    // substring appears early in the path, so a busybox `ps` COMMAND column
+    // truncated at ~80 columns still contains it.
+    Ok(ps.output.contains("rayhunter"))
 }
 
 #[cfg(test)]
@@ -214,6 +236,8 @@ mod tests {
         )
     }
 
+    const STORE: &str = "/data/rayhunter/qmdl";
+
     #[test]
     fn parse_ls_extracts_name_and_size_oldest_first() {
         let out = format!(
@@ -221,7 +245,7 @@ mod tests {
             ls_line(200, "1795457329"),
             ls_line(100, "1795442375")
         );
-        let recs = parse_ls(&out);
+        let recs = parse_ls(&out, STORE).unwrap();
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].name, "1795442375", "oldest first");
         assert_eq!(recs[0].bytes, 100);
@@ -231,7 +255,7 @@ mod tests {
     #[test]
     fn parse_ls_skips_junk_lines() {
         let out = "total 1234\nls: /x/*.qmdl.gz: No such file or directory\n";
-        assert!(parse_ls(out).is_empty());
+        assert!(parse_ls(out, STORE).unwrap().is_empty());
     }
 
     #[test]
@@ -240,7 +264,32 @@ mod tests {
         // both must be skipped (only regular files '-' count).
         let out = "lrwxrwxrwx 1 root root 20 Nov 23 13:08 /data/rayhunter/qmdl/a.qmdl.gz -> /other/b.qmdl.gz\n\
                    drwxr-xr-x 2 root root 4096 Nov 23 13:08 /data/rayhunter/qmdl/weird.qmdl.gz\n";
-        assert!(parse_ls(out).is_empty());
+        assert!(parse_ls(out, STORE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_ls_skips_whitespace_names_and_non_children() {
+        // A name with a space splits into >9 fields -> skipped (not misparsed).
+        let spaced =
+            "-rw-r--r-- 1 root root 123 Nov 23 13:08 /data/rayhunter/qmdl/copy 1795457329.qmdl.gz";
+        // A nested path is not a direct child of the store -> skipped.
+        let nested =
+            "-rw-r--r-- 1 root root 123 Nov 23 13:08 /data/rayhunter/qmdl/sub/1795457329.qmdl.gz";
+        let out = format!("{spaced}\n{nested}\n");
+        assert!(parse_ls(&out, STORE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_ls_fails_on_duplicate_names() {
+        let out = format!(
+            "{}\n{}\n",
+            ls_line(100, "1795442375"),
+            ls_line(200, "1795442375")
+        );
+        assert!(
+            parse_ls(&out, STORE).is_err(),
+            "duplicate names must fail closed"
+        );
     }
 
     #[test]
@@ -408,6 +457,31 @@ mod tests {
         assert!(
             apply(&mut sh, 0).is_err(),
             "a daemon still alive after stop must abort before any delete"
+        );
+        assert!(!sh.cmds.iter().any(|c| c.starts_with("rm -f")));
+    }
+
+    #[test]
+    fn apply_aborts_when_ps_fails() {
+        // Cannot confirm the daemon is gone -> fail closed, delete nothing.
+        let mut sh = shell_with(187000, &[(100, "1795442375"), (200, "1795457329")]);
+        sh.responses.insert(
+            INIT_STOP.into(),
+            CmdResult {
+                output: "ok".into(),
+                status: 0,
+            },
+        );
+        sh.responses.insert(
+            "ps".into(),
+            CmdResult {
+                output: String::new(),
+                status: 1,
+            },
+        );
+        assert!(
+            apply(&mut sh, 0).is_err(),
+            "an unreadable ps must abort before any delete"
         );
         assert!(!sh.cmds.iter().any(|c| c.starts_with("rm -f")));
     }
