@@ -1,7 +1,7 @@
 # Configuration
 
 Our device configuration is [device/config/config.orbic.toml](../device/config/config.orbic.toml),
-installed as `/data/rayhunter/config.toml` by `orx install` ([INSTALL.md](INSTALL.md) step 4).
+installed as `/data/rayhunter/config.toml` by `orx install` ([INSTALL.md](INSTALL.md) step 4); override it with `orx install --config <path>`.
 Every key exists in upstream v0.13.0; this project adds no keys until a patch introduces one, and
 any such key is documented here in the same change.
 
@@ -10,7 +10,7 @@ Sources of upstream values: `daemon/src/config.rs` (`Config::default()`, applied
 `dist/config.toml.in` (the template the upstream installer writes)
 ([ref-docs/rayhunter-upstream-overview.md](../ref-docs/rayhunter-upstream-overview.md) section 4).
 The upstream installer does not overwrite an existing `config.toml` unless `--reset-config` is
-passed; `orx install` replaces it deliberately and keeps `config.toml.prev`.
+passed; `orx install` replaces it deliberately with our hardened config (the verified backup is the rollback, not a `.prev` copy).
 
 Columns: **code default** = value when the key is absent; **upstream template** = value written by
 `installer orbic`; **ours** = value in `config.orbic.toml` ("absent" means the code default

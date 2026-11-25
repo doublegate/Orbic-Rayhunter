@@ -4,6 +4,22 @@
 
 - (nothing yet)
 
+## [1.0.2] - 2026-11-25
+
+More `orx install` hardening: deploy our hardened config, and a free-space preflight.
+
+### Added
+
+- `orx install` now deploys our hardened `device/config/config.orbic.toml` by default (T-OR-036b)
+  instead of upstream's bare template -- so the device gets `key_input_mode = 1` (double-tap to
+  record), `min_space_to_start/continue = 64/32 MiB` of `/data` headroom, `wifi_enabled = false`,
+  `auto_check_updates = false` and the full analyzer set. Override with `--config <path>`;
+  `device = "orbic"` is always enforced.
+- Free-space preflight before any device write (T-OR-036c): on `--apply`, install runs `df` on
+  `/data` and `/` and refuses if a filesystem lacks room for its files plus an 8 MiB slack, so a
+  nearly-full `/data` cannot wedge the daemon and hotspot mid-write (#1192). `df` output is parsed
+  robustly (anchored from the end, tolerating a wrapped filesystem name).
+
 ## [1.0.1] - 2026-11-25
 
 Install-safety hardening and a test-flake fix. No device-facing behaviour change beyond the new
