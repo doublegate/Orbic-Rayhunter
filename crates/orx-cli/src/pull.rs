@@ -45,6 +45,78 @@ impl From<&str> for PullError {
     }
 }
 
+/// POST `path` with an empty body and return the response status on a 2xx, else
+/// `Err`. For the daemon's action endpoints (e.g. `/api/delete-recording/{name}`,
+/// which replies `202 Accepted`). The (bounded) response body is read and
+/// discarded. 404 maps to `PullError::NotFound`, like [`http_get_to`].
+pub fn http_post(addr: SocketAddr, path: &str, timeout: Duration) -> Result<u16, PullError> {
+    const MAX_DRAIN: u64 = 64 * 1024;
+    let deadline = Instant::now() + timeout;
+    let mut stream =
+        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
+    stream.set_write_timeout(Some(timeout)).ok();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+
+    let mut head = Vec::new();
+    let mut buf = [0u8; 8192];
+    // Decode ONLY the header block as text: body bytes may share the same read()
+    // and need not be UTF-8 (and a multi-byte char could straddle the boundary).
+    let hdr_end = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("read: deadline exceeded in headers".into());
+        }
+        stream.set_read_timeout(Some(remaining)).ok();
+        match stream.read(&mut buf) {
+            Ok(0) => return Err("connection closed before headers completed".into()),
+            Ok(n) => {
+                head.extend_from_slice(&buf[..n]);
+                if let Some(pos) = find_sub(&head, b"\r\n\r\n") {
+                    break pos + 4;
+                }
+                if head.len() > 64 * 1024 {
+                    return Err("HTTP headers too large".into());
+                }
+            }
+            Err(e) => return Err(format!("read: {e}").into()),
+        }
+    };
+    let head_str =
+        std::str::from_utf8(&head[..hdr_end]).map_err(|_| "non-UTF-8 HTTP headers".to_string())?;
+    let status = head_str
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .ok_or_else(|| PullError::Other("malformed HTTP status line".to_string()))?;
+    if status == 404 {
+        return Err(PullError::NotFound);
+    }
+    if !(200..300).contains(&status) {
+        return Err(PullError::Http(status));
+    }
+    // Drain the (small) body so the peer closes cleanly; bounded and timed.
+    let mut drained = 0u64;
+    while drained < MAX_DRAIN {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        stream.set_read_timeout(Some(remaining)).ok();
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => drained += n as u64,
+            Err(_) => break,
+        }
+    }
+    Ok(status)
+}
+
 /// Recording names are device-supplied; only allow a safe, path- and URL-clean
 /// token so a crafted manifest cannot traverse directories or inject a request.
 pub fn safe_name(name: &str) -> bool {
@@ -381,7 +453,7 @@ fn download_to(
 
 /// sha256 of a local file, hashed incrementally in 64 KiB chunks (never loading
 /// the whole capture into RAM).
-fn file_sha256(path: &Path) -> Result<String, String> {
+pub fn file_sha256(path: &Path) -> Result<String, String> {
     let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut h = crate::sha256::Sha256::new();
     let mut buf = [0u8; 64 * 1024];

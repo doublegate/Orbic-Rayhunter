@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, check, install, probe, pull, transport, usb, verify};
+use orx_cli::{backup, check, install, probe, pull, purge, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -19,6 +19,8 @@ USAGE:
     orx pull-logs --to <dir> [--ip <addr>]
                                          Download recordings (QMDL + analysis ndjson) from :8080
     orx check [--ip <addr>]              Read-only device health report (daemon, stats, ports)
+    orx purge [--apply --pulled <dir>|--force] [--ip <addr>]
+                                         Delete completed recordings (dry-run unless --apply; keeps active)
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
                 [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
@@ -262,6 +264,60 @@ fn cmd_verify(dir: &Path) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `orx purge`: delete completed recordings from the device. `gate` is `None`
+/// for a dry run, or `Some(_)` to actually delete under that safety gate.
+fn cmd_purge(ip: &str, gate: Option<purge::PurgeGate>) -> ExitCode {
+    let timeout = Duration::from_secs(30);
+    let Some(gate) = gate else {
+        return match purge::dry_run(ip, timeout) {
+            Ok(plan) => {
+                if plan.completed.is_empty() {
+                    println!("purge (dry run): no completed recordings to delete");
+                } else {
+                    println!(
+                        "purge (dry run): {} completed recording(s) would be deleted:",
+                        plan.completed.len()
+                    );
+                    for (name, _size) in &plan.completed {
+                        println!("  {name}");
+                    }
+                }
+                if let Some(active) = &plan.active {
+                    println!("  (active recording {active} is kept)");
+                }
+                println!(
+                    "These captures hold real identifiers. Pull them with \
+                     `orx pull-logs --to <dir>`, then delete with \
+                     `orx purge --apply --pulled <dir>` (verified copies only), or \
+                     `orx purge --apply --force` to delete without keeping a copy."
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        };
+    };
+    match purge::apply(ip, &gate, timeout) {
+        Ok(o) => {
+            println!(
+                "purge: {} deleted, {} skipped, {} failed",
+                o.deleted, o.skipped, o.failed
+            );
+            if o.failed > 0 {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -687,6 +743,47 @@ fn main() -> ExitCode {
                     ExitCode::from(2)
                 }
             }
+        }
+        Some("purge") => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut apply = false;
+            let mut force = false;
+            let mut pulled: Option<String> = None;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--apply" => apply = true,
+                    "--force" => force = true,
+                    "--pulled" => match rest.next() {
+                        Some(v) if !v.is_empty() => pulled = Some(v.clone()),
+                        _ => return usage_err("--pulled needs a directory"),
+                    },
+                    "--ip" => match rest.next() {
+                        Some(v) if !v.is_empty() => ip = v.clone(),
+                        _ => return usage_err("--ip needs a value"),
+                    },
+                    other => return usage_err(&format!("unexpected argument {other:?}")),
+                }
+            }
+            if !apply && (force || pulled.is_some()) {
+                return usage_err("--force/--pulled only apply with --apply");
+            }
+            let gate = if apply {
+                match (pulled, force) {
+                    (Some(_), true) => return usage_err("pass only one of --pulled or --force"),
+                    (Some(dir), false) => Some(purge::PurgeGate::VerifiedPull(dir.into())),
+                    (None, true) => Some(purge::PurgeGate::Force),
+                    (None, false) => {
+                        return usage_err(
+                            "purge --apply needs --pulled <dir> (delete only verified-pulled \
+                             recordings) or --force (delete without a local copy)",
+                        );
+                    }
+                }
+            } else {
+                None
+            };
+            cmd_purge(&ip, gate)
         }
         Some("check") => {
             let mut ip = probe::DEFAULT_DEVICE_IP.to_string();

@@ -143,8 +143,19 @@ cargo run -p orx-cli -- doctor
 
 ## Sprint 4.5: Retention and rescue (v0.9.0)
 
-- [ ] T-OR-040: `orx purge`: delete recordings on the device only after a verified pull, by age,
-      total size, or count; never the current recording; keep flagged recordings unless forced
+- [x] T-OR-040 (v1.0.5): `orx purge` deletes COMPLETED recordings via
+      `POST /api/delete-recording/{name}`, never the active one. Dry-run by default (lists what would
+      be deleted + recommends `orx pull-logs` first). `--apply` requires a gate: `--pulled <dir>`
+      deletes only recordings verified present in that pull dir (SHA-256 matched against
+      PULL-MANIFEST.txt, and the current manifest size equal to the size `orx pull-logs` recorded for
+      the completed recording in `.orx-pull-state` -- so a stale/partial pull is never used to
+      authorize deleting a larger completed recording), or `--force` to delete without a local copy;
+      bare `--apply` is refused. Fails closed on a missing `entries` array, a missing/invalid
+      `qmdl_size_bytes`, or a malformed `current_entry`; a 403 (daemon debug mode) is reported clearly.
+      An invalid `--pulled` dir (missing, or missing its `.orx-pull-state`/`PULL-MANIFEST.txt`) is a
+      hard error; a valid pull dir that lacks a given recording skips it. Dry run and the gate
+      validated live on the unit; the delete path is unit-tested against a loopback server (real captures not deleted).
+      Age/size/count policies and a "keep flagged" flag are a follow-up (T-OR-040b).
 - [ ] T-OR-041: `orx rescue`: when :8080 is down, use the network shell to report `df -h /data`,
       stop the daemon, and move or delete the oldest recordings after confirmation
 - [ ] T-OR-041: rehearse a controlled fill of `/data` to the configured threshold (not to 100
