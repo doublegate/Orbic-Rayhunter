@@ -211,8 +211,12 @@ pub fn verify_daemon_against_sums(daemon: &Path) -> Result<bool, String> {
         Some(dir) => dir.join("SHA256SUMS"),
         None => return Ok(false),
     };
-    if !sums.is_file() {
-        return Ok(false);
+    // Only a genuine absence (NotFound) downgrades to "cannot verify"; a broken
+    // symlink or an unreadable file must fail closed, not be treated as absent.
+    match std::fs::symlink_metadata(&sums) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("cannot stat {}: {e}", sums.display())),
+        Ok(_) => {}
     }
     let name = daemon
         .file_name()
@@ -225,28 +229,47 @@ pub fn verify_daemon_against_sums(daemon: &Path) -> Result<bool, String> {
     // runs `sha256sum -- ./*`, so entries carry a leading `./`; other tools may
     // use a path. Parse by the fixed hash width and compare by basename so every
     // form (`rayhunter-daemon`, `./rayhunter-daemon`, `*rayhunter-daemon`) matches.
-    let want = text.lines().find_map(|l| {
-        let l = l.trim_end();
-        // Check the raw bytes BEFORE slicing: `l[..64]` would panic if byte 64
-        // fell mid-character. Once bytes 0..64 are all ASCII hex (single-byte
-        // chars), 64 is a char boundary and split_at(64) is safe.
-        let b = l.as_bytes();
-        if b.len() < 66 || !b[..64].iter().all(u8::is_ascii_hexdigit) {
-            return None;
+    let matches: Vec<&str> = text
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_end();
+            // Check the raw bytes BEFORE slicing: `l[..64]` would panic if byte 64
+            // fell mid-character. Once bytes 0..64 are all ASCII hex (single-byte
+            // chars), 64 is a char boundary and split_at(64) is safe.
+            let b = l.as_bytes();
+            if b.len() < 66 || !b[..64].iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            let (hash, rest) = l.split_at(64);
+            // The separator must be exactly two spaces (text) or space+`*`
+            // (binary). This also rejects a SHA-512 line, whose 65th/66th chars
+            // are hex, not a separator.
+            if rest.as_bytes()[0] != b' ' || !matches!(rest.as_bytes()[1], b' ' | b'*') {
+                return None;
+            }
+            let file = rest[2..].trim();
+            let base = Path::new(file).file_name()?.to_str()?;
+            (base == name).then_some(hash)
+        })
+        .collect();
+    let want = match matches.as_slice() {
+        [] => {
+            return Err(format!(
+                "{} does not list {name} (stale or wrong SHA256SUMS?)",
+                sums.display()
+            ));
         }
-        let (hash, rest) = l.split_at(64);
-        let file = rest.get(2..)?.trim(); // skip the 2-char separator
-        let base = Path::new(file).file_name()?.to_str()?;
-        (base == name).then(|| hash.to_string())
-    });
-    let want = want.ok_or_else(|| {
-        format!(
-            "{} does not list {name} (stale or wrong SHA256SUMS?)",
-            sums.display()
-        )
-    })?;
+        [one] => *one,
+        _ => {
+            return Err(format!(
+                "{} has multiple entries for {name} (ambiguous); refusing",
+                sums.display()
+            ));
+        }
+    };
     let got = crate::sha256::hex(&read(daemon)?);
-    if got != want {
+    // sha256sum manifests may use uppercase hex; compare case-insensitively.
+    if !got.eq_ignore_ascii_case(want) {
         return Err(format!(
             "{} hash {got} does not match SHA256SUMS entry {want} (corrupt or swapped artifact)",
             daemon.display()
@@ -619,6 +642,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verify_daemon_against_sums(&daemon), Ok(true));
+        // Uppercase hex digest still matches (case-insensitive).
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{}  rayhunter-daemon\n", good.to_uppercase()),
+        )
+        .unwrap();
+        assert_eq!(verify_daemon_against_sums(&daemon), Ok(true));
+        // Duplicate entries for the daemon -> ambiguous -> Err.
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{good}  rayhunter-daemon\n{good}  ./rayhunter-daemon\n"),
+        )
+        .unwrap();
+        assert!(verify_daemon_against_sums(&daemon).is_err());
+        // A SHA-512 line (128 hex, no valid 2-char separator at byte 64) is not a match.
+        std::fs::write(
+            d.join("SHA256SUMS"),
+            format!("{}  rayhunter-daemon\n", "a".repeat(128)),
+        )
+        .unwrap();
+        assert!(verify_daemon_against_sums(&daemon).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 
