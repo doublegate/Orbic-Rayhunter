@@ -12,11 +12,10 @@ pre-install guards.
 ### Added
 
 - `orx install` now guards the staged daemon before any device write (T-OR-036a): it verifies the
-  daemon against a `SHA256SUMS` beside it (refusing if it is missing unless `--allow-unverified`;
-  catching a corrupted, swapped, or missing artifact),
-  and refuses an **unstripped** daemon -- the ~16 MB devel build left where the ~6 MB firmware
-  release was meant -- unless `--allow-unstripped` is passed. A missing `SHA256SUMS` warns rather
-  than blocks.
+  daemon against a `SHA256SUMS` beside it -- refusing a corrupted or swapped artifact, and refusing
+  a **missing** `SHA256SUMS` unless `--allow-unverified` -- and refuses an **unstripped** daemon
+  (the ~16 MB devel build left where the ~6 MB firmware release was meant) unless
+  `--allow-unstripped`. The checks run on the exact bytes that will be pushed.
 
 ### Fixed
 
