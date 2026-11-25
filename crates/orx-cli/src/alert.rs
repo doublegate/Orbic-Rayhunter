@@ -6,7 +6,7 @@
 //!
 //! `status` (read-only) shows the current `ntfy_url` and enabled notification
 //! types. `test` asks the daemon to POST a test notification to that URL.
-//! `set` (T-OR-046) writes `ntfy_url` from the host via a read-modify-write of
+//! `set` (T-OR-107) writes `ntfy_url` from the host via a read-modify-write of
 //! `/api/config`.
 //!
 //! Safety of `set`: `POST /api/config` takes the FULL config and triggers a
@@ -19,10 +19,19 @@
 //! the write cannot clobber a password that config.toml never held. The one
 //! residual side effect is that the restart re-applies `wpa_sta.conf`; `set`
 //! warns when Wi-Fi client mode is active so the operator can verify the link.
+//!
+//! Backup gate: like `orx purge` (whose verified local pull copy is the undo),
+//! `set --apply` is gated on an operation-appropriate restore path, not the
+//! firmware-grade full-device backup that `install`/`uninstall` require -- a
+//! config write cannot brick the device and is reversible. Before it POSTs, `set`
+//! writes the exact prior `/api/config` body to a local snapshot and verifies it
+//! reads back byte-identical; if that fails it aborts WITHOUT touching the device,
+//! and re-POSTing the snapshot restores the previous config.
 
 use crate::json::Json;
 use crate::pull::{self, PullError};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const MAX_CONFIG: usize = 256 * 1024;
@@ -103,6 +112,9 @@ pub struct SetOutcome {
     /// True when the device is in Wi-Fi client mode (`wifi_enabled` + an SSID),
     /// so the caller can warn that the daemon restart re-applies `wpa_sta.conf`.
     pub wifi_client_active: bool,
+    /// Where the prior config was snapshotted before the write (the undo), on a
+    /// successful `--apply`; `None` on a dry run.
+    pub backup_path: Option<PathBuf>,
 }
 
 /// Validate a user-supplied ntfy/webhook URL before it reaches the device. A
@@ -128,16 +140,19 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
 }
 
 /// Write (or clear) the device's `ntfy_url`. With `apply == false` this performs
-/// only the read and returns a preview, writing nothing. See the module docs for
-/// why a faithful round-trip of `GET /api/config` is the safe way to do this.
+/// only the read and returns a preview, writing nothing. On `--apply` the prior
+/// config is snapshotted into `backup_dir` (the undo) before the device is
+/// touched. See the module docs for why a faithful round-trip of `GET
+/// /api/config` plus a local snapshot is the safe, proportionate gate here.
 pub fn set(
     ip: &str,
     target: NtfyTarget,
     apply: bool,
+    backup_dir: &Path,
     timeout: Duration,
 ) -> Result<SetOutcome, String> {
     let addr = crate::probe::socket(ip, crate::probe::RAYHUNTER_PORT)?;
-    set_at(addr, target, apply, timeout)
+    set_at(addr, target, apply, backup_dir, timeout)
 }
 
 /// As [`set`] but against an explicit address (tests use a loopback server).
@@ -145,6 +160,7 @@ pub fn set_at(
     addr: SocketAddr,
     target: NtfyTarget,
     apply: bool,
+    backup_dir: &Path,
     timeout: Duration,
 ) -> Result<SetOutcome, String> {
     if let NtfyTarget::Url(u) = &target {
@@ -200,8 +216,17 @@ pub fn set_at(
             applied,
             written: false,
             wifi_client_active,
+            backup_path: None,
         });
     }
+
+    // Device-write backup gate: snapshot the EXACT prior config and verify it
+    // reads back byte-identical BEFORE we POST. A config write is reversible, so
+    // this local snapshot (re-POST it to restore) is the operation-appropriate
+    // restore path, mirroring `orx purge`'s verified pull copy -- not the
+    // firmware-grade device backup `install`/`uninstall` require. Fail closed:
+    // if the snapshot cannot be written and verified, the device is untouched.
+    let backup_path = write_config_snapshot(backup_dir, addr, body.as_bytes())?;
 
     let out = v.to_json();
     match pull::http_post_json(addr, "/api/config", &out, timeout) {
@@ -210,6 +235,7 @@ pub fn set_at(
             applied,
             written: true,
             wifi_client_active,
+            backup_path: Some(backup_path),
         }),
         Err(PullError::Http(422)) => Err(
             "the device rejected the config body (HTTP 422): the JSON did not deserialize into \
@@ -218,6 +244,34 @@ pub fn set_at(
         ),
         Err(e) => Err(format!("write config: {e}")),
     }
+}
+
+/// Snapshot the prior config `body` into `dir` and verify it reads back
+/// byte-identical, returning the snapshot path. This is the undo for a `set
+/// --apply`; the write is gated on it succeeding.
+fn write_config_snapshot(dir: &Path, addr: SocketAddr, body: &[u8]) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("create backup dir {}: {e}", dir.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let label: String = addr
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let path = dir.join(format!("orx-config-before-{label}-{stamp}.json"));
+    pull::write_atomic(&path, body)?;
+    let back =
+        std::fs::read(&path).map_err(|e| format!("re-read backup {}: {e}", path.display()))?;
+    if back != body {
+        return Err(format!(
+            "backup verification failed for {} (contents differ)",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -378,6 +432,16 @@ mod tests {
         (addr, posts)
     }
 
+    /// A fresh, unique temp directory for a test's config snapshot.
+    fn tmpdir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("orx-alert-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
     #[test]
     fn validate_ntfy_url_accepts_http_and_https() {
         assert!(validate_ntfy_url("https://ntfy.sh/my-topic").is_ok());
@@ -396,10 +460,12 @@ mod tests {
     #[test]
     fn set_dry_run_previews_without_posting() {
         let (addr, posts) = serve_set(SAMPLE_CONFIG, 202);
+        let td = tmpdir();
         let o = set_at(
             addr,
             NtfyTarget::Url("https://ntfy.sh/foo".to_string()),
             false,
+            &td,
             Duration::from_secs(2),
         )
         .unwrap();
@@ -407,20 +473,28 @@ mod tests {
         assert_eq!(o.previous, None);
         assert_eq!(o.applied.as_deref(), Some("https://ntfy.sh/foo"));
         assert!(!o.wifi_client_active);
+        assert!(o.backup_path.is_none(), "dry run must not write a backup");
         assert!(posts.lock().unwrap().is_empty(), "dry run must not POST");
+        // A dry run writes nothing into the backup dir.
+        assert_eq!(std::fs::read_dir(&td).unwrap().count(), 0);
     }
 
     #[test]
     fn set_apply_posts_config_preserving_other_keys() {
         let (addr, posts) = serve_set(SAMPLE_CONFIG, 202);
+        let td = tmpdir();
         let o = set_at(
             addr,
             NtfyTarget::Url("https://ntfy.sh/foo".to_string()),
             true,
+            &td,
             Duration::from_secs(2),
         )
         .unwrap();
         assert!(o.written);
+        // The backup snapshot exists and holds the EXACT prior config.
+        let bp = o.backup_path.as_ref().expect("apply writes a backup");
+        assert_eq!(std::fs::read(bp).unwrap(), SAMPLE_CONFIG.as_bytes());
         let posts = posts.lock().unwrap();
         assert_eq!(posts.len(), 1);
         let (path, body) = &posts[0];
@@ -462,9 +536,17 @@ mod tests {
     fn set_clear_writes_null_url() {
         let cfg = r#"{"qmdl_store_path":"/d","port":8080,"ntfy_url":"https://ntfy.sh/old","enabled_notifications":[]}"#;
         let (addr, posts) = serve_set(cfg, 202);
-        let o = set_at(addr, NtfyTarget::Clear, true, Duration::from_secs(2)).unwrap();
+        let o = set_at(
+            addr,
+            NtfyTarget::Clear,
+            true,
+            &tmpdir(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
         assert_eq!(o.previous.as_deref(), Some("https://ntfy.sh/old"));
         assert_eq!(o.applied, None);
+        assert!(o.backup_path.is_some(), "apply writes a backup");
         let posts = posts.lock().unwrap();
         let parsed = crate::json::parse(&posts[0].1).unwrap();
         assert!(parsed.get("ntfy_url").map(Json::is_null) == Some(true));
@@ -478,6 +560,7 @@ mod tests {
             addr,
             NtfyTarget::Url("https://ntfy.sh/foo".to_string()),
             false,
+            &tmpdir(),
             Duration::from_secs(2),
         )
         .unwrap();
@@ -491,6 +574,7 @@ mod tests {
             addr,
             NtfyTarget::Url("https://ntfy.sh/foo".to_string()),
             true,
+            &tmpdir(),
             Duration::from_secs(2),
         )
         .unwrap_err();
@@ -505,9 +589,33 @@ mod tests {
             addr,
             NtfyTarget::Url("https://ntfy.sh/foo".to_string()),
             true,
+            &tmpdir(),
             Duration::from_secs(2),
         )
         .unwrap_err();
         assert!(err.contains("422"), "got: {err}");
+    }
+
+    #[test]
+    fn set_apply_aborts_before_post_when_backup_fails() {
+        let (addr, posts) = serve_set(SAMPLE_CONFIG, 202);
+        // Point the backup "dir" at a path whose parent is a regular file, so
+        // create_dir_all cannot succeed -- the write must fail closed, untouched.
+        let f = tmpdir().join("not-a-dir");
+        std::fs::write(&f, b"x").unwrap();
+        let bad = f.join("sub");
+        let err = set_at(
+            addr,
+            NtfyTarget::Url("https://ntfy.sh/foo".to_string()),
+            true,
+            &bad,
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert!(err.contains("backup"), "got: {err}");
+        assert!(
+            posts.lock().unwrap().is_empty(),
+            "must not POST when the backup gate fails"
+        );
     }
 }

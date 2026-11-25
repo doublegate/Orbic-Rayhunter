@@ -12,9 +12,17 @@
   daemon's `ntfy_url` from the host, so alerting can be turned on without the Rayhunter web UI.
   It is a dry-run preview unless `--apply` (the write restarts the daemon, briefly interrupting the
   active recording). The URL is validated as an http(s) URL with a host before anything is sent.
+- `--backup-dir <dir>` for `orx alert set` (default the current directory).
 - `Json::as_bool` on the std-only JSON helper.
 
 ### How it stays safe
+
+- Device-write backup gate (per AGENTS.md priority 1): before `--apply` POSTs, `set` snapshots the
+  exact prior `/api/config` body to `--backup-dir` as `orx-config-before-<addr>-<epoch>.json` and
+  verifies it reads back byte-identical, aborting without touching the device if that fails. Like
+  `orx purge`'s verified pull copy, this local snapshot is the operation-appropriate restore path
+  (re-POST it to revert) -- a config write is reversible and cannot brick the device, so it does not
+  need the firmware-grade full-device backup that `install`/`uninstall` require.
 
 - `POST /api/config` takes the FULL config and `GET /api/config` redacts `wifi_password` to `null`,
   so `set` does not reconstruct a config: it round-trips the exact object the GET returned and

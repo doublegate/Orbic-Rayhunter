@@ -93,10 +93,10 @@ or set it in the Rayhunter web UI on a running device.
 From the host:
 
 ```sh
-orx alert status [--ip <addr>]                 # show the configured ntfy_url + enabled types (v1.1.0)
-orx alert test   [--ip <addr>]                 # ask the daemon to send a test notification (v1.1.0)
-orx alert set --ntfy-url <url> [--apply]       # write the ntfy_url (v1.1.1, T-OR-107)
-orx alert set --clear [--apply]                # remove the ntfy_url (disable delivery)
+orx alert status [--ip <addr>]                      # show the configured ntfy_url + enabled types (v1.1.0)
+orx alert test   [--ip <addr>]                      # ask the daemon to send a test notification (v1.1.0)
+orx alert set --ntfy-url <url> [--apply] [--backup-dir <dir>]  # write the ntfy_url (v1.1.1, T-OR-107)
+orx alert set --clear [--apply] [--backup-dir <dir>]          # remove the ntfy_url (disable delivery)
 ```
 
 `orx alert test` is outward-facing (the device POSTs to your `ntfy_url`); it reports clearly when no
@@ -111,6 +111,13 @@ the notification URL. The daemon strips the Wi-Fi fields before writing `config.
 `wpa_sta.conf`), so the write cannot clobber the Wi-Fi password; `set` still warns when Wi-Fi client
 mode is active, since the restart re-applies `wpa_sta.conf`. The URL is validated as an http(s) URL
 with a host before anything is sent.
+
+Backup gate: like `orx purge` (whose verified local pull copy is the undo), `set --apply` is gated
+on an operation-appropriate restore path rather than the firmware-grade full-device backup that
+`install`/`uninstall` require -- a config write cannot brick the device and is reversible. Before it
+POSTs, `set` writes the exact prior `/api/config` body to `--backup-dir` (default the current
+directory) as `orx-config-before-<addr>-<epoch>.json` and verifies it reads back byte-identical; if
+that write fails it aborts without touching the device. Re-POSTing that snapshot restores the config.
 
 The daemon's additional sink types (webhook auth/headers, MQTT, Gotify) and a persistent retry queue
 are `[UPSTREAM]` work scheduled for v1.2.0 (T-OR-045..050).

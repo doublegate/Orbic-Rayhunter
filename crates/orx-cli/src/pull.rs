@@ -627,7 +627,7 @@ pub fn pull_logs_at(
 
 /// Write `data` to `path` atomically (temp in the same dir, then rename), so a
 /// crash or ENOSPC never leaves a truncated manifest/state file.
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     let tmp = Path::new(&format!("{}.tmp", path.display())).to_path_buf();
     std::fs::write(&tmp, data).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", tmp.display()))

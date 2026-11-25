@@ -23,8 +23,9 @@ USAGE:
                                          Delete completed recordings (dry-run unless --apply; keeps active)
     orx rescue [--ip <addr>]             Read-only diagnostic over :24 when :8080 is down (df + recordings)
     orx alert status|test [--ip <addr>]  Show the daemon's ntfy alerting config / send a test notification
-    orx alert set --ntfy-url <url>|--clear [--apply] [--ip <addr>]
-                                         Write/clear the daemon's ntfy_url (dry-run unless --apply; restarts the daemon)
+    orx alert set --ntfy-url <url>|--clear [--apply] [--backup-dir <dir>] [--ip <addr>]
+                                         Write/clear the daemon's ntfy_url (dry-run unless --apply; restarts the
+                                         daemon; snapshots the prior config to --backup-dir, default '.', first)
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
                 [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
@@ -326,10 +327,16 @@ fn cmd_alert(ip: &str, sub: &str) -> ExitCode {
 }
 
 /// `orx alert set`: write (or clear) the daemon's `ntfy_url`. Dry-run (preview
-/// only) unless `--apply`, since the write restarts the daemon.
-fn cmd_alert_set(ip: &str, target: alert::NtfyTarget, apply: bool) -> ExitCode {
+/// only) unless `--apply`, since the write restarts the daemon. On `--apply` the
+/// prior config is snapshotted into `backup_dir` (the undo) before the write.
+fn cmd_alert_set(
+    ip: &str,
+    target: alert::NtfyTarget,
+    apply: bool,
+    backup_dir: &std::path::Path,
+) -> ExitCode {
     let timeout = Duration::from_secs(10);
-    match alert::set(ip, target, apply, timeout) {
+    match alert::set(ip, target, apply, backup_dir, timeout) {
         Ok(o) => {
             let was = match &o.previous {
                 Some(u) => san_device(u),
@@ -348,6 +355,9 @@ fn cmd_alert_set(ip: &str, target: alert::NtfyTarget, apply: bool) -> ExitCode {
             }
             if o.written {
                 println!("ntfy_url: {was} -> {now}");
+                if let Some(bp) = &o.backup_path {
+                    println!("prior config saved to {} (the undo)", bp.display());
+                }
                 println!(
                     "applied (the daemon is restarting). Run `orx alert status` in a few seconds \
                      to confirm, then `orx alert test` to send a test notification."
@@ -356,7 +366,9 @@ fn cmd_alert_set(ip: &str, target: alert::NtfyTarget, apply: bool) -> ExitCode {
                 println!("would set ntfy_url: {was} -> {now}");
                 println!(
                     "this POSTs /api/config and RESTARTS the daemon (briefly interrupting the \
-                     active recording). Re-run with --apply to perform the change."
+                     active recording); the prior config is saved to {} first. Re-run with \
+                     --apply to perform the change.",
+                    backup_dir.display()
                 );
             }
             ExitCode::SUCCESS
@@ -906,6 +918,7 @@ fn main() -> ExitCode {
             let mut ntfy_url: Option<String> = None;
             let mut clear = false;
             let mut apply = false;
+            let mut backup_dir: Option<String> = None;
             let mut rest = args[1..].iter();
             while let Some(arg) = rest.next() {
                 match arg.as_str() {
@@ -917,6 +930,10 @@ fn main() -> ExitCode {
                         Some(v) if !v.is_empty() => ntfy_url = Some(v.clone()),
                         _ => return usage_err("--ntfy-url needs a value"),
                     },
+                    "--backup-dir" => match rest.next() {
+                        Some(v) if !v.is_empty() => backup_dir = Some(v.clone()),
+                        _ => return usage_err("--backup-dir needs a value"),
+                    },
                     "--clear" => clear = true,
                     "--apply" => apply = true,
                     s @ ("status" | "test" | "set") if sub.is_none() => sub = Some(s.to_string()),
@@ -925,9 +942,9 @@ fn main() -> ExitCode {
             }
             match sub.as_deref() {
                 Some("status") | Some("test") => {
-                    if ntfy_url.is_some() || clear || apply {
+                    if ntfy_url.is_some() || clear || apply || backup_dir.is_some() {
                         return usage_err(
-                            "--ntfy-url/--clear/--apply are only valid for `alert set`",
+                            "--ntfy-url/--clear/--apply/--backup-dir are only valid for `alert set`",
                         );
                     }
                     cmd_alert(&ip, sub.as_deref().unwrap())
@@ -943,7 +960,8 @@ fn main() -> ExitCode {
                             return usage_err("alert set needs --ntfy-url <url> or --clear");
                         }
                     };
-                    cmd_alert_set(&ip, target, apply)
+                    let dir = backup_dir.as_deref().unwrap_or(".");
+                    cmd_alert_set(&ip, target, apply, std::path::Path::new(dir))
                 }
                 Some(_) => unreachable!("sub is constrained to status|test|set"),
                 None => usage_err("alert needs a subcommand: status, test, or set"),
