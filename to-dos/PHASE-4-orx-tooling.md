@@ -152,8 +152,9 @@ cargo run -p orx-cli -- doctor
       authorize deleting a larger completed recording), or `--force` to delete without a local copy;
       bare `--apply` is refused. Fails closed on a missing `entries` array, a missing/invalid
       `qmdl_size_bytes`, or a malformed `current_entry`; a 403 (daemon debug mode) is reported clearly.
-      Dry run and the verified-pull gate (empty dir -> 0 deleted, all skipped) validated live on the
-      unit; the delete path is unit-tested against a loopback server (real captures not deleted).
+      An invalid `--pulled` dir (missing, or missing its `.orx-pull-state`/`PULL-MANIFEST.txt`) is a
+      hard error; a valid pull dir that lacks a given recording skips it. Dry run and the gate
+      validated live on the unit; the delete path is unit-tested against a loopback server (real captures not deleted).
       Age/size/count policies and a "keep flagged" flag are a follow-up (T-OR-040b).
 - [ ] T-OR-041: `orx rescue`: when :8080 is down, use the network shell to report `df -h /data`,
       stop the daemon, and move or delete the oldest recordings after confirmation

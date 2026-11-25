@@ -68,7 +68,13 @@ fn plan(addr: SocketAddr, timeout: Duration) -> Result<PurgePlan, String> {
     // malformed one rather than silently treating it as "no active recording",
     // which could let the active recording be deleted.
     let active = match v.get("current_entry") {
-        Some(c) if !c.is_null() => {
+        // Absent field: the manifest schema is not what we expect -- fail closed
+        // rather than assume there is no active recording.
+        None => {
+            return Err("manifest has no `current_entry` field (unexpected response)".to_string());
+        }
+        Some(c) if c.is_null() => None,
+        Some(c) => {
             let name = c
                 .get("name")
                 .and_then(Json::as_str)
@@ -78,7 +84,6 @@ fn plan(addr: SocketAddr, timeout: Duration) -> Result<PurgePlan, String> {
             }
             Some(name.to_string())
         }
-        _ => None,
     };
     // Belt and braces: never offer the active recording for deletion even if the
     // daemon ever lists it in `entries` too.
@@ -107,6 +112,13 @@ pub fn apply_at(
     timeout: Duration,
 ) -> Result<PurgeOutcome, String> {
     let plan = plan(addr, timeout)?;
+    // Load and validate the pull directory ONCE up front: a missing directory or
+    // unreadable/absent `.orx-pull-state` / `PULL-MANIFEST.txt` is a hard error
+    // (non-zero exit), never a silent per-recording skip that still exits 0.
+    let pulled = match gate {
+        PurgeGate::VerifiedPull(dir) => Some(PulledDir::load(dir)?),
+        PurgeGate::Force => None,
+    };
     let mut out = PurgeOutcome {
         deleted: 0,
         failed: 0,
@@ -116,22 +128,15 @@ pub fn apply_at(
         // Safety gate: under VerifiedPull, only delete a recording we hold a
         // hash-verified local copy of that corresponds to THIS completed
         // recording; skip (never delete) anything unverified.
-        if let PurgeGate::VerifiedPull(dir) = gate {
-            match verify_pulled(dir, name, *size) {
-                Ok(true) => {}
-                Ok(false) => {
-                    eprintln!(
-                        "skip {name}: no verified current pull in {} (pull it first)",
-                        dir.display()
-                    );
-                    out.skipped += 1;
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("skip {name}: pull verification failed: {e}");
-                    out.skipped += 1;
-                    continue;
-                }
+        if let Some(pulled) = &pulled {
+            let verified = pulled.verifies(name, *size)?;
+            if !verified {
+                eprintln!(
+                    "skip {name}: no verified current pull in {} (pull it first)",
+                    pulled.dir.display()
+                );
+                out.skipped += 1;
+                continue;
             }
         }
         // `safe_name` was already enforced in `plan`, so the path is clean.
@@ -157,53 +162,83 @@ pub fn apply_at(
     Ok(out)
 }
 
-/// Whether `<dir>` holds a verified copy of the CURRENT completed recording
-/// `name` (current manifest size `current_size`). Two conditions, both required:
-///
-///  1. `<dir>/.orx-pull-state` records `name` at a size equal to `current_size`.
-///     `orx pull-logs` records that state only for recordings it pulled while
-///     they were already COMPLETED (not the live one), so this proves the copy
-///     is of a finished recording and that the recording has not changed since
-///     (its compressed on-device size is unchanged). A copy pulled while the
-///     recording was still active -- which could be shorter than the finished
-///     recording -- has no such state entry and is rejected.
-///  2. `<dir>/<name>.qmdl` exists and its SHA-256 matches `PULL-MANIFEST.txt`
-///     (local integrity since the pull).
-///
-/// (We cannot compare the local byte length to `qmdl_size_bytes`: the manifest
-/// size is the COMPRESSED on-device size while the pulled file is decompressed.)
-fn verify_pulled(dir: &std::path::Path, name: &str, current_size: u64) -> Result<bool, String> {
-    let qmdl = dir.join(format!("{name}.qmdl"));
-    if !qmdl.is_file() {
-        return Ok(false);
-    }
-    // (1) pulled as a completed recording, unchanged since.
-    let state = dir.join(".orx-pull-state");
-    let state_text =
-        std::fs::read_to_string(&state).map_err(|e| format!("read {}: {e}", state.display()))?;
-    let pulled_size = state_text.lines().find_map(|l| {
-        let (n, s) = l.split_once('\t')?;
-        (n == name).then(|| s.trim().parse::<u64>().ok()).flatten()
-    });
-    if pulled_size != Some(current_size) {
-        return Ok(false);
-    }
-    // (2) local integrity since the pull.
-    let actual = pull::file_sha256(&qmdl)?;
-    let manifest = dir.join("PULL-MANIFEST.txt");
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| format!("read {}: {e}", manifest.display()))?;
-    let target = format!("{name}.qmdl");
-    for line in text.lines() {
-        // Lines are "<sha256>  <filename>"; comment lines start with '#'.
-        let Some((hash, file)) = line.split_once("  ") else {
-            continue;
-        };
-        if file.trim() == target {
-            return Ok(hash.trim().eq_ignore_ascii_case(&actual));
+/// A validated `orx pull-logs` directory: its `.orx-pull-state` (recording ->
+/// pull-time compressed size) and `PULL-MANIFEST.txt` (filename -> SHA-256),
+/// loaded once. Construction fails if the directory or either metadata file is
+/// missing or unreadable, so an invalid `--pulled <dir>` fails closed rather
+/// than silently skipping every recording.
+struct PulledDir {
+    dir: std::path::PathBuf,
+    state: std::collections::BTreeMap<String, u64>,
+    hashes: std::collections::BTreeMap<String, String>,
+}
+
+impl PulledDir {
+    fn load(dir: &std::path::Path) -> Result<Self, String> {
+        if !dir.is_dir() {
+            return Err(format!("pull dir {} is not a directory", dir.display()));
         }
+        let state_path = dir.join(".orx-pull-state");
+        let state_text = std::fs::read_to_string(&state_path).map_err(|e| {
+            format!(
+                "read {}: {e} -- run `orx pull-logs --to {}` first",
+                state_path.display(),
+                dir.display()
+            )
+        })?;
+        let mut state = std::collections::BTreeMap::new();
+        for l in state_text.lines() {
+            let Some((n, s)) = l.split_once('\t') else {
+                continue;
+            };
+            let Ok(sz) = s.trim().parse::<u64>() else {
+                continue;
+            };
+            state.insert(n.to_string(), sz);
+        }
+        let manifest_path = dir.join("PULL-MANIFEST.txt");
+        let manifest_text = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+        let mut hashes = std::collections::BTreeMap::new();
+        for l in manifest_text.lines() {
+            // Lines are "<sha256>  <filename>"; comment lines start with '#'.
+            if let Some((h, f)) = l.split_once("  ") {
+                hashes.insert(f.trim().to_string(), h.trim().to_string());
+            }
+        }
+        Ok(PulledDir {
+            dir: dir.to_path_buf(),
+            state,
+            hashes,
+        })
     }
-    Ok(false)
+
+    /// Whether this dir holds a verified copy of the CURRENT completed recording
+    /// `name` (current manifest size `current_size`). Both must hold:
+    ///
+    ///  1. `.orx-pull-state` records `name` at a size equal to `current_size`.
+    ///     `orx pull-logs` records that state only for recordings pulled while
+    ///     already COMPLETED, so this proves the copy is of a finished recording
+    ///     and unchanged since (same compressed on-device size). A copy pulled
+    ///     while the recording was still active has no such entry and is rejected.
+    ///  2. `<name>.qmdl` exists and its SHA-256 matches `PULL-MANIFEST.txt`.
+    ///
+    /// (We cannot compare the local byte length to `qmdl_size_bytes`: the
+    /// manifest size is COMPRESSED while the pulled file is decompressed.)
+    fn verifies(&self, name: &str, current_size: u64) -> Result<bool, String> {
+        let qmdl = self.dir.join(format!("{name}.qmdl"));
+        if !qmdl.is_file() {
+            return Ok(false);
+        }
+        if self.state.get(name) != Some(&current_size) {
+            return Ok(false);
+        }
+        let actual = pull::file_sha256(&qmdl)?;
+        Ok(self
+            .hashes
+            .get(&format!("{name}.qmdl"))
+            .is_some_and(|h| h.eq_ignore_ascii_case(&actual)))
+    }
 }
 
 #[cfg(test)]
@@ -394,9 +429,55 @@ mod tests {
     }
 
     #[test]
+    fn apply_errors_on_missing_pull_dir() {
+        let (addr, _d) =
+            serve(r#"{"entries":[{"name":"1795","qmdl_size_bytes":100}],"current_entry":null}"#);
+        let missing = std::env::temp_dir().join(format!("orx-purge-nope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(
+            apply_at(
+                addr,
+                &PurgeGate::VerifiedPull(missing),
+                Duration::from_secs(2)
+            )
+            .is_err(),
+            "a nonexistent --pulled dir must be a hard error, not a silent skip"
+        );
+    }
+
+    #[test]
+    fn apply_errors_on_missing_state_file() {
+        let (addr, _d) =
+            serve(r#"{"entries":[{"name":"1795","qmdl_size_bytes":100}],"current_entry":null}"#);
+        let dir = tmpdir("nostatefile");
+        std::fs::write(dir.join("1795.qmdl"), b"AAAAA").unwrap();
+        std::fs::write(dir.join("PULL-MANIFEST.txt"), "x  1795.qmdl\n").unwrap();
+        // No .orx-pull-state at all -> hard error.
+        assert!(
+            apply_at(
+                addr,
+                &PurgeGate::VerifiedPull(dir.clone()),
+                Duration::from_secs(2)
+            )
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn plan_fails_closed_without_entries() {
         let (addr, _) = serve("{}");
         assert!(plan(addr, Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn plan_fails_closed_on_absent_current_entry() {
+        // The field is omitted entirely (not null) -> unexpected schema -> fail.
+        let (addr, _) = serve(r#"{"entries":[]}"#);
+        assert!(
+            plan(addr, Duration::from_secs(2)).is_err(),
+            "an absent current_entry field must fail closed"
+        );
     }
 
     #[test]
