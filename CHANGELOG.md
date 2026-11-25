@@ -14,8 +14,9 @@
   and skips completed recordings already pulled unchanged (tracked in a `.orx-pull-state` file).
   Streams each download to disk (bounded) so a large capture never buffers in memory, and validates
   device-supplied recording names before using them in a path or URL. The manifest parse fails
-  closed (an `entries` array is required), downloads use HTTP/1.1, decode chunked (requiring the terminating zero-chunk) and verify Content-Length, file hashing is incremental, and only fully-pulled completed recordings are
-  recorded as skippable, PULL-MANIFEST.txt reflects every file held locally (so a purged recording's
+  closed (an `entries` array is required), downloads use HTTP/1.1, decode chunked (requiring the terminating zero-chunk) and verify Content-Length, file hashing is incremental, and downloads carry a typed error so only a
+  genuine 404 treats the analysis report as absent (any transport/5xx/truncation error fails closed),
+  only fully-pulled completed recordings are recorded as skippable, PULL-MANIFEST.txt reflects every file held locally (so a purged recording's
   entry is kept) and both it and .orx-pull-state are written atomically. Validated live on the unit (4 recordings pulled, then 3 skipped on re-run).
 - A minimal std-only JSON reader (`json`) for the daemon's API responses, keeping orx-cli
   dependency-free.

@@ -9,6 +9,42 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Typed outcome of an HTTP GET, so a caller can distinguish a genuine 404 (the
+/// resource is absent -- fine for a best-effort fetch) from a transport error,
+/// a non-404 status, a truncated transfer, or a local I/O error (all of which
+/// must fail closed rather than be treated as "absent").
+#[derive(Debug)]
+pub enum PullError {
+    /// HTTP 404: the resource does not exist.
+    NotFound,
+    /// Any other non-200 status.
+    Http(u16),
+    /// Transport, truncation, encoding, or local I/O failure.
+    Other(String),
+}
+
+impl std::fmt::Display for PullError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PullError::NotFound => write!(f, "HTTP 404 (not found)"),
+            PullError::Http(s) => write!(f, "HTTP {s}"),
+            PullError::Other(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl From<String> for PullError {
+    fn from(s: String) -> Self {
+        PullError::Other(s)
+    }
+}
+
+impl From<&str> for PullError {
+    fn from(s: &str) -> Self {
+        PullError::Other(s.to_string())
+    }
+}
+
 /// Recording names are device-supplied; only allow a safe, path- and URL-clean
 /// token so a crafted manifest cannot traverse directories or inject a request.
 pub fn safe_name(name: &str) -> bool {
@@ -31,7 +67,7 @@ pub fn http_get_string(
     timeout: Duration,
 ) -> Result<String, String> {
     let mut buf = Vec::new();
-    let n = http_get_to(addr, path, &mut buf, max as u64, timeout)?;
+    let n = http_get_to(addr, path, &mut buf, max as u64, timeout).map_err(|e| e.to_string())?;
     String::from_utf8(buf[..n as usize].to_vec()).map_err(|_| "response is not UTF-8".to_string())
 }
 
@@ -44,7 +80,7 @@ pub fn http_get_to(
     sink: &mut dyn Write,
     max: u64,
     timeout: Duration,
-) -> Result<u64, String> {
+) -> Result<u64, PullError> {
     let deadline = Instant::now() + timeout;
     let mut stream =
         TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
@@ -64,11 +100,11 @@ pub fn http_get_to(
     let body_start: Vec<u8> = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("read: deadline exceeded in headers".to_string());
+            return Err("read: deadline exceeded in headers".into());
         }
         stream.set_read_timeout(Some(remaining)).ok();
         match stream.read(&mut buf) {
-            Ok(0) => return Err("connection closed before headers completed".to_string()),
+            Ok(0) => return Err("connection closed before headers completed".into()),
             Ok(n) => {
                 head.extend_from_slice(&buf[..n]);
                 if let Some(pos) = find_sub(&head, b"\r\n\r\n") {
@@ -78,10 +114,10 @@ pub fn http_get_to(
                     break body;
                 }
                 if head.len() > 64 * 1024 {
-                    return Err("HTTP headers too large".to_string());
+                    return Err("HTTP headers too large".into());
                 }
             }
-            Err(e) => return Err(format!("read: {e}")),
+            Err(e) => return Err(format!("read: {e}").into()),
         }
     };
     let head_str = std::str::from_utf8(&head).map_err(|_| "non-UTF-8 HTTP headers".to_string())?;
@@ -92,9 +128,13 @@ pub fn http_get_to(
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| "malformed HTTP status line".to_string())?;
     // Require exactly 200: 204 (no content) and 206 (partial) would otherwise
-    // save an empty/partial file and record it as a complete download.
+    // save an empty/partial file and record it as a complete download. A genuine
+    // 404 is reported as NotFound so a best-effort caller can treat it as absent.
+    if status == 404 {
+        return Err(PullError::NotFound);
+    }
     if status != 200 {
-        return Err(format!("HTTP {status} (expected 200)"));
+        return Err(PullError::Http(status));
     }
     // Determine the body framing. Fail closed on an invalid/conflicting
     // Content-Length or a content-encoding we would write verbatim.
@@ -109,17 +149,17 @@ pub fn http_get_to(
         match key.as_str() {
             "transfer-encoding" if val.eq_ignore_ascii_case("chunked") => chunked = true,
             "transfer-encoding" if !val.is_empty() => {
-                return Err(format!("unsupported transfer-encoding: {val:?}"));
+                return Err(format!("unsupported transfer-encoding: {val:?}").into());
             }
             "content-encoding" if !val.is_empty() && !val.eq_ignore_ascii_case("identity") => {
-                return Err(format!("unsupported content-encoding: {val:?}"));
+                return Err(format!("unsupported content-encoding: {val:?}").into());
             }
             "content-length" => {
                 let len = val
                     .parse::<u64>()
                     .map_err(|_| format!("invalid Content-Length: {val:?}"))?;
                 if content_length.is_some_and(|prev| prev != len) {
-                    return Err("conflicting Content-Length headers".to_string());
+                    return Err("conflicting Content-Length headers".into());
                 }
                 content_length = Some(len);
             }
@@ -128,7 +168,8 @@ pub fn http_get_to(
     }
 
     if chunked {
-        return read_chunked_body(&mut stream, body_start, sink, max, deadline);
+        return read_chunked_body(&mut stream, body_start, sink, max, deadline)
+            .map_err(PullError::Other);
     }
     // Not chunked: a Content-Length lets us verify completion; without one, an
     // HTTP/1.1 close-delimited body cannot be told apart from a truncated one, so
@@ -136,7 +177,7 @@ pub fn http_get_to(
     let Some(expected) = content_length else {
         return Err("response has neither Content-Length nor chunked encoding; \
                     cannot verify a complete transfer"
-            .to_string());
+            .into());
     };
     let mut written = 0u64;
     let mut emit = |data: &[u8], written: &mut u64| -> Result<(), String> {
@@ -150,19 +191,17 @@ pub fn http_get_to(
     while written < expected {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("read: deadline exceeded in body".to_string());
+            return Err("read: deadline exceeded in body".into());
         }
         stream.set_read_timeout(Some(remaining)).ok();
         match stream.read(&mut buf) {
-            Ok(0) => return Err(format!("truncated: got {written} of {expected} bytes")),
+            Ok(0) => return Err(format!("truncated: got {written} of {expected} bytes").into()),
             Ok(n) => emit(&buf[..n], &mut written)?,
-            Err(e) => return Err(format!("read body: {e}")),
+            Err(e) => return Err(format!("read body: {e}").into()),
         }
     }
     if written != expected {
-        return Err(format!(
-            "overlong: got {written}, expected {expected} bytes"
-        ));
+        return Err(format!("overlong: got {written}, expected {expected} bytes").into());
     }
     Ok(written)
 }
@@ -322,7 +361,7 @@ fn download_to(
     dest: &Path,
     max: u64,
     timeout: Duration,
-) -> Result<u64, String> {
+) -> Result<u64, PullError> {
     let tmp = Path::new(&format!("{}.part", dest.display())).to_path_buf();
     let mut f =
         std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
@@ -415,8 +454,14 @@ pub fn pull_logs_at(
             // Re-fetch the analysis report only if it's missing (a prior transient
             // failure, or a live->completed transition left it absent/stale).
             if !nd.is_file() {
-                // Best-effort re-fetch of a missing report; a still-absent one is fine.
-                outcome.bytes += download_to(addr, &nd_path, &nd, MAX_QMDL, timeout).unwrap_or(0);
+                // Re-fetch a missing report. A genuine 404 means it does not exist
+                // yet (fine); any other failure (5xx, timeout, truncation, I/O)
+                // must fail closed rather than be silently swallowed.
+                match download_to(addr, &nd_path, &nd, MAX_QMDL, timeout) {
+                    Ok(nb) => outcome.bytes += nb,
+                    Err(PullError::NotFound) => {}
+                    Err(e) => return Err(format!("fetch {}.ndjson: {e}", r.name)),
+                }
             }
         } else {
             let nq = download_to(
@@ -429,13 +474,15 @@ pub fn pull_logs_at(
             .map_err(|e| format!("download {}.qmdl: {e}", r.name))?;
             outcome.pulled += 1;
             outcome.bytes += nq;
-            // Analysis report (NDJSON) is best-effort (may not exist yet); never
-            // leave a stale/partial one from a previous run if it now fails.
+            // Analysis report (NDJSON): a genuine 404 means it does not exist yet
+            // (drop any stale local copy, not an error); any other failure must
+            // fail closed so a transient error is never reported as success.
             match download_to(addr, &nd_path, &nd, MAX_QMDL, timeout) {
                 Ok(nb) => outcome.bytes += nb,
-                Err(_) => {
+                Err(PullError::NotFound) => {
                     let _ = std::fs::remove_file(&nd);
                 }
+                Err(e) => return Err(format!("fetch {}.ndjson: {e}", r.name)),
             }
         }
         // Record skippable state ONLY for a completed recording that is fully
@@ -570,7 +617,9 @@ mod tests {
         // Data chunk but the connection closes before the 0-chunk -> truncated.
         let addr = serve_raw("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n");
         let mut buf = Vec::new();
-        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap_err();
+        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2))
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("truncated") || err.contains("mid-chunk"),
             "got: {err}"
@@ -599,7 +648,9 @@ mod tests {
     fn http_get_to_requires_200() {
         let addr = serve_raw("HTTP/1.0 204 No Content\r\n\r\n");
         let mut buf = Vec::new();
-        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap_err();
+        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("204"), "got: {err}");
     }
 
@@ -608,7 +659,9 @@ mod tests {
         // Declares 100 bytes but sends 3, then closes -> must error, not accept.
         let addr = serve_raw("HTTP/1.0 200 OK\r\nContent-Length: 100\r\n\r\nabc");
         let mut buf = Vec::new();
-        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2)).unwrap_err();
+        let err = http_get_to(addr, "/x", &mut buf, 1 << 20, Duration::from_secs(2))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("truncated"), "got: {err}");
     }
 
@@ -672,7 +725,19 @@ mod tests {
     fn http_get_to_errors_on_404() {
         let addr = serve(1, vec![("/present", "x")]);
         let mut e = Vec::new();
-        assert!(http_get_to(addr, "/missing", &mut e, 1 << 20, Duration::from_secs(2)).is_err());
+        // A genuine 404 maps to the typed NotFound (so a best-effort NDJSON fetch
+        // can treat it as absent); any other status must NOT be NotFound.
+        let err =
+            http_get_to(addr, "/missing", &mut e, 1 << 20, Duration::from_secs(2)).unwrap_err();
+        assert!(matches!(err, PullError::NotFound), "got: {err}");
+    }
+
+    #[test]
+    fn http_get_to_maps_500_to_http_not_notfound() {
+        let addr = serve_raw("HTTP/1.0 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        let mut e = Vec::new();
+        let err = http_get_to(addr, "/x", &mut e, 1 << 20, Duration::from_secs(2)).unwrap_err();
+        assert!(matches!(err, PullError::Http(500)), "got: {err}");
     }
 
     #[test]
