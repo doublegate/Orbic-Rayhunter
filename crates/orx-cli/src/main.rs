@@ -287,10 +287,16 @@ fn cmd_install(
             return ExitCode::from(2);
         }
     };
-    // Guard against pushing the wrong local artifact. SHA256SUMS (beside the
-    // daemon) catches a corrupted/swapped file; the unstripped check catches the
-    // ~16 MB devel build staged where the ~6 MB firmware release was meant.
-    match install::verify_daemon_against_sums(daemon) {
+    // Guard against pushing the wrong local artifact, checking the EXACT bytes
+    // the plan will push (read once by install_plan -- no re-read, no TOCTOU).
+    // SHA256SUMS beside the daemon catches a corrupted/swapped file; the
+    // unstripped check catches the ~16 MB devel build staged where the ~6 MB
+    // firmware release was meant. Both are install refusals (exit 1).
+    let Some(daemon_bytes) = install::plan_daemon_bytes(&steps) else {
+        eprintln!("error: internal: install plan has no daemon payload");
+        return ExitCode::from(2);
+    };
+    match install::verify_daemon_against_sums(daemon, daemon_bytes) {
         Ok(true) => println!("daemon verified against SHA256SUMS."),
         Ok(false) => eprintln!(
             "warning: no SHA256SUMS beside {} -- cannot verify the daemon's integrity",
@@ -301,7 +307,7 @@ fn cmd_install(
             return ExitCode::from(1);
         }
     }
-    match install::daemon_is_unstripped(daemon) {
+    match install::daemon_is_unstripped(daemon_bytes) {
         Ok(true) if !allow_unstripped => {
             eprintln!(
                 "error: {} is unstripped -- this looks like the devel build, not the firmware\n       \
@@ -317,7 +323,7 @@ fn cmd_install(
         Ok(false) => {}
         Err(e) => {
             eprintln!("error: {e}");
-            return ExitCode::from(2);
+            return ExitCode::from(1);
         }
     }
     // Refuse to install unless the backup can roll the install BACK: gate first,
