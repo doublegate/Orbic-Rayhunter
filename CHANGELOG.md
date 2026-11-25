@@ -18,8 +18,9 @@
 ### How it stays safe
 
 - Device-write backup gate (per AGENTS.md priority 1): before `--apply` POSTs, `set` snapshots the
-  exact prior `/api/config` body to `--backup-dir` as `orx-config-before-<addr>-<epoch>.json` and
-  verifies it reads back byte-identical, aborting without touching the device if that fails. Like
+  exact prior `/api/config` body to `--backup-dir` as `orx-config-before-<addr>-<epoch>.json`,
+  verifies it reads back byte-identical and records its SHA-256, aborting without touching the device
+  if that fails. Like
   `orx purge`'s verified pull copy, this local snapshot is the operation-appropriate restore path
   (re-POST it to revert) -- a config write is reversible and cannot brick the device, so it does not
   need the firmware-grade full-device backup that `install`/`uninstall` require.

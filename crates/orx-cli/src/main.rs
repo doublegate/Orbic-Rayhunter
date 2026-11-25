@@ -356,7 +356,15 @@ fn cmd_alert_set(
             if o.written {
                 println!("ntfy_url: {was} -> {now}");
                 if let Some(bp) = &o.backup_path {
-                    println!("prior config saved to {} (the undo)", bp.display());
+                    match &o.backup_sha256 {
+                        Some(sha) => {
+                            println!(
+                                "prior config saved to {} (sha256 {sha}; the undo)",
+                                bp.display()
+                            )
+                        }
+                        None => println!("prior config saved to {} (the undo)", bp.display()),
+                    }
                 }
                 println!(
                     "applied (the daemon is restarting). Run `orx alert status` in a few seconds \

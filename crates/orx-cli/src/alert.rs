@@ -115,6 +115,9 @@ pub struct SetOutcome {
     /// Where the prior config was snapshotted before the write (the undo), on a
     /// successful `--apply`; `None` on a dry run.
     pub backup_path: Option<PathBuf>,
+    /// SHA-256 of the snapshot at [`Self::backup_path`] (so the operator can
+    /// later confirm the restore file's integrity); `None` on a dry run.
+    pub backup_sha256: Option<String>,
 }
 
 /// Validate a user-supplied ntfy/webhook URL before it reaches the device. A
@@ -217,6 +220,7 @@ pub fn set_at(
             written: false,
             wifi_client_active,
             backup_path: None,
+            backup_sha256: None,
         });
     }
 
@@ -226,7 +230,7 @@ pub fn set_at(
     // restore path, mirroring `orx purge`'s verified pull copy -- not the
     // firmware-grade device backup `install`/`uninstall` require. Fail closed:
     // if the snapshot cannot be written and verified, the device is untouched.
-    let backup_path = write_config_snapshot(backup_dir, addr, body.as_bytes())?;
+    let (backup_path, backup_sha256) = write_config_snapshot(backup_dir, addr, body.as_bytes())?;
 
     let out = v.to_json();
     match pull::http_post_json(addr, "/api/config", &out, timeout) {
@@ -236,6 +240,7 @@ pub fn set_at(
             written: true,
             wifi_client_active,
             backup_path: Some(backup_path),
+            backup_sha256: Some(backup_sha256),
         }),
         Err(PullError::Http(422)) => Err(
             "the device rejected the config body (HTTP 422): the JSON did not deserialize into \
@@ -246,10 +251,14 @@ pub fn set_at(
     }
 }
 
-/// Snapshot the prior config `body` into `dir` and verify it reads back
-/// byte-identical, returning the snapshot path. This is the undo for a `set
-/// --apply`; the write is gated on it succeeding.
-fn write_config_snapshot(dir: &Path, addr: SocketAddr, body: &[u8]) -> Result<PathBuf, String> {
+/// Snapshot the prior config `body` into `dir`, verify it reads back
+/// byte-identical, and return the snapshot path plus its SHA-256. This is the
+/// verified, checksummed undo for a `set --apply`; the write is gated on it.
+fn write_config_snapshot(
+    dir: &Path,
+    addr: SocketAddr,
+    body: &[u8],
+) -> Result<(PathBuf, String), String> {
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("create backup dir {}: {e}", dir.display()))?;
     let stamp = std::time::SystemTime::now()
@@ -271,7 +280,8 @@ fn write_config_snapshot(dir: &Path, addr: SocketAddr, body: &[u8]) -> Result<Pa
             path.display()
         ));
     }
-    Ok(path)
+    let sha = pull::file_sha256(&path)?;
+    Ok((path, sha))
 }
 
 #[cfg(test)]
@@ -495,6 +505,10 @@ mod tests {
         // The backup snapshot exists and holds the EXACT prior config.
         let bp = o.backup_path.as_ref().expect("apply writes a backup");
         assert_eq!(std::fs::read(bp).unwrap(), SAMPLE_CONFIG.as_bytes());
+        // Its SHA-256 is reported and matches the snapshot on disk (64 hex).
+        let sha = o.backup_sha256.as_ref().expect("apply reports a sha256");
+        assert_eq!(sha.len(), 64);
+        assert_eq!(sha, &crate::pull::file_sha256(bp).unwrap());
         let posts = posts.lock().unwrap();
         assert_eq!(posts.len(), 1);
         let (path, body) = &posts[0];

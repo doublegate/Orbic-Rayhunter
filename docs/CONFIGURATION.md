@@ -116,8 +116,9 @@ Backup gate: like `orx purge` (whose verified local pull copy is the undo), `set
 on an operation-appropriate restore path rather than the firmware-grade full-device backup that
 `install`/`uninstall` require -- a config write cannot brick the device and is reversible. Before it
 POSTs, `set` writes the exact prior `/api/config` body to `--backup-dir` (default the current
-directory) as `orx-config-before-<addr>-<epoch>.json` and verifies it reads back byte-identical; if
-that write fails it aborts without touching the device. Re-POSTing that snapshot restores the config.
+directory) as `orx-config-before-<addr>-<epoch>.json`, verifies it reads back byte-identical and
+reports its SHA-256; if that fails it aborts without touching the device. Re-POSTing that snapshot
+restores the config.
 
 The daemon's additional sink types (webhook auth/headers, MQTT, Gotify) and a persistent retry queue
 are `[UPSTREAM]` work scheduled for v1.2.0 (T-OR-045..050).
