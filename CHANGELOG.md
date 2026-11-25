@@ -4,6 +4,18 @@
 
 - (nothing yet)
 
+## [1.0.5] - 2026-11-25
+
+### Added
+
+- `orx purge [--apply] [--ip <addr>]` (T-OR-040): deletes COMPLETED recordings from the device via
+  `POST /api/delete-recording/{name}`, and NEVER the active recording. Dry-run by default -- it lists
+  the recordings that would be deleted, notes the active one is kept, and recommends running
+  `orx pull-logs` first since captures hold real identifiers; `--apply` performs the deletions. Fails
+  closed if the manifest has no `entries` array, and reports a `403` (daemon debug mode) clearly.
+  Adds a std-only `http_post` helper. The dry run was validated live; the delete path is unit-tested
+  against a loopback server (the device's real captures were not deleted).
+
 ## [1.0.4] - 2026-11-25
 
 ### Added

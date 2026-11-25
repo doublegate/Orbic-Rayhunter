@@ -308,3 +308,18 @@ lengths.
 
 Device captures contain real identifiers; treat a pull directory as sensitive and keep it off the
 repo (see [SECURITY-MODEL.md](SECURITY-MODEL.md)).
+
+## 8. Purge recordings from the device
+
+```sh
+orx purge [--apply] [--ip <addr>]   # T-OR-040 (v1.0.5)
+```
+
+`orx purge` deletes COMPLETED recordings from the device (`POST /api/delete-recording/{name}`) and
+never the active recording. It is dry-run by default: it lists the recordings that would be deleted
+and reminds you to pull them first. Add `--apply` to perform the deletions.
+
+Captures hold real identifiers (IMSI/IMEI/ICCID), so pull anything you want to keep with
+`orx pull-logs --to <dir>` before purging. If the daemon is in debug mode it refuses deletes with a
+`403`; `orx purge` reports that explicitly. Disk-pressure retention policies (by age, size or count)
+are a planned follow-up (T-OR-040b).

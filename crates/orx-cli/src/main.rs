@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, check, install, probe, pull, transport, usb, verify};
+use orx_cli::{backup, check, install, probe, pull, purge, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -19,6 +19,7 @@ USAGE:
     orx pull-logs --to <dir> [--ip <addr>]
                                          Download recordings (QMDL + analysis ndjson) from :8080
     orx check [--ip <addr>]              Read-only device health report (daemon, stats, ports)
+    orx purge [--apply] [--ip <addr>]    Delete completed recordings (dry-run unless --apply; keeps active)
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
                 [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
@@ -262,6 +263,55 @@ fn cmd_verify(dir: &Path) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `orx purge`: delete completed recordings from the device (dry-run unless apply).
+fn cmd_purge(ip: &str, apply: bool) -> ExitCode {
+    let timeout = Duration::from_secs(30);
+    if !apply {
+        match purge::dry_run(ip, timeout) {
+            Ok(plan) => {
+                if plan.completed.is_empty() {
+                    println!("purge (dry run): no completed recordings to delete");
+                } else {
+                    println!(
+                        "purge (dry run): {} completed recording(s) would be deleted:",
+                        plan.completed.len()
+                    );
+                    for name in &plan.completed {
+                        println!("  {name}");
+                    }
+                }
+                if let Some(active) = &plan.active {
+                    println!("  (active recording {active} is kept)");
+                }
+                println!(
+                    "These captures hold real identifiers. Run `orx pull-logs --to <dir>` first if \
+                     you want to keep them, then re-run with --apply to delete."
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        }
+    } else {
+        match purge::apply(ip, timeout) {
+            Ok(o) => {
+                println!("purge: {} deleted, {} failed", o.deleted, o.failed);
+                if o.failed > 0 {
+                    ExitCode::from(1)
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        }
     }
 }
 
@@ -687,6 +737,22 @@ fn main() -> ExitCode {
                     ExitCode::from(2)
                 }
             }
+        }
+        Some("purge") => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut apply = false;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--apply" => apply = true,
+                    "--ip" => match rest.next() {
+                        Some(v) if !v.is_empty() => ip = v.clone(),
+                        _ => return usage_err("--ip needs a value"),
+                    },
+                    other => return usage_err(&format!("unexpected argument {other:?}")),
+                }
+            }
+            cmd_purge(&ip, apply)
         }
         Some("check") => {
             let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
