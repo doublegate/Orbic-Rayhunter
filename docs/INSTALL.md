@@ -343,24 +343,34 @@ The `:24` root shell is not reboot-persistent. Re-open it before using `orx resc
 ./upstream/target/release/installer util orbic-start-telnet --admin-password "$(cat ~/.claude-secrets/orbic-admin.txt)"
 ```
 
-### Freeing space and recovering (manual, for now)
+### Freeing space and recovering
 
-Deleting recordings from `orx rescue` is a deferred follow-up (T-OR-041b): doing it safely has to
-reconcile the daemon's `manifest.toml` and be validated on a genuinely wedged device. Until then,
-recover by hand over the `:24` shell:
+**Prefer `orx purge` whenever the daemon's `:8080` API is reachable** — it deletes recordings
+through the daemon, which keeps `manifest.toml` consistent. Use the manual steps below only when the
+API is genuinely down and `orx purge` cannot run.
+
+> **Warning.** The daemon records each capture in `manifest.toml`. Deleting a `.qmdl.gz` by hand
+> leaves a dangling manifest entry, and whether Rayhunter v0.13.0 tolerates that on startup is
+> **unverified**. Manual deletion is a last resort; after it, confirm the daemon actually came back
+> (next step). Reconciling the manifest is why `orx rescue --apply` is deferred (T-OR-041b).
+
+Over the `:24` shell, in this order:
 
 ```sh
-# 1. Stop the daemon so it is not writing, then confirm it is gone:
+# 1. STOP the daemon FIRST (unlinking files it holds open will not free space
+#    until it exits, and risks corrupting an active write), then confirm it is gone:
 /etc/init.d/rayhunter_daemon stop; ps | grep rayhunter-daemon
 # 2. Delete the OLDEST recordings' file sets (keep the newest you care about).
 #    Each recording is three files in the store:
 rm -f -- /data/rayhunter/qmdl/<ts>.qmdl.gz /data/rayhunter/qmdl/<ts>.ndjson /data/rayhunter/qmdl/<ts>-gps.ndjson
-# 3. Restart the daemon and confirm the API is back:
+# 3. Restart the daemon:
 /etc/init.d/rayhunter_daemon restart
 ```
 
-Then verify with `orx check` (expect the daemon reachable again) and **close the `:24` shell** to
-restore the hardened posture:
+Then verify recovery with `orx check` (expect the daemon reachable again). If it does not come back,
+a dangling `manifest.toml` entry may be the cause — restore a recording you backed up, or seek the
+upstream guidance before editing the manifest. Finally **close the `:24` shell** to restore the
+hardened posture:
 
 ```sh
 # in the :24 shell, kill its own listener:

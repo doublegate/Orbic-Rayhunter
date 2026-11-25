@@ -297,9 +297,9 @@ fn cmd_rescue(ip: &str) -> ExitCode {
                 println!("  {} ({} bytes)", r.name, r.bytes);
             }
             println!(
-                "To free space, delete the oldest recordings' file sets in the shell, then restart \
-                 the daemon (`/etc/init.d/rayhunter_daemon restart`) and close :24. See \
-                 docs/INSTALL.md section 9."
+                "To free space: prefer `orx purge` over :8080 when the daemon is reachable. Only \
+                 if the API is down, follow the manual stop -> delete oldest -> restart -> close-:24 \
+                 procedure in docs/INSTALL.md section 9 (stopping the daemon FIRST)."
             );
             ExitCode::SUCCESS
         }

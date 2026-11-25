@@ -131,19 +131,31 @@ fn parse_ls(output: &str) -> Result<Vec<Recording>, String> {
 /// Fails closed if `/data` is not mounted or the store directory is missing.
 pub fn plan(shell: &mut dyn Shell) -> Result<RescuePlan, String> {
     let store = store_path(shell)?;
-    // Free space. `parse_df_available_kb` returns None if the row is not actually
-    // for /data (e.g. unmounted, so /data resolves to /), which we fail closed on.
+    // Free space. A non-zero df, or a row that is not actually for /data (e.g.
+    // unmounted, so /data resolves to /), fails closed.
     let df = shell.run(&format!("df -k {DATA_MOUNT}"))?;
+    if df.status != 0 {
+        return Err(format!("df -k {DATA_MOUNT} failed (exit {})", df.status));
+    }
     let available_kb = crate::install::parse_df_available_kb(&df.output, DATA_MOUNT)
         .ok_or_else(|| format!("could not read free space on {DATA_MOUNT} (is it mounted?)"))?;
-    // The store must exist (catches a missing store / unmounted partition).
+    // The store must exist. `echo OK` runs only if the dir exists, so require
+    // BOTH a zero exit AND an exact "OK" (so a store path or error text that
+    // merely contains "OK" cannot pass).
     let test = shell.run(&format!("test -d {store} && echo OK"))?;
-    if !test.output.contains("OK") {
+    if test.status != 0 || test.output.trim() != "OK" {
         return Err(format!("recording store {store} not found on the device"));
     }
     // List the directory itself (no shell glob) so an unbounded number of files
-    // cannot exceed ARG_MAX; parse_ls filters for `*.qmdl.gz`.
+    // cannot exceed ARG_MAX; parse_ls filters for `*.qmdl.gz`. A non-zero ls
+    // (I/O error, vanished dir) fails closed rather than parsing to "0 records".
     let ls = shell.run(&format!("ls -l {store}"))?;
+    if ls.status != 0 {
+        return Err(format!(
+            "ls -l {store} failed (exit {}); not trusting an empty listing",
+            ls.status
+        ));
+    }
     let recordings = parse_ls(&ls.output)?;
     Ok(RescuePlan {
         store,
