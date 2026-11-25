@@ -362,20 +362,27 @@ Over the `:24` shell, in this order:
 ```sh
 # 1. STOP the daemon FIRST (unlinking files it holds open frees nothing until it
 #    exits, and risks corrupting an active write); confirm it is gone; and back
-#    up the manifest (tiny) so its bookkeeping can be restored if startup fails:
+#    up the manifest so its bookkeeping can be restored if startup fails. The
+#    manifest lives INSIDE the store (/data/rayhunter/qmdl/manifest.toml); copy
+#    it to tmpfs (/var/volatile is RAM, independent of the full /data) and VERIFY
+#    the copy is non-empty before deleting -- a copy onto the full /data could be
+#    a 0-byte ENOSPC file that would wipe the manifest if later restored:
 /etc/init.d/rayhunter_daemon stop; ps | grep rayhunter-daemon
-cp /data/rayhunter/manifest.toml /data/rayhunter/manifest.toml.bak
-# 2. Delete the OLDEST recordings' file sets (keep the newest you care about).
-#    Each recording is three files in the store:
+cp /data/rayhunter/qmdl/manifest.toml /var/volatile/manifest.toml.bak && \
+  test -s /var/volatile/manifest.toml.bak && echo "manifest backed up" || \
+  echo "BACKUP FAILED -- do not delete anything"
+# 2. Only if the backup succeeded: delete the OLDEST recordings' file sets (keep
+#    the newest you care about). Each recording is three files in the store:
 rm -f -- /data/rayhunter/qmdl/<ts>.qmdl.gz /data/rayhunter/qmdl/<ts>.ndjson /data/rayhunter/qmdl/<ts>-gps.ndjson
 # 3. Restart the daemon:
 /etc/init.d/rayhunter_daemon restart
 ```
 
 Then verify recovery with `orx check` (expect the daemon reachable again). **If it does not come
-back**, a dangling `manifest.toml` entry is the likely cause: restore the bookkeeping with
-`cp /data/rayhunter/manifest.toml.bak /data/rayhunter/manifest.toml` and restart, or consult the
-upstream project before editing the manifest by hand.
+back**, a dangling manifest entry is the likely cause: restore the bookkeeping with
+`cp /var/volatile/manifest.toml.bak /data/rayhunter/qmdl/manifest.toml` and restart, or consult the
+upstream project before editing the manifest by hand. (Note: `/var/volatile` is cleared on reboot,
+so restore before rebooting.)
 
 Finally **close the `:24` shell** to restore the hardened posture, and VERIFY it closed:
 
