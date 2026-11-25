@@ -13,8 +13,11 @@
   by default -- it reports free space on `/data` and the stored recordings (oldest first, with
   sizes), reading `qmdl_store_path` from the device config. `--apply --keep <N>` stops the daemon
   (`/etc/init.d/rayhunter_daemon stop`) and deletes the OLDEST recordings' file sets
-  (`.qmdl.gz` + `.ndjson` + `-gps.ndjson`), keeping the newest N; it aborts before deleting anything
-  if the daemon fails to stop, and validates every device path. The `:24` shell is not
+  (`.qmdl.gz` + `.ndjson` + `-gps.ndjson`), keeping the newest N; it attempts to stop the daemon
+  then VERIFIES it is actually gone (an already-crashed daemon makes the init stop exit non-zero,
+  which is the wedged case rescue is for), aborting before any delete if it is still alive. Sorts
+  recordings numerically by timestamp, lists with `ls -ld --` (skipping non-regular files), deletes
+  with `rm -f --`, validates the store path and every file path, and uses saturating size arithmetic. The `:24` shell is not
   reboot-persistent (re-open it first; see INSTALL.md section 5). Dry run validated live; the delete
   path is unit-tested against a fake shell (the device's recordings were not deleted).
 

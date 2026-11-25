@@ -32,7 +32,10 @@ pub struct RescuePlan {
 
 impl RescuePlan {
     pub fn total_bytes(&self) -> u64 {
-        self.recordings.iter().map(|r| r.bytes).sum()
+        // Saturating: sizes are parsed from untrusted device output.
+        self.recordings
+            .iter()
+            .fold(0u64, |acc, r| acc.saturating_add(r.bytes))
     }
 }
 
@@ -42,19 +45,35 @@ pub struct RescueOutcome {
     pub freed_bytes: u64,
 }
 
-/// Discover the recording store path from the device config, else the default.
-fn store_path(shell: &mut dyn Shell) -> String {
-    match shell.run(&format!("cat {CONFIG_PATH}")) {
-        Ok(r) if r.status == 0 => r
-            .output
-            .lines()
-            .find_map(|l| {
-                let (k, v) = l.split_once('=')?;
-                (k.trim() == "qmdl_store_path").then(|| v.trim().trim_matches('"').to_string())
-            })
-            .filter(|p| safe_remote(p))
-            .unwrap_or_else(|| STORE_DEFAULT.to_string()),
-        _ => STORE_DEFAULT.to_string(),
+/// Discover the recording store path from the device config. Fails closed: a
+/// shell error propagates, and a `qmdl_store_path` that is present but unsafe or
+/// not under `/data/` is an error (we never silently fall back in that case).
+/// The default is used ONLY when the config has no such key (status 0, absent).
+fn store_path(shell: &mut dyn Shell) -> Result<String, String> {
+    let r = shell.run(&format!("cat {CONFIG_PATH}"))?;
+    if r.status != 0 {
+        // Config unreadable (missing/permission): fall back to the known default,
+        // which is itself validated below.
+        return validate_store(STORE_DEFAULT);
+    }
+    let found = r.output.lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        (k.trim() == "qmdl_store_path").then(|| v.trim().trim_matches('"').to_string())
+    });
+    match found {
+        Some(p) => validate_store(&p),
+        None => validate_store(STORE_DEFAULT),
+    }
+}
+
+/// A store path must be a safe absolute path under `/data/` (fail closed).
+fn validate_store(p: &str) -> Result<String, String> {
+    if safe_remote(p) && p.starts_with("/data/") {
+        Ok(p.to_string())
+    } else {
+        Err(format!(
+            "refusing unsafe qmdl_store_path {p:?} (must be a clean path under /data/)"
+        ))
     }
 }
 
@@ -67,6 +86,11 @@ fn parse_ls(output: &str) -> Vec<Recording> {
     for line in output.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 9 {
+            continue;
+        }
+        // Regular files only: skip directories ('d'), symlinks ('l', whose last
+        // field is the link target), etc. `ls -ld` lists each entry itself.
+        if !fields[0].starts_with('-') {
             continue;
         }
         let Some(path) = fields.last() else { continue };
@@ -92,19 +116,22 @@ fn parse_ls(output: &str) -> Vec<Recording> {
             });
         }
     }
-    // Oldest first (timestamp names sort chronologically as strings of equal len,
-    // but sort numerically to be safe).
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    // Oldest first. Sort NUMERICALLY by the timestamp name: lexicographic order
+    // would misrank pre-NITZ/NTP captures with short timestamps (e.g. "3600")
+    // against normal 10-digit ones and could classify a newer capture as oldest.
+    // Non-numeric names sort last (treated as newest, so kept).
+    out.sort_by_key(|r| (r.name.parse::<u64>().unwrap_or(u64::MAX), r.name.clone()));
     out
 }
 
 /// Build the rescue plan: free space on the data partition + stored recordings.
 pub fn plan(shell: &mut dyn Shell) -> Result<RescuePlan, String> {
-    let store = store_path(shell);
+    let store = store_path(shell)?;
     let df = shell.run(&format!("df -k {DATA_MOUNT}"))?;
     let available_kb = crate::install::parse_df_available_kb(&df.output, DATA_MOUNT);
-    // `ls -l <store>/*.qmdl.gz`; a non-zero status (no matches) yields no rows.
-    let ls = shell.run(&format!("ls -l {store}/*.qmdl.gz 2>/dev/null"))?;
+    // `ls -ld -- <store>/*.qmdl.gz`: -d lists each match itself (never a dir's
+    // contents), -- ends options; a non-zero status (no matches) yields no rows.
+    let ls = shell.run(&format!("ls -ld -- {store}/*.qmdl.gz 2>/dev/null"))?;
     let recordings = parse_ls(&ls.output);
     Ok(RescuePlan {
         store,
@@ -126,12 +153,15 @@ pub fn apply(shell: &mut dyn Shell, keep: usize) -> Result<RescueOutcome, String
     if to_delete == 0 {
         return Ok(out);
     }
-    // Stop the daemon first so it is not writing while we delete under it.
-    let stop = shell.run(INIT_STOP)?;
-    if stop.status != 0 {
+    // Attempt to stop the daemon, then VERIFY it is actually gone. The init stop
+    // script returns non-zero when the daemon has already crashed/exited -- which
+    // is the exact wedged state rescue exists for -- so its exit code is not a
+    // reliable signal. We proceed only once the process is confirmed not running,
+    // and fail closed if it is still alive (don't delete under a live writer).
+    let _ = shell.run(INIT_STOP);
+    if daemon_running(shell)? {
         return Err(format!(
-            "failed to stop the daemon ({INIT_STOP} exited {}); not deleting anything",
-            stop.status
+            "daemon still running after {INIT_STOP}; not deleting anything"
         ));
     }
     for rec in plan.recordings.iter().take(to_delete) {
@@ -146,11 +176,11 @@ pub fn apply(shell: &mut dyn Shell, keep: usize) -> Result<RescueOutcome, String
             out.failed += 1;
             continue;
         }
-        match shell.run(&format!("rm -f {}", files.join(" "))) {
+        match shell.run(&format!("rm -f -- {}", files.join(" "))) {
             Ok(r) if r.status == 0 => {
                 println!("deleted {} ({} bytes)", rec.name, rec.bytes);
                 out.deleted += 1;
-                out.freed_bytes += rec.bytes;
+                out.freed_bytes = out.freed_bytes.saturating_add(rec.bytes);
             }
             Ok(r) => {
                 eprintln!("failed to delete {}: rm exited {}", rec.name, r.status);
@@ -163,6 +193,13 @@ pub fn apply(shell: &mut dyn Shell, keep: usize) -> Result<RescueOutcome, String
         }
     }
     Ok(out)
+}
+
+/// Whether the rayhunter daemon process is currently running on the device.
+fn daemon_running(shell: &mut dyn Shell) -> Result<bool, String> {
+    let ps = shell.run("ps")?;
+    // The daemon's argv contains the binary name; `ps` lists the command.
+    Ok(ps.output.contains("rayhunter-daemon"))
 }
 
 #[cfg(test)]
@@ -197,6 +234,31 @@ mod tests {
         assert!(parse_ls(out).is_empty());
     }
 
+    #[test]
+    fn parse_ls_skips_symlinks_and_dirs() {
+        // A symlink ('l') whose last field is the target, and a directory ('d'):
+        // both must be skipped (only regular files '-' count).
+        let out = "lrwxrwxrwx 1 root root 20 Nov 23 13:08 /data/rayhunter/qmdl/a.qmdl.gz -> /other/b.qmdl.gz\n\
+                   drwxr-xr-x 2 root root 4096 Nov 23 13:08 /data/rayhunter/qmdl/weird.qmdl.gz\n";
+        assert!(parse_ls(out).is_empty());
+    }
+
+    #[test]
+    fn store_path_fails_closed_on_unsafe_value() {
+        let mut sh = FakeShell::default();
+        sh.responses.insert(
+            "cat /data/rayhunter/config.toml".into(),
+            CmdResult {
+                output: "qmdl_store_path = \"/etc/passwd\"\n".into(),
+                status: 0,
+            },
+        );
+        assert!(
+            store_path(&mut sh).is_err(),
+            "a store path outside /data/ must fail closed"
+        );
+    }
+
     fn shell_with(df_avail_kb: u64, recs: &[(u64, &str)]) -> FakeShell {
         let mut sh = FakeShell::default();
         sh.responses.insert(
@@ -220,9 +282,18 @@ mod tests {
             .map(|(s, n)| format!("{}\n", ls_line(*s, n)))
             .collect();
         sh.responses.insert(
-            "ls -l /data/rayhunter/qmdl/*.qmdl.gz 2>/dev/null".into(),
+            "ls -ld -- /data/rayhunter/qmdl/*.qmdl.gz 2>/dev/null".into(),
             CmdResult {
                 output: ls,
+                status: 0,
+            },
+        );
+        // By default the daemon is NOT running (post-stop); tests that need it
+        // alive override this `ps` response.
+        sh.responses.insert(
+            "ps".into(),
+            CmdResult {
+                output: "  PID USER  COMMAND\n  1 root /sbin/init\n".into(),
                 status: 0,
             },
         );
@@ -258,11 +329,11 @@ mod tests {
         );
         // Accept the rm commands for the two oldest.
         sh.responses.insert(
-            "rm -f /data/rayhunter/qmdl/1795442375.qmdl.gz /data/rayhunter/qmdl/1795442375.ndjson /data/rayhunter/qmdl/1795442375-gps.ndjson".into(),
+            "rm -f -- /data/rayhunter/qmdl/1795442375.qmdl.gz /data/rayhunter/qmdl/1795442375.ndjson /data/rayhunter/qmdl/1795442375-gps.ndjson".into(),
             CmdResult { output: String::new(), status: 0 },
         );
         sh.responses.insert(
-            "rm -f /data/rayhunter/qmdl/1795457329.qmdl.gz /data/rayhunter/qmdl/1795457329.ndjson /data/rayhunter/qmdl/1795457329-gps.ndjson".into(),
+            "rm -f -- /data/rayhunter/qmdl/1795457329.qmdl.gz /data/rayhunter/qmdl/1795457329.ndjson /data/rayhunter/qmdl/1795457329-gps.ndjson".into(),
             CmdResult { output: String::new(), status: 0 },
         );
         let out = apply(&mut sh, 1).unwrap();
@@ -294,18 +365,49 @@ mod tests {
     }
 
     #[test]
-    fn apply_aborts_if_daemon_stop_fails() {
-        let mut sh = shell_with(187000, &[(100, "a"), (200, "b")]);
+    fn apply_proceeds_when_stop_returns_nonzero_but_daemon_is_gone() {
+        // The wedged case: the daemon already crashed, so the init stop script
+        // exits non-zero -- but `ps` shows it is gone, so rescue must proceed.
+        let mut sh = shell_with(187000, &[(100, "1795442375"), (200, "1795457329")]);
         sh.responses.insert(
             INIT_STOP.into(),
             CmdResult {
-                output: "err".into(),
+                output: "not running".into(),
                 status: 1,
+            },
+        );
+        sh.responses.insert(
+            "rm -f -- /data/rayhunter/qmdl/1795442375.qmdl.gz /data/rayhunter/qmdl/1795442375.ndjson /data/rayhunter/qmdl/1795442375-gps.ndjson".into(),
+            CmdResult { output: String::new(), status: 0 },
+        );
+        let out = apply(&mut sh, 1).unwrap();
+        assert_eq!(
+            out.deleted, 1,
+            "a non-zero stop with a dead daemon must not block rescue"
+        );
+    }
+
+    #[test]
+    fn apply_aborts_if_daemon_still_running_after_stop() {
+        let mut sh = shell_with(187000, &[(100, "1795442375"), (200, "1795457329")]);
+        sh.responses.insert(
+            INIT_STOP.into(),
+            CmdResult {
+                output: "ok".into(),
+                status: 0,
+            },
+        );
+        // ps still shows the daemon -> must abort before any delete.
+        sh.responses.insert(
+            "ps".into(),
+            CmdResult {
+                output: "  PID USER COMMAND\n 1553 root /data/rayhunter/rayhunter-daemon /data/rayhunter/config.toml\n".into(),
+                status: 0,
             },
         );
         assert!(
             apply(&mut sh, 0).is_err(),
-            "a failed stop must abort before any delete"
+            "a daemon still alive after stop must abort before any delete"
         );
         assert!(!sh.cmds.iter().any(|c| c.starts_with("rm -f")));
     }
