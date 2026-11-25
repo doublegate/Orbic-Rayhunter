@@ -3,7 +3,7 @@
 Single source of truth for the current state of Orbic-Rayhunter. Other files point here instead
 of restating status. Updated at every sprint and phase boundary.
 
-- Last updated: 2026-11-23 (v1.0.0 -- stable baseline, installed on device)
+- Last updated: 2026-11-25 (v1.0.1 -- install-safety guard)
 - Version: 1.0.1 (`Cargo.toml` `workspace.package.version = "1.0.1"`)
 - Upstream pin: EFForg/rayhunter v0.13.0 (cd462a1)
 - Target: Orbic RC400L, `ORB400L_V1.2.0_BVZRT`

@@ -174,13 +174,17 @@ fn elf32_symbol_table(bytes: &[u8]) -> Option<bool> {
     // Every read is bounds-checked and returns None (fail closed) on any surprise.
     let rd_u32 = |o: usize| -> Option<u32> {
         bytes
-            .get(o..o + 4)
-            .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+            .get(o..o.checked_add(4)?)?
+            .try_into()
+            .ok()
+            .map(u32::from_le_bytes)
     };
     let rd_u16 = |o: usize| -> Option<u16> {
         bytes
-            .get(o..o + 2)
-            .map(|s| u16::from_le_bytes(s.try_into().unwrap()))
+            .get(o..o.checked_add(2)?)?
+            .try_into()
+            .ok()
+            .map(u16::from_le_bytes)
     };
     // ELF32 header: e_shoff@0x20 (u32), e_shentsize@0x2e (u16), e_shnum@0x30 (u16).
     if bytes.len() < 0x34 {
@@ -308,6 +312,12 @@ pub fn verify_daemon_against_sums(daemon: &Path, daemon_bytes: &[u8]) -> Result<
 /// section table is truncated/corrupt, so the caller fails closed rather than
 /// treating a damaged binary as a clean stripped release.
 pub fn daemon_is_unstripped(daemon_bytes: &[u8]) -> Result<bool, String> {
+    // Self-contained: validate ELF identity here too, so a caller that did not go
+    // through install_plan cannot feed a non-ELF buffer (e.g. all-zero bytes,
+    // which have e_shoff == e_shnum == 0) and have it read as a stripped release.
+    if !is_arm32_elf(daemon_bytes) {
+        return Err("daemon is not a 32-bit little-endian ARM ELF".to_string());
+    }
     elf32_symbol_table(daemon_bytes).ok_or_else(|| {
         "daemon ELF section table is out of bounds (truncated or corrupt)".to_string()
     })
@@ -657,6 +667,11 @@ mod tests {
         let mut incons = fake_arm_elf();
         incons[0x30..0x32].copy_from_slice(&3u16.to_le_bytes());
         assert_eq!(elf32_symbol_table(&incons), None);
+        // daemon_is_unstripped validates ELF identity itself: a non-ELF buffer
+        // (e.g. all zero) is rejected, not read as a clean stripped release.
+        assert!(daemon_is_unstripped(&[0u8; 2048]).is_err());
+        assert_eq!(daemon_is_unstripped(&fake_arm_elf()), Ok(false));
+        assert_eq!(daemon_is_unstripped(&elf_with_sections(true)), Ok(true));
     }
 
     #[test]

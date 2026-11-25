@@ -17,7 +17,7 @@ USAGE:
                                          Archive each writable device filesystem (tar+SHA-256)
     orx verify --dir <dir>               Re-hash a backup dir against its MANIFEST.txt
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
-                [--allow-unstripped] [--apply]
+                [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
     orx uninstall --dir <backup> [--ip <addr>] [--apply]
                                          Reverse the install (dry-run unless --apply)
@@ -28,8 +28,8 @@ Notes:
     install/uninstall WRITE to the device and reboot it; they are dry-run unless --apply,
     and always refuse unless `orx verify --dir <backup>` would pass. --dist defaults to
     build/rayhunter/dist, --daemon to dist/rayhunter-daemon. install verifies the daemon
-    against a SHA256SUMS beside it and refuses an unstripped (devel) daemon unless
-    --allow-unstripped.
+    against a SHA256SUMS beside it (refusing if it is missing unless --allow-unverified)
+    and refuses an unstripped (devel) daemon unless --allow-unstripped.
     backup needs the device root shell open on TCP 24 (see docs/BACKUP-AND-RECOVERY.md).
     It writes <dir>/<fs>.tar (0600) and <dir>/MANIFEST.txt; a live rw filesystem whose
     tar exits non-zero is only accepted with --allow-live (recorded as ok-live).
@@ -276,6 +276,7 @@ fn cmd_install(
     ip: &str,
     apply: bool,
     allow_unstripped: bool,
+    allow_unverified: bool,
 ) -> ExitCode {
     let init = dist.join("scripts/rayhunter_daemon");
     let misc = dist.join("scripts/misc-daemon");
@@ -298,10 +299,19 @@ fn cmd_install(
     };
     match install::verify_daemon_against_sums(daemon, daemon_bytes) {
         Ok(true) => println!("daemon verified against SHA256SUMS."),
-        Ok(false) => eprintln!(
-            "warning: no SHA256SUMS beside {} -- cannot verify the daemon's integrity",
+        Ok(false) if allow_unverified => eprintln!(
+            "warning: no SHA256SUMS beside {} -- installing unverified (--allow-unverified)",
             daemon.display()
         ),
+        Ok(false) => {
+            eprintln!(
+                "error: no SHA256SUMS beside {} -- cannot verify the daemon's integrity.\n       \
+                 Build it with `scripts/build.sh firmware` (which writes SHA256SUMS), or pass\n       \
+                 --allow-unverified to install it anyway.",
+                daemon.display()
+            );
+            return ExitCode::from(1);
+        }
         Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::from(1);
@@ -627,12 +637,14 @@ fn main() -> ExitCode {
             let mut daemon = "dist/rayhunter-daemon".to_string();
             let mut apply = false;
             let mut allow_unstripped = false;
+            let mut allow_unverified = false;
             let mut rest = args[1..].iter();
             while let Some(arg) = rest.next() {
                 let need = |o: Option<&String>| -> Result<String, ()> { o.cloned().ok_or(()) };
                 match arg.as_str() {
                     "--apply" => apply = true,
                     "--allow-unstripped" if cmd == "install" => allow_unstripped = true,
+                    "--allow-unverified" if cmd == "install" => allow_unverified = true,
                     "--ip" => match need(rest.next()) {
                         Ok(v) => ip = v,
                         Err(()) => return usage_err("--ip needs a value"),
@@ -663,6 +675,7 @@ fn main() -> ExitCode {
                     &ip,
                     apply,
                     allow_unstripped,
+                    allow_unverified,
                 )
             } else {
                 cmd_uninstall(Path::new(&backup), &ip, apply)

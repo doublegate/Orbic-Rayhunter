@@ -192,8 +192,9 @@ Additive hardening for `orx install`, deferred from the v0.8.0 PR as next-PR wor
 command is backup-gated, dry-run-first, atomic, and validates payloads; these make it stricter):
 
 - [x] T-OR-036a (v1.0.1): `orx install` verifies the daemon against a `SHA256SUMS` beside it when
-      present, and refuses an unstripped (devel) daemon unless `--allow-unstripped` -- catching both
-      a corrupted/swapped artifact and the ~16 MB debug build staged by mistake.
+      present, (refusing if it is missing unless `--allow-unverified`) and refuses an unstripped (devel)
+      daemon unless `--allow-unstripped` -- catching a corrupted/swapped/missing artifact and the
+      ~16 MB debug build staged by mistake.
 - [ ] T-OR-036b: `--config <path>` and deploy our hardened `config.toml` (wifi_enabled = false,
       retention/free-space thresholds) instead of bare upstream `config.toml.in`; ties to T-OR-040.
 - [ ] T-OR-036c: `/data` (and `/`) free-space preflight before staging a second copy of the daemon,
