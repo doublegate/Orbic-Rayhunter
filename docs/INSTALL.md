@@ -284,3 +284,25 @@ Verify the restore:
 
 This rehearsal is T-OR-024 and is repeated for every release that changes the install path
 ([RELEASE-PROCESS.md](RELEASE-PROCESS.md)).
+
+## 7. Pull recordings off the device
+
+```sh
+orx pull-logs --to <dir> [--ip <addr>]   # T-OR-038 (v1.0.3)
+```
+
+`orx pull-logs` downloads every recording from the daemon's unauthenticated `:8080` API to a host
+directory: the raw QMDL (`/api/qmdl/{name}`) and, best-effort, the analysis report
+(`/api/analysis-report/{name}`, NDJSON). It writes `PULL-MANIFEST.txt` (SHA-256 of each file) and a
+`.orx-pull-state` file recording each recording's manifest size, so a re-run **skips completed
+recordings that have not changed** and only re-pulls the live one. Each download is streamed to disk
+(bounded), and device-supplied recording names are validated before use in a path or URL.
+
+Completion is read from the manifest's `entries` (finished) vs `current_entry` (live) position, not
+from `stop_reason` -- the v0.13.0 daemon leaves `stop_reason` null on finished entries too. The
+reported `qmdl_size_bytes` is the on-device compressed size and differs from the decompressed bytes
+downloaded, which is why the skip check compares the manifest size across runs rather than file
+lengths.
+
+Device captures contain real identifiers; treat a pull directory as sensitive and keep it off the
+repo (see [SECURITY-MODEL.md](SECURITY-MODEL.md)).

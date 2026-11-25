@@ -110,8 +110,10 @@ cargo run -p orx-cli -- verify
 
 ## Sprint 4.4: `orx pull-logs` and `orx restore` (v0.8.0)
 
-- [ ] T-OR-038: list via `/api/qmdl-manifest`; download QMDL, ndjson and GPS files; host
-      manifest with SHA-256; skip already-pulled entries
+- [x] T-OR-038 (v1.0.3): `orx pull-logs --to <dir>` lists via `/api/qmdl-manifest`, downloads each
+      recording's QMDL + analysis NDJSON (streamed, bounded), writes a SHA-256 PULL-MANIFEST, and
+      skips completed recordings unchanged since the last pull (`.orx-pull-state`). Validated live.
+      GPS files (when `gps_mode > 0`) are a follow-up; names are validated against path/URL injection.
 - [x] T-OR-039: `orx uninstall --dir <backup> [--apply]` (v0.8.0) restores the true stock
       misc-daemon extracted from the verified backup's `root.tar` (gated before extract; refuses an
       already-hooked script), atomically, and removes our files, leaving `/data/rayhunter-data`

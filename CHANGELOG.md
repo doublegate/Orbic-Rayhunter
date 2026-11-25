@@ -4,6 +4,28 @@
 
 - (nothing yet)
 
+## [1.0.3] - 2026-11-25
+
+### Added
+
+- `orx pull-logs --to <dir>` (T-OR-038): downloads each recording's QMDL
+  (`/api/qmdl/{name}`) and analysis report (`/api/analysis-report/{name}`, NDJSON, best-effort)
+  from the device's `:8080` API to a host directory, writes a `PULL-MANIFEST.txt` of SHA-256 sums,
+  and skips completed recordings already pulled unchanged (tracked in a `.orx-pull-state` file).
+  Streams each download to disk (bounded) so a large capture never buffers in memory, and validates
+  device-supplied recording names before using them in a path or URL. The manifest parse fails
+  closed (an `entries` array is required), downloads use HTTP/1.1, decode chunked (requiring the terminating zero-chunk) and verify Content-Length, file hashing is incremental, and downloads carry a typed error so only a
+  genuine 404 treats the analysis report as absent (any transport/5xx/truncation error fails closed),
+  only fully-pulled completed recordings are recorded as skippable, PULL-MANIFEST.txt reflects every file held locally (so a purged recording's
+  entry is kept) and both it and .orx-pull-state are written atomically. Validated live on the unit (4 recordings pulled, then 3 skipped on re-run).
+- A minimal std-only JSON reader (`json`) for the daemon's API responses, keeping orx-cli
+  dependency-free.
+
+### Notes
+
+- Completion is read from the manifest's `entries` vs `current_entry` position, not `stop_reason`:
+  this daemon (v0.13.0) leaves `stop_reason` null on finished entries too.
+
 ## [1.0.2] - 2026-11-25
 
 More `orx install` hardening: deploy our hardened config, and a free-space preflight.

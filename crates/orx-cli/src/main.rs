@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use orx_cli::{backup, install, probe, transport, usb, verify};
+use orx_cli::{backup, install, probe, pull, transport, usb, verify};
 use transport::Shell;
 
 const USAGE: &str = "\
@@ -16,6 +16,8 @@ USAGE:
     orx backup --out <dir> [--ip <addr>] [--allow-live]
                                          Archive each writable device filesystem (tar+SHA-256)
     orx verify --dir <dir>               Re-hash a backup dir against its MANIFEST.txt
+    orx pull-logs --to <dir> [--ip <addr>]
+                                         Download recordings (QMDL + analysis ndjson) from :8080
     orx install --dir <backup> [--dist <d>] [--daemon <f>] [--ip <addr>]
                 [--allow-unstripped] [--allow-unverified] [--apply]
                                          Deploy our firmware build (dry-run unless --apply)
@@ -259,6 +261,26 @@ fn cmd_verify(dir: &Path) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `orx pull-logs`: download the device's recordings to a host directory.
+fn cmd_pull_logs(ip: &str, to: &Path) -> ExitCode {
+    match pull::pull_logs(ip, to, Duration::from_secs(600)) {
+        Ok(o) => {
+            println!(
+                "pull-logs: {} pulled, {} skipped, {} bytes -> {}",
+                o.pulled,
+                o.skipped,
+                o.bytes,
+                to.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -641,6 +663,28 @@ fn main() -> ExitCode {
                     eprintln!("error: verify needs --dir <dir>\n\n{USAGE}");
                     ExitCode::from(2)
                 }
+            }
+        }
+        Some("pull-logs") => {
+            let mut ip = probe::DEFAULT_DEVICE_IP.to_string();
+            let mut to: Option<String> = None;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--ip" => match rest.next() {
+                        Some(v) if !v.is_empty() => ip = v.clone(),
+                        _ => return usage_err("--ip needs a value"),
+                    },
+                    "--to" => match rest.next() {
+                        Some(v) if !v.is_empty() => to = Some(v.clone()),
+                        _ => return usage_err("--to needs a value"),
+                    },
+                    other => return usage_err(&format!("unexpected argument {other:?}")),
+                }
+            }
+            match to {
+                Some(d) => cmd_pull_logs(&ip, Path::new(&d)),
+                None => usage_err("pull-logs needs --to <dir>"),
             }
         }
         Some(cmd @ ("install" | "uninstall")) => {
