@@ -12,8 +12,10 @@
   `:8080` API (`/api/system-stats`, `/api/qmdl-manifest`) for the rayhunter version, OS/arch,
   disk/memory/battery and recording status, and probes ports -- the daemon port (`:8080`) should be
   open, while the root shell (`:24`) and installer transfer port (`:8081`) should be closed on a
-  settled device. It **fails closed**: an unreachable/unparsable API, a daemon that does not report a
-  rayhunter version, and an exposed root shell or installer port are all failures (not warnings).
+  settled device. It **fails closed**: an unreachable/unparsable API, a daemon with no (or empty)
+  rayhunter version, a manifest with no `entries` array, and an exposed root shell or installer
+  port are all failures. Untrusted device strings are sanitized of control characters before
+  printing (no ANSI/forged-line injection from a compromised device).
   Prints an `[ok]/[warn]/[fail]` summary and exits non-zero on any failure. Reuses
   the std-only JSON reader and HTTP client; no new dependencies. Validated live (device healthy).
 

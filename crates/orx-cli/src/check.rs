@@ -148,15 +148,20 @@ pub fn check_inner(
 /// Report the stats fields; returns whether the rayhunter version was present
 /// (its absence means the response is not a Rayhunter daemon's stats).
 fn report_stats(r: &mut CheckReport, stats: &Json) -> bool {
-    let mut version_present = false;
-    if let Some(meta) = stats.get("runtime_metadata") {
-        let ver = meta.get("rayhunter_version").and_then(Json::as_str);
-        version_present = ver.is_some();
+    let meta = stats.get("runtime_metadata");
+    // Require a non-empty version; its absence means it is not a Rayhunter
+    // daemon's stats (check_inner then records the Fail). Don't print an
+    // "[ok] rayhunter ?" line in that case.
+    let version = meta
+        .and_then(|m| m.get("rayhunter_version"))
+        .and_then(Json::as_str)
+        .filter(|v| !v.is_empty());
+    if let (Some(meta), Some(ver)) = (meta, version) {
         let os = meta.get("system_os").and_then(Json::as_str).unwrap_or("?");
         let arch = meta.get("arch").and_then(Json::as_str).unwrap_or("?");
         r.push(
             Level::Ok,
-            format!("rayhunter {} on {os} ({arch})", ver.unwrap_or("?")),
+            format!("rayhunter {} on {} ({})", san(ver), san(os), san(arch)),
         );
     }
     if let Some(disk) = stats.get("disk_stats") {
@@ -179,13 +184,22 @@ fn report_stats(r: &mut CheckReport, stats: &Json) -> bool {
         let level = if full { Level::Warn } else { Level::Ok };
         r.push(
             level,
-            format!("disk {used}/{total} used ({pct}), {avail} free"),
+            format!(
+                "disk {}/{} used ({}), {} free",
+                san(used),
+                san(total),
+                san(pct),
+                san(avail)
+            ),
         );
     }
     if let Some(mem) = stats.get("memory_stats") {
         let used = mem.get("used").and_then(Json::as_str).unwrap_or("?");
         let total = mem.get("total").and_then(Json::as_str).unwrap_or("?");
-        r.push(Level::Ok, format!("memory {used}/{total} used"));
+        r.push(
+            Level::Ok,
+            format!("memory {}/{} used", san(used), san(total)),
+        );
     }
     if let Some(bat) = stats.get("battery_status") {
         let level = bat.get("level").and_then(Json::as_f64).map(|l| l as i64);
@@ -200,26 +214,45 @@ fn report_stats(r: &mut CheckReport, stats: &Json) -> bool {
             format!("battery {pct} ({src})"),
         );
     }
-    version_present
+    version.is_some()
+}
+
+/// Strip control characters from an untrusted device string before printing, so
+/// a compromised device or rogue `--ip` target cannot inject ANSI escapes or
+/// forge `[ok]` status lines in the terminal. Also length-bounded.
+fn san(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(120).collect()
 }
 
 fn report_recording(r: &mut CheckReport, manifest: &Json) {
-    match manifest.get("current_entry") {
-        Some(cur) if !cur.is_null() => {
-            let name = cur.get("name").and_then(Json::as_str).unwrap_or("?");
-            r.push(
-                Level::Ok,
-                format!("recording active (current entry {name})"),
-            );
-        }
-        _ => r.push(Level::Warn, "no recording active".to_string()),
-    }
-    if let Some(entries) = manifest.get("entries").and_then(Json::as_array) {
+    // The manifest must carry an `entries` array; its absence means the response
+    // is not a real qmdl-manifest (fail closed rather than silently pass).
+    let Some(entries) = manifest.get("entries").and_then(Json::as_array) else {
         r.push(
-            Level::Ok,
-            format!("{} completed recording(s) stored", entries.len()),
+            Level::Fail,
+            "manifest has no `entries` array (unexpected response)".to_string(),
         );
+        return;
+    };
+    // "Active" only when current_entry is an object with a non-empty string name;
+    // a missing, null, or malformed current_entry means no active recording.
+    let active = manifest
+        .get("current_entry")
+        .filter(|c| !c.is_null())
+        .and_then(|c| c.get("name"))
+        .and_then(Json::as_str)
+        .filter(|n| !n.is_empty());
+    match active {
+        Some(name) => r.push(
+            Level::Ok,
+            format!("recording active (current entry {})", san(name)),
+        ),
+        None => r.push(Level::Warn, "no recording active".to_string()),
     }
+    r.push(
+        Level::Ok,
+        format!("{} completed recording(s) stored", entries.len()),
+    );
 }
 
 #[cfg(test)]
@@ -358,6 +391,59 @@ mod tests {
                 .iter()
                 .any(|(l, m)| *l == Level::Fail && m.contains("root shell")),
         );
+    }
+
+    #[test]
+    fn report_recording_fails_without_entries_array() {
+        for body in ["{}", "[]", "null", r#"{"entries":"nope"}"#] {
+            let m = crate::json::parse(body).unwrap();
+            let mut r = CheckReport { items: Vec::new() };
+            report_recording(&mut r, &m);
+            assert!(!r.healthy(), "manifest {body:?} should fail");
+        }
+        // A malformed current_entry is "no recording active", not active.
+        let m = crate::json::parse(r#"{"entries":[],"current_entry":{}}"#).unwrap();
+        let mut r = CheckReport { items: Vec::new() };
+        report_recording(&mut r, &m);
+        let text = r
+            .items
+            .iter()
+            .map(|(_, x)| x.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("no recording active"), "{text}");
+    }
+
+    #[test]
+    fn device_strings_are_sanitized() {
+        // An injected ANSI escape + a forged status line must be stripped.
+        let stats = crate::json::parse(
+            "{\"runtime_metadata\":{\"rayhunter_version\":\"\\u001b[31m0.13\",\"system_os\":\"a\\nb\",\"arch\":\"x\"}}",
+        )
+        .unwrap();
+        let mut r = CheckReport { items: Vec::new() };
+        assert!(report_stats(&mut r, &stats));
+        let text = r
+            .items
+            .iter()
+            .map(|(_, m)| m.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains('\u{1b}'), "escape not stripped: {text:?}");
+        assert!(!text.contains('\n') || text.lines().count() >= 1); // os newline stripped from the value
+        assert!(text.contains("0.13") && text.contains("ab"), "{text}");
+    }
+
+    #[test]
+    fn empty_version_is_not_confirmed() {
+        let stats = crate::json::parse(r#"{"runtime_metadata":{"rayhunter_version":""}}"#).unwrap();
+        let mut r = CheckReport { items: Vec::new() };
+        assert!(
+            !report_stats(&mut r, &stats),
+            "empty version must not confirm a daemon"
+        );
+        // and no contradictory "[ok] rayhunter" line is emitted
+        assert!(!r.items.iter().any(|(_, m)| m.contains("rayhunter")));
     }
 
     #[test]
