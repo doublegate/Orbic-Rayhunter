@@ -77,7 +77,7 @@ Identical to upstream in v1.0.0. Descriptions and planned additions:
 | `test_analyzer` | `false` | `false` | `false` | alerts on every SIB1; enable only for the smoke test in [TESTING.md](TESTING.md) |
 | `diagnostic_analyzer` | `true` | `true` | `true` | informational only |
 | `no_nas_messages` | `false` | `false` | `false` | upstream default; candidate to enable once our SIM state is stable, since it detects a missing or inactive SIM |
-| `unauthenticated_nas_reject` | `false` | `false` | `false` | v1.2.0 (patch 0007, T-OR-052): flags an unauthenticated Attach/TAU/Service Reject with an identity-forcing EMM cause (#9/#10) -- the Devilray NAS-Reject IMSI-catching blind spot. Off until T-OR-061 calibrates false positives on US carriers (roaming/MVNO/congestion carry these causes legitimately) |
+| `unauthenticated_nas_reject` | `false` | `false` | `false` | v1.2.0 (patch 0007, T-OR-052): flags an Attach/TAU/Service Reject with an identity-forcing EMM cause (#9 Medium / #10 Low) -- the Devilray NAS-Reject IMSI-catching blind spot. Keys on the cause alone (does not confirm the reject was unprotected or that an IMSI re-attach followed). Off until T-OR-061 calibrates false positives: #9/#10 also occur benignly (MME restart, GUTI/MME-pool mismatch, idle-timer implicit detach). The key name is retained from the original design pending the upstream PR |
 
 ## Changing configuration
 

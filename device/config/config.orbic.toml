@@ -46,7 +46,8 @@ incomplete_sib = true
 test_analyzer = false
 diagnostic_analyzer = true
 no_nas_messages = false
-# ORX: v1.2.0 T-OR-052 (patch 0007). Unauthenticated NAS Reject (identity-forcing
-# cause #9/#10) -- the Devilray IMSI-catching blind spot. Kept OFF until T-OR-061
-# calibrates its false-positive rate on our US-carrier traffic.
+# ORX: v1.2.0 T-OR-052 (patch 0007). NAS Reject with an identity-forcing EMM
+# cause (#9/#10) -- the Devilray IMSI-catching blind spot. Keys on the cause
+# alone. Kept OFF until T-OR-061 calibrates its false-positive rate: #9/#10 also
+# occur benignly (MME restart, GUTI/pool mismatch, idle-timer implicit detach).
 unauthenticated_nas_reject = false

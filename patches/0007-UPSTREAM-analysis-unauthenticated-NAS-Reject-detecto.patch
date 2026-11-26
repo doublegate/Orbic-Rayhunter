@@ -1,4 +1,4 @@
-From d559a82224e1a8d2cf3928a001b34ade350bcb25 Mon Sep 17 00:00:00 2001
+From 80d644a5ac2d27639d4c3f7ff50333a1c085a49a Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 02:43:01 -0500
 Subject: [PATCH] [UPSTREAM] analysis: unauthenticated NAS Reject detector
@@ -31,28 +31,29 @@ and cycle-reset paths.
 Ref: Orbic-Rayhunter T-OR-052; ref-docs/lte-imsi-catcher-detection.md 3.2.
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- dist/config.toml.in            |   4 +
- lib/src/analysis/analyzer.rs   |  14 +-
+ dist/config.toml.in            |   5 +
+ lib/src/analysis/analyzer.rs   |  28 ++++-
  lib/src/analysis/mod.rs        |   1 +
- lib/src/analysis/nas_reject.rs | 283 +++++++++++++++++++++++++++++++++
+ lib/src/analysis/nas_reject.rs | 185 +++++++++++++++++++++++++++++++++
  lib/src/analysis/test_util.rs  |  10 ++
- 5 files changed, 310 insertions(+), 2 deletions(-)
+ 5 files changed, 227 insertions(+), 2 deletions(-)
  create mode 100644 lib/src/analysis/nas_reject.rs
 
 diff --git a/dist/config.toml.in b/dist/config.toml.in
-index 2dbe889..c2c959b 100644
+index 2dbe889..6f94a3b 100644
 --- a/dist/config.toml.in
 +++ b/dist/config.toml.in
-@@ -112,3 +112,7 @@ incomplete_sib = true
+@@ -112,3 +112,8 @@ incomplete_sib = true
  test_analyzer = false
  diagnostic_analyzer = true
  no_nas_messages = false
-+# Flags an unauthenticated Attach/TAU/Service Reject with an identity-forcing EMM
-+# cause (#9/#10) -- the NAS-Reject IMSI-catching path. Off by default: needs
-+# per-network false-positive calibration before enabling.
++# Flags an Attach/TAU/Service Reject with an identity-forcing EMM cause (#9/#10)
++# -- the NAS-Reject IMSI-catching path. Keys on the cause alone (does not confirm
++# the reject was unprotected or that an IMSI re-attach followed). Off by default:
++# #9/#10 also occur benignly, so this needs false-positive calibration first.
 +unauthenticated_nas_reject = false
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
-index 1cf295e..0d759cf 100644
+index 1cf295e..f14add2 100644
 --- a/lib/src/analysis/analyzer.rs
 +++ b/lib/src/analysis/analyzer.rs
 @@ -14,8 +14,9 @@ use super::{
@@ -79,9 +80,9 @@ index 1cf295e..0d759cf 100644
              incomplete_sib: true,
              test_analyzer: false,
              no_nas_messages: false,
-+            // Off by default until T-OR-061 calibrates its false-positive rate on
-+            // live US-carrier traffic (roaming/MVNO/congestion can carry these
-+            // causes legitimately).
++            // Off by default: EMM cause #9/#10 also occurs benignly (MME restart,
++            // GUTI/MME-pool mismatch, idle-timer implicit detach), so the
++            // severity needs per-network false-positive calibration before use.
 +            unauthenticated_nas_reject: false,
          }
      }
@@ -91,12 +92,33 @@ index 1cf295e..0d759cf 100644
          }
  
 +        if analyzer_config.unauthenticated_nas_reject {
-+            harness.add_analyzer(Box::new(NasRejectAnalyzer::default()))
++            harness.add_analyzer(Box::new(NasRejectAnalyzer))
 +        }
 +
          if analyzer_config.diagnostic_analyzer {
              harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
          }
+@@ -578,6 +588,20 @@ mod tests {
+     use super::*;
+     use serde_json::json;
+ 
++    #[test]
++    fn analyzer_config_missing_keys_default_off() {
++        // An existing config that predates a newer analyzer key must still
++        // deserialize (via #[serde(default)]), with the new analyzer OFF -- so an
++        // in-place config upgrade never silently enables an uncalibrated detector.
++        let config: AnalyzerConfig = serde_json::from_value(json!({})).unwrap();
++        assert!(!config.unauthenticated_nas_reject);
++        // A config that sets an existing key keeps the rest at their defaults.
++        let config: AnalyzerConfig =
++            serde_json::from_value(json!({ "imsi_requested": true })).unwrap();
++        assert!(config.imsi_requested);
++        assert!(!config.unauthenticated_nas_reject);
++    }
++
+     #[test]
+     fn test_analysis_row_deserialize_old_format() {
+         let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
 index 9a5d10f..87445a0 100644
 --- a/lib/src/analysis/mod.rs
@@ -111,26 +133,31 @@ index 9a5d10f..87445a0 100644
  pub mod priority_2g_downgrade;
 diff --git a/lib/src/analysis/nas_reject.rs b/lib/src/analysis/nas_reject.rs
 new file mode 100644
-index 0000000..e3ad753
+index 0000000..99e8bff
 --- /dev/null
 +++ b/lib/src/analysis/nas_reject.rs
-@@ -0,0 +1,283 @@
-+//! Detects an unauthenticated NAS Reject carrying an identity-forcing cause --
-+//! the "IR" (Identity Reveal) blind spot the Devilray study (Oh et al., 2026)
-+//! found in Rayhunter, which had keyed identity exposure only on an explicit
-+//! Identity Request or IMSI paging.
+@@ -0,0 +1,185 @@
++//! Flags a NAS Reject (Attach, Tracking Area Update or Service Reject) carrying
++//! EMM cause #9 "UE identity cannot be derived by the network" or #10
++//! "implicitly detached". Cause #9 tells the UE to delete its GUTI and re-attach
++//! with its IMSI; a false base station that cannot authenticate the UE (it has
++//! no access to the subscriber's home keys) uses it to force IMSI exposure. The
++//! Devilray study (Oh et al., 2026) found #9 the most reliable single-cell
++//! IMSI-catching cause across six COTS UEs, and reported that detectors keying
++//! identity exposure only on an explicit Identity Request (as the Identity
++//! Request analyzer does) miss this NAS-Reject path. #10 is the same mechanism
++//! but fires far more often benignly, so it is reported at a lower severity.
 +//!
-+//! A false base station that cannot authenticate the UE (it has no access to the
-+//! subscriber's home network keys) sends an `Attach Reject`, `Tracking Area
-+//! Update Reject` or `Service Reject` with EMM cause #9 ("UE identity cannot be
-+//! derived by the network") or #10 ("implicitly detached"). The UE then deletes
-+//! its GUTI / marks the context invalid and re-attaches with its IMSI, exposing
-+//! it. Such a reject is accepted without integrity protection before a security
-+//! context exists (TS 24.301 4.4.4.2), so a reject seen BEFORE `Security Mode
-+//! Complete` in an attach cycle is the strong signal; the same cause seen after
-+//! a security context is established is far more likely a genuine network
-+//! failure (e.g. an MME restart). See ref-docs/lte-imsi-catcher-detection.md
-+//! section 3.2.
++//! This analyzer keys on the reject cause alone. It deliberately does NOT claim
++//! the reject was integrity-unprotected, nor that an IMSI re-attach followed:
++//! the NAS security-header type is not preserved through the decrypted-NAS log
++//! this sees, and the EPS mobile identity in a following Attach Request is not
++//! decoded by the NAS parser (its generated identity struct is empty). So a
++//! genuine but uncommon #9/#10 -- an MME restart, a GUTI/MME-pool mismatch, or
++//! an idle-timer implicit detach -- is a false positive. It is therefore off by
++//! default and its severity is calibrated against live traffic before use.
++//! Confirming the unprotected-and-followed-by-IMSI case is future work that
++//! needs those two parser capabilities.
 +
 +use std::borrow::Cow;
 +
@@ -141,85 +168,56 @@ index 0000000..e3ad753
 +use pycrate_rs::nas::generated::emm::emm_service_reject::EMMCauseEMMCause as ServiceRejectCause;
 +use pycrate_rs::nas::generated::emm::emm_tracking_area_update_reject::EMMCauseEMMCause as TauRejectCause;
 +
-+use telcom_parser::lte_rrc::{
-+    DL_DCCH_MessageType, DL_DCCH_MessageType_c1, UL_CCCH_MessageType, UL_CCCH_MessageType_c1,
-+};
-+
 +use super::analyzer::{Analyzer, Event, EventType};
 +use super::information_element::{InformationElement, LteInformationElement};
 +
-+/// The EMM causes this detector treats as identity-forcing: #9 (the network
-+/// claims it cannot identify the UE) and #10 (implicitly detached). Devilray
-+/// found #9 the most reliable single-cell IMSI-catching cause across six COTS
-+/// UEs from three baseband vendors. Other reject causes are intentionally NOT
-+/// flagged here: #8 is a genuine unprovisioned-SIM reject (upstream already
-+/// special-cases it), #11/#13/#15 fire on legitimate roaming/MVNO restrictions,
-+/// #22 during real congestion, and #42 on genuine failures -- all high
-+/// false-positive, and already surfaced informationally by the diagnostic
-+/// analyzer. Keeping this detector to #9/#10 keeps it precise.
-+macro_rules! is_identity_forcing {
++/// Classify one reject's EMM cause into (severity, human-readable cause), or
++/// `None` for a cause this detector does not flag. #9 is the active
++/// identity-forcing cause (Medium); #10 is the same mechanism but much more
++/// often benign (Low). All other causes are left to the diagnostic analyzer.
++/// The three reject messages each have their own generated cause enum with
++/// identical variant names, so one macro serves all three.
++macro_rules! classify_cause {
 +    ($cause:expr, $enum:ident) => {
-+        matches!(
-+            $cause,
-+            $enum::UEIdentityCannotBeDerivedByTheNetwork | $enum::ImplicitlyDetached
-+        )
++        match $cause {
++            $enum::UEIdentityCannotBeDerivedByTheNetwork => Some((
++                EventType::Medium,
++                "#9 (UE identity cannot be derived by the network)",
++            )),
++            $enum::ImplicitlyDetached => Some((EventType::Low, "#10 (implicitly detached)")),
++            _ => None,
++        }
 +    };
 +}
 +
-+#[derive(Default)]
-+pub struct NasRejectAnalyzer {
-+    /// Whether a security context was established (a `Security Mode Complete` was
-+    /// seen) in the current RRC connection / attach cycle. It is reset at every
-+    /// connection or procedure boundary (RRC connection setup or release -- which
-+    /// also covers a cell change, since a new cell means a new connection -- and
-+    /// each UE-initiated NAS request), so a stale "secured" from an earlier
-+    /// connection can never suppress detection in a later one (fail closed, i.e.
-+    /// toward flagging). A reject before it is the integrity-unprotected,
-+    /// forgeable reject an FBS uses.
-+    secured_this_cycle: bool,
-+}
++pub struct NasRejectAnalyzer;
 +
 +impl NasRejectAnalyzer {
-+    /// Emit the event for an identity-forcing reject, then end the cycle: after a
-+    /// reject the UE re-attaches fresh, so a subsequent reject is unprotected
-+    /// again until the next `Security Mode Complete`.
-+    fn flag(&mut self, reject: &str) -> Option<Event> {
-+        let event = if self.secured_this_cycle {
-+            Event {
-+                event_type: EventType::Low,
-+                message: format!(
-+                    "{reject} with an identity-forcing EMM cause (#9/#10) after a security context \
-+                     was established -- most likely a genuine network failure (e.g. MME restart), \
-+                     but noted because the cause forces IMSI re-exposure."
-+                ),
-+            }
-+        } else {
-+            Event {
-+                event_type: EventType::High,
-+                message: format!(
-+                    "Unauthenticated {reject} with an identity-forcing EMM cause (#9 'UE identity \
-+                     cannot be derived by the network' / #10 'implicitly detached'), received before \
-+                     any security context. An integrity-unprotected reject that makes the UE delete \
-+                     its GUTI and re-attach with its IMSI is a known false-base-station \
-+                     identity-exposure technique (Devilray)."
-+                ),
-+            }
-+        };
-+        self.secured_this_cycle = false;
-+        Some(event)
++    fn event(reject: &str, classification: Option<(EventType, &str)>) -> Option<Event> {
++        let (severity, cause) = classification?;
++        Some(Event {
++            event_type: severity,
++            message: format!(
++                "{reject} with EMM cause {cause}. This cause makes the UE delete its GUTI and \
++                 re-attach with its IMSI; a false base station that cannot authenticate the UE uses \
++                 it to force IMSI exposure (Devilray). Benign causes exist (MME restart, GUTI/pool \
++                 mismatch, idle-timer implicit detach), so corroborate before acting."
++            ),
++        })
 +    }
 +}
 +
 +impl Analyzer for NasRejectAnalyzer {
 +    fn get_name(&self) -> Cow<'_, str> {
-+        Cow::from("Unauthenticated NAS Reject (identity-forcing)")
++        Cow::from("NAS Reject with identity-forcing cause")
 +    }
 +
 +    fn get_description(&self) -> Cow<'_, str> {
 +        Cow::from(
-+            "Flags an Attach/TAU/Service Reject carrying an identity-forcing EMM cause (#9 or #10) \
-+             received before a security context is established -- the NAS-Reject IMSI-catching path \
-+             (Devilray's identity-reveal blind spot) that the Identity-Request analyzer misses.",
++            "Flags an Attach/TAU/Service Reject carrying EMM cause #9 ('UE identity cannot be \
++             derived') or #10 ('implicitly detached') -- the NAS-Reject IMSI-catching path (the \
++             identity-reveal blind spot the Identity-Request analyzer misses). Keys on the cause \
++             alone; does not confirm the reject was unprotected or that an IMSI re-attach followed.",
 +        )
 +    }
 +
@@ -236,63 +234,22 @@ index 0000000..e3ad753
 +        let InformationElement::LTE(lte) = ie else {
 +            return None;
 +        };
-+
-+        match lte.as_ref() {
-+            // A new RRC connection (also a new cell) or its release ends the
-+            // window in which an earlier Security Mode Complete applies.
-+            LteInformationElement::UlCcch(rrc)
-+                if matches!(
-+                    rrc.message,
-+                    UL_CCCH_MessageType::C1(
-+                        UL_CCCH_MessageType_c1::RrcConnectionRequest(_)
-+                            | UL_CCCH_MessageType_c1::RrcConnectionReestablishmentRequest(_)
-+                    )
-+                ) =>
-+            {
-+                self.secured_this_cycle = false;
-+                None
-+            }
-+            LteInformationElement::DlDcch(rrc)
-+                if matches!(
-+                    rrc.message,
-+                    DL_DCCH_MessageType::C1(DL_DCCH_MessageType_c1::RrcConnectionRelease(_))
-+                ) =>
-+            {
-+                self.secured_this_cycle = false;
-+                None
-+            }
-+
-+            // A fresh UE-initiated NAS procedure: no security context yet.
-+            LteInformationElement::NAS(NASMessage::EMMMessage(
-+                EMMMessage::EMMAttachRequest(_)
-+                | EMMMessage::EMMTrackingAreaUpdateRequest(_)
-+                | EMMMessage::EMMExtServiceRequest(_),
-+            )) => {
-+                self.secured_this_cycle = false;
-+                None
-+            }
-+            // Security context established for this cycle.
-+            LteInformationElement::NAS(NASMessage::EMMMessage(
-+                EMMMessage::EMMSecurityModeComplete(_),
-+            )) => {
-+                self.secured_this_cycle = true;
-+                None
-+            }
-+            LteInformationElement::NAS(NASMessage::EMMMessage(EMMMessage::EMMAttachReject(r)))
-+                if is_identity_forcing!(&r.emm_cause.inner, AttachRejectCause) =>
-+            {
-+                self.flag("Attach Reject")
-+            }
-+            LteInformationElement::NAS(NASMessage::EMMMessage(
-+                EMMMessage::EMMTrackingAreaUpdateReject(r),
-+            )) if is_identity_forcing!(&r.emm_cause.inner, TauRejectCause) => {
-+                self.flag("Tracking Area Update Reject")
-+            }
-+            LteInformationElement::NAS(NASMessage::EMMMessage(EMMMessage::EMMServiceReject(r)))
-+                if is_identity_forcing!(&r.emm_cause.inner, ServiceRejectCause) =>
-+            {
-+                self.flag("Service Reject")
-+            }
++        let LteInformationElement::NAS(NASMessage::EMMMessage(emm)) = lte.as_ref() else {
++            return None;
++        };
++        match emm {
++            EMMMessage::EMMAttachReject(r) => Self::event(
++                "Attach Reject",
++                classify_cause!(&r.emm_cause.inner, AttachRejectCause),
++            ),
++            EMMMessage::EMMTrackingAreaUpdateReject(r) => Self::event(
++                "Tracking Area Update Reject",
++                classify_cause!(&r.emm_cause.inner, TauRejectCause),
++            ),
++            EMMMessage::EMMServiceReject(r) => Self::event(
++                "Service Reject",
++                classify_cause!(&r.emm_cause.inner, ServiceRejectCause),
++            ),
 +            _ => None,
 +        }
 +    }
@@ -307,95 +264,62 @@ index 0000000..e3ad753
 +    const ATTACH_REJECT: u8 = 68;
 +    const TAU_REJECT: u8 = 75;
 +    const SERVICE_REJECT: u8 = 78;
-+    const SECURITY_MODE_COMPLETE: u8 = 94;
 +    // EMM cause values.
 +    const CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED: u8 = 9;
 +    const CAUSE_IMPLICITLY_DETACHED: u8 = 10;
 +    const CAUSE_CONGESTION: u8 = 22;
 +
-+    #[test]
-+    fn unauthenticated_identity_forcing_reject_is_high() {
-+        let mut analyzer = NasRejectAnalyzer::default();
-+        let events = collect_events(
++    fn one(message_type: u8, cause: u8) -> Vec<(usize, Event)> {
++        let mut analyzer = NasRejectAnalyzer;
++        collect_events(
 +            &mut analyzer,
-+            &[(
-+                emm_message(ATTACH_REJECT, &[CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED]),
-+                packet_time(0),
-+            )],
-+        );
-+        assert_eq!(events.len(), 1);
-+        assert_eq!(events[0].0, 0);
-+        assert_eq!(events[0].1.event_type, EventType::High);
++            &[(emm_message(message_type, &[cause]), packet_time(0))],
++        )
 +    }
 +
 +    #[test]
-+    fn reject_after_security_mode_complete_is_low() {
-+        let mut analyzer = NasRejectAnalyzer::default();
-+        let events = collect_events(
-+            &mut analyzer,
-+            &[
-+                (emm_message(SECURITY_MODE_COMPLETE, &[]), packet_time(0)),
-+                (
-+                    emm_message(ATTACH_REJECT, &[CAUSE_IMPLICITLY_DETACHED]),
-+                    packet_time(1),
-+                ),
-+            ],
-+        );
++    fn cause_9_is_medium() {
++        let events = one(ATTACH_REJECT, CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED);
 +        assert_eq!(events.len(), 1);
-+        assert_eq!(events[0].0, 1);
++        assert_eq!(events[0].1.event_type, EventType::Medium);
++    }
++
++    #[test]
++    fn cause_10_is_low() {
++        let events = one(ATTACH_REJECT, CAUSE_IMPLICITLY_DETACHED);
++        assert_eq!(events.len(), 1);
 +        assert_eq!(events[0].1.event_type, EventType::Low);
 +    }
 +
 +    #[test]
-+    fn non_identity_forcing_cause_is_ignored() {
-+        let mut analyzer = NasRejectAnalyzer::default();
-+        let events = collect_events(
-+            &mut analyzer,
-+            &[(
-+                emm_message(ATTACH_REJECT, &[CAUSE_CONGESTION]),
-+                packet_time(0),
-+            )],
-+        );
-+        assert!(events.is_empty());
++    fn other_causes_are_ignored() {
++        assert!(one(ATTACH_REJECT, CAUSE_CONGESTION).is_empty());
 +    }
 +
 +    #[test]
 +    fn tau_and_service_rejects_are_covered() {
 +        for message_type in [TAU_REJECT, SERVICE_REJECT] {
-+            let mut analyzer = NasRejectAnalyzer::default();
-+            let events = collect_events(
-+                &mut analyzer,
-+                &[(
-+                    emm_message(message_type, &[CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED]),
-+                    packet_time(0),
-+                )],
-+            );
++            let events = one(message_type, CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED);
 +            assert_eq!(events.len(), 1, "message type {message_type}");
-+            assert_eq!(events[0].1.event_type, EventType::High);
++            assert_eq!(events[0].1.event_type, EventType::Medium);
 +        }
 +    }
 +
 +    #[test]
-+    fn a_reject_ends_the_cycle_so_the_next_is_unprotected_again() {
-+        let mut analyzer = NasRejectAnalyzer::default();
-+        let events = collect_events(
-+            &mut analyzer,
-+            &[
-+                (emm_message(SECURITY_MODE_COMPLETE, &[]), packet_time(0)),
-+                (
-+                    emm_message(ATTACH_REJECT, &[CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED]),
-+                    packet_time(1),
-+                ),
-+                (
-+                    emm_message(ATTACH_REJECT, &[CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED]),
-+                    packet_time(2),
-+                ),
-+            ],
++    fn the_matched_cause_is_named_in_the_message() {
++        // Alerts must be actionable: #9 and #10 produce distinct messages.
++        assert!(
++            one(ATTACH_REJECT, CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED)[0]
++                .1
++                .message
++                .contains("#9")
 +        );
-+        assert_eq!(events.len(), 2);
-+        // First reject: protected (Low). Second: fresh cycle, unprotected (High).
-+        assert_eq!(events[0].1.event_type, EventType::Low);
-+        assert_eq!(events[1].1.event_type, EventType::High);
++        assert!(
++            one(ATTACH_REJECT, CAUSE_IMPLICITLY_DETACHED)[0]
++                .1
++                .message
++                .contains("#10")
++        );
 +    }
 +}
 diff --git a/lib/src/analysis/test_util.rs b/lib/src/analysis/test_util.rs
