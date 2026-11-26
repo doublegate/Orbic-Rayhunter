@@ -1,0 +1,555 @@
+From e506f5606a0e348ab52bd1edd29ff73112f2e6c3 Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Wed, 25 Nov 2026 23:33:30 -0500
+Subject: [PATCH] [UPSTREAM] notifications: Gotify sink
+
+Add an optional Gotify sink: when `gotify_url` is set, each notification is
+POSTed to `<gotify_url>/message` as Gotify JSON {title, message, priority}
+with the application token in the `X-Gotify-Key` header, independently of the
+other sinks. Priority is derived from the notification type (Warning 8,
+LowBattery 5, Update 2).
+
+`gotify_token` is a secret: redacted from `GET /api/config` and preserved
+across a config write that omits it, dropped if `gotify_url` changes (the same
+unauthenticated-API protection as ntfy_auth). The `resolve_ntfy_auth` helper
+is generalized to `resolve_endpoint_secret` and reused for both.
+
+Tests: Gotify JSON body, priority and X-Gotify-Key header; gotify_token
+redaction.
+
+Ref: Orbic-Rayhunter T-OR-049.
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ daemon/src/config.rs               |   9 +++
+ daemon/src/main.rs                 |   8 +-
+ daemon/src/notifications.rs        | 119 +++++++++++++++++++++++++----
+ daemon/src/server.rs               |  43 +++++++----
+ daemon/web/src/lib/utils.svelte.ts |   2 +
+ dist/config.toml.in                |   6 ++
+ 6 files changed, 157 insertions(+), 30 deletions(-)
+
+diff --git a/daemon/src/config.rs b/daemon/src/config.rs
+index 0f7eda3..3ea7a89 100644
+--- a/daemon/src/config.rs
++++ b/daemon/src/config.rs
+@@ -89,6 +89,13 @@ pub struct Config {
+     /// here as a JSON body (type, message, timestamp; no subscriber
+     /// identifiers), independently of `ntfy_url`.
+     pub webhook_url: Option<String>,
++    /// Optional Gotify server base URL. When set, each notification is POSTed to
++    /// `<gotify_url>/message` as Gotify JSON (title, message, priority).
++    pub gotify_url: Option<String>,
++    /// Gotify application token, sent as the `X-Gotify-Key` header. Secret:
++    /// redacted from `GET /api/config` and preserved across a config write that
++    /// omits it (dropped if `gotify_url` changes).
++    pub gotify_token: Option<String>,
+     /// Vector containing the types of enabled notifications
+     pub enabled_notifications: Vec<NotificationType>,
+     /// Whether Rayhunter should periodically check GitHub for new releases
+@@ -171,6 +178,8 @@ impl Default for Config {
+             ntfy_headers: false,
+             ntfy_auth: None,
+             webhook_url: None,
++            gotify_url: None,
++            gotify_token: None,
+             enabled_notifications: vec![NotificationType::Warning, NotificationType::LowBattery],
+             auto_check_updates: true,
+             clock_sync_mode: ClockSyncMode::Prompt,
+diff --git a/daemon/src/main.rs b/daemon/src/main.rs
+index 478df7b..b43ddbe 100644
+--- a/daemon/src/main.rs
++++ b/daemon/src/main.rs
+@@ -220,8 +220,11 @@ async fn run_with_config(
+     // signaled to stop.
+     let _shutdown_guard = shutdown_token.clone().drop_guard();
+ 
+-    let notification_service =
+-        NotificationService::new(config.ntfy_url.clone(), config.webhook_url.clone());
++    let notification_service = NotificationService::new(
++        config.ntfy_url.clone(),
++        config.webhook_url.clone(),
++        config.gotify_url.clone(),
++    );
+     let update_status_lock = Arc::new(RwLock::new(UpdateStatus::default()));
+ 
+     if !config.debug_mode {
+@@ -310,6 +313,7 @@ async fn run_with_config(
+         config.enabled_notifications.clone(),
+         config.ntfy_headers,
+         config.ntfy_auth.clone(),
++        config.gotify_token.clone(),
+     );
+ 
+     let wifi_status = Arc::new(RwLock::new(WifiStatus::default()));
+diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
+index 0029d55..387c47d 100644
+--- a/daemon/src/notifications.rs
++++ b/daemon/src/notifications.rs
+@@ -65,22 +65,31 @@ enum SinkKind {
+     Ntfy,
+     /// Generic webhook: a JSON body, no identifiers.
+     Webhook,
++    /// Gotify: JSON {title, message, priority} to `<url>/message` with an
++    /// `X-Gotify-Key` application-token header.
++    Gotify,
+ }
+ 
+ pub struct NotificationService {
+     url: Option<String>,
+     webhook_url: Option<String>,
++    gotify_url: Option<String>,
+     timeout: u64,
+     tx: mpsc::Sender<Notification>,
+     rx: mpsc::Receiver<Notification>,
+ }
+ 
+ impl NotificationService {
+-    pub fn new(url: Option<String>, webhook_url: Option<String>) -> Self {
++    pub fn new(
++        url: Option<String>,
++        webhook_url: Option<String>,
++        gotify_url: Option<String>,
++    ) -> Self {
+         let (tx, rx) = mpsc::channel(10);
+         Self {
+             url,
+             webhook_url,
++            gotify_url,
+             timeout: DEFAULT_NOTIFICATION_TIMEOUT,
+             tx,
+             rx,
+@@ -110,6 +119,17 @@ fn webhook_body(notification_type: &NotificationType, message: &str) -> String {
+     .to_string()
+ }
+ 
++/// Gotify message payload (title, message, priority 0-10) for a notification
++/// type. See <https://gotify.net/api-docs#/message/createMessage>.
++fn gotify_body(notification_type: &NotificationType, message: &str) -> String {
++    let (title, priority) = match notification_type {
++        NotificationType::Warning => ("Rayhunter alert", 8),
++        NotificationType::LowBattery => ("Rayhunter: low battery", 5),
++        NotificationType::Update => ("Rayhunter: update available", 2),
++    };
++    serde_json::json!({ "title": title, "message": message, "priority": priority }).to_string()
++}
++
+ /// ntfy presentation headers (Title, Priority, Tags) derived from a
+ /// notification type, so an ntfy client renders a titled, prioritized,
+ /// tagged notification instead of a bare line. A generic webhook receiver
+@@ -161,6 +181,7 @@ pub fn run_notification_worker(
+     enabled_notifications: Vec<NotificationType>,
+     ntfy_headers: bool,
+     ntfy_auth: Option<String>,
++    gotify_token: Option<String>,
+ ) {
+     task_tracker.spawn(async move {
+         // Collect the configured sinks (ntfy and/or a generic webhook).
+@@ -175,6 +196,11 @@ pub fn run_notification_worker(
+         {
+             sink_urls.insert(SinkKind::Webhook, url);
+         }
++        if let Some(url) = notification_service.gotify_url.take()
++            && !url.is_empty()
++        {
++            sink_urls.insert(SinkKind::Gotify, url);
++        }
+ 
+         // With no destination configured, drain and discard notifications.
+         if sink_urls.is_empty() {
+@@ -244,11 +270,12 @@ pub fn run_notification_worker(
+                     }
+                 }
+ 
+-                let url = &sink_urls[sink];
++                let base_url = &sink_urls[sink];
+                 let presentation = ntfy_headers_for(notification_type);
++                let gotify_endpoint;
+                 let body;
+                 let mut headers: Vec<(&str, &str)> = Vec::new();
+-                match sink {
++                let post_url: &str = match sink {
+                     SinkKind::Ntfy => {
+                         body = status.message.clone();
+                         if let Some(auth) = &ntfy_auth {
+@@ -259,16 +286,27 @@ pub fn run_notification_worker(
+                                 headers.push((name, value));
+                             }
+                         }
++                        base_url
+                     }
+                     SinkKind::Webhook => {
+                         body = webhook_body(notification_type, &status.message);
+                         headers.push(("Content-Type", "application/json"));
++                        base_url
+                     }
+-                }
++                    SinkKind::Gotify => {
++                        body = gotify_body(notification_type, &status.message);
++                        headers.push(("Content-Type", "application/json"));
++                        if let Some(token) = &gotify_token {
++                            headers.push(("X-Gotify-Key", token.as_str()));
++                        }
++                        gotify_endpoint = format!("{}/message", base_url.trim_end_matches('/'));
++                        &gotify_endpoint
++                    }
++                };
+ 
+                 match send_notification(
+                     &http_client,
+-                    url,
++                    post_url,
+                     body,
+                     notification_service.timeout,
+                     &headers,
+@@ -335,6 +373,8 @@ mod tests {
+ 
+         let app = Router::new()
+             .route("/", post(capture_notification))
++            // Gotify posts to `<base>/message`.
++            .route("/message", post(capture_notification))
+             .with_state(test_state);
+ 
+         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+@@ -403,7 +443,7 @@ mod tests {
+         let (received_messages, received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url), None);
++        let notification_service = NotificationService::new(Some(url), None, None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -412,6 +452,7 @@ mod tests {
+             vec![NotificationType::Warning],
+             false,
+             None,
++            None,
+         );
+ 
+         notification_sender
+@@ -447,7 +488,7 @@ mod tests {
+         let (received_messages, received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url), None);
++        let notification_service = NotificationService::new(Some(url), None, None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -456,6 +497,7 @@ mod tests {
+             vec![NotificationType::Warning],
+             true, // ntfy_headers enabled
+             None,
++            None,
+         );
+ 
+         notification_sender
+@@ -489,7 +531,7 @@ mod tests {
+         let (received_messages, received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url), None);
++        let notification_service = NotificationService::new(Some(url), None, None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -498,6 +540,7 @@ mod tests {
+             vec![NotificationType::Warning],
+             false,
+             Some("Bearer tk_secret".to_string()),
++            None,
+         );
+ 
+         notification_sender
+@@ -530,7 +573,7 @@ mod tests {
+         let (received_messages, received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(None, Some(url));
++        let notification_service = NotificationService::new(None, Some(url), None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -539,6 +582,7 @@ mod tests {
+             vec![NotificationType::Warning],
+             false,
+             None,
++            None,
+         );
+ 
+         notification_sender
+@@ -574,7 +618,8 @@ mod tests {
+         let (webhook_messages, _webhook_headers, webhook_url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(ntfy_url), Some(webhook_url));
++        let notification_service =
++            NotificationService::new(Some(ntfy_url), Some(webhook_url), None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -583,6 +628,7 @@ mod tests {
+             vec![NotificationType::Warning],
+             false,
+             None,
++            None,
+         );
+ 
+         notification_sender
+@@ -610,12 +656,56 @@ mod tests {
+         cleanup_worker(notification_sender, task_tracker).await;
+     }
+ 
++    #[tokio::test]
++    async fn test_notification_worker_sends_gotify() {
++        let (received_messages, received_headers, url) = setup_test_server().await;
++
++        let task_tracker = TaskTracker::new();
++        let notification_service = NotificationService::new(None, None, Some(url));
++        let notification_sender = notification_service.new_handler();
++
++        run_notification_worker(
++            &task_tracker,
++            notification_service,
++            vec![NotificationType::Warning],
++            false,
++            None,
++            Some("gotify-app-token".to_string()),
++        );
++
++        notification_sender
++            .send(Notification::new(
++                NotificationType::Warning,
++                "gotify msg".to_string(),
++                None,
++            ))
++            .await
++            .unwrap();
++
++        tokio::time::sleep(Duration::from_secs(3)).await;
++
++        // Gotify JSON {title, message, priority} delivered to /message.
++        let messages = received_messages.lock().await;
++        assert_eq!(messages.len(), 1);
++        let v: serde_json::Value = serde_json::from_str(&messages[0]).unwrap();
++        assert_eq!(v["title"], "Rayhunter alert");
++        assert_eq!(v["message"], "gotify msg");
++        assert_eq!(v["priority"], 8);
++        drop(messages);
++
++        let headers = received_headers.lock().await;
++        assert_eq!(headers[0].get("x-gotify-key").unwrap(), "gotify-app-token");
++        drop(headers);
++
++        cleanup_worker(notification_sender, task_tracker).await;
++    }
++
+     #[tokio::test]
+     async fn test_notification_worker_filters_disabled_types() {
+         let (received_messages, _received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url), None);
++        let notification_service = NotificationService::new(Some(url), None, None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -624,6 +714,7 @@ mod tests {
+             vec![NotificationType::Warning],
+             false,
+             None,
++            None,
+         );
+ 
+         notification_sender
+@@ -659,7 +750,7 @@ mod tests {
+         let (received_messages, _received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url), None);
++        let notification_service = NotificationService::new(Some(url), None, None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -668,6 +759,7 @@ mod tests {
+             vec![NotificationType::Warning, NotificationType::LowBattery],
+             false,
+             None,
++            None,
+         );
+ 
+         notification_sender
+@@ -703,7 +795,7 @@ mod tests {
+     #[tokio::test]
+     async fn test_notification_worker_with_no_url() {
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(None, None);
++        let notification_service = NotificationService::new(None, None, None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -712,6 +804,7 @@ mod tests {
+             vec![NotificationType::Warning],
+             false,
+             None,
++            None,
+         );
+ 
+         notification_sender
+diff --git a/daemon/src/server.rs b/daemon/src/server.rs
+index 843009d..9185bd8 100644
+--- a/daemon/src/server.rs
++++ b/daemon/src/server.rs
+@@ -151,6 +151,7 @@ pub async fn get_config(
+     let mut config = state.config.clone();
+     config.wifi_password = None;
+     config.ntfy_auth = None;
++    config.gotify_token = None;
+     // A webhook URL can embed a credential (e.g. a Slack/Discord token in the
+     // path), so treat it as a secret too.
+     config.webhook_url = None;
+@@ -168,25 +169,26 @@ fn resolve_secret(incoming: Option<String>, stored: Option<&str>) -> Option<Stri
+     }
+ }
+ 
+-/// Resolve the `ntfy_auth` secret to persist on a config write.
++/// Resolve a per-endpoint secret (e.g. `ntfy_auth` for `ntfy_url`, `gotify_token`
++/// for `gotify_url`) to persist on a config write.
+ ///
+-/// `ntfy_auth` is redacted from `GET /api/config`, so a client that round-trips
++/// The secret is redacted from `GET /api/config`, so a client that round-trips
+ /// the config sends `None` ("unchanged"). The config API is unauthenticated, so
+-/// the stored secret is preserved ONLY when `ntfy_url` is also unchanged -- a
+-/// write that repoints `ntfy_url` must not carry the stored credential to a new
++/// the stored secret is preserved ONLY when its endpoint URL is also unchanged --
++/// a write that repoints the URL must not carry the stored credential to a new
+ /// (possibly attacker-chosen) endpoint, so the credential is dropped and must be
+ /// re-supplied. An explicit empty string clears it; any other value is used.
+-fn resolve_ntfy_auth(
+-    incoming_auth: Option<String>,
++fn resolve_endpoint_secret(
++    incoming_secret: Option<String>,
+     incoming_url: Option<&str>,
+-    stored_auth: Option<&str>,
++    stored_secret: Option<&str>,
+     stored_url: Option<&str>,
+ ) -> Option<String> {
+-    match incoming_auth.as_deref() {
+-        None if incoming_url == stored_url => stored_auth.map(str::to_string),
++    match incoming_secret.as_deref() {
++        None if incoming_url == stored_url => stored_secret.map(str::to_string),
+         None => None,
+         Some("") => None,
+-        Some(_) => incoming_auth,
++        Some(_) => incoming_secret,
+     }
+ }
+ 
+@@ -214,12 +216,18 @@ pub async fn set_config(
+         config.gps_fixed_latitude = None;
+         config.gps_fixed_longitude = None;
+     }
+-    config.ntfy_auth = resolve_ntfy_auth(
++    config.ntfy_auth = resolve_endpoint_secret(
+         config.ntfy_auth.clone(),
+         config.ntfy_url.as_deref(),
+         state.config.ntfy_auth.as_deref(),
+         state.config.ntfy_url.as_deref(),
+     );
++    config.gotify_token = resolve_endpoint_secret(
++        config.gotify_token.clone(),
++        config.gotify_url.as_deref(),
++        state.config.gotify_token.as_deref(),
++        state.config.gotify_url.as_deref(),
++    );
+     // webhook_url is redacted from GET (it may embed a credential), so a
+     // round-trip that omits it must keep the stored value.
+     config.webhook_url = resolve_secret(
+@@ -702,6 +710,7 @@ mod tests {
+         let config = Config {
+             ntfy_auth: Some("Bearer tk_secret".to_string()),
+             webhook_url: Some("https://hooks.example/T/B/secret".to_string()),
++            gotify_token: Some("A-app-token".to_string()),
+             ..Config::default()
+         };
+         let state = create_test_server_state_with_config(store_lock, config);
+@@ -715,6 +724,10 @@ mod tests {
+             returned.webhook_url, None,
+             "webhook_url may embed a credential and must be redacted"
+         );
++        assert_eq!(
++            returned.gotify_token, None,
++            "gotify_token must be redacted from GET /api/config"
++        );
+     }
+ 
+     #[test]
+@@ -734,7 +747,7 @@ mod tests {
+     fn resolve_ntfy_auth_preserves_on_unchanged_url() {
+         let url = Some("https://ntfy.sh/t");
+         assert_eq!(
+-            resolve_ntfy_auth(None, url, Some("Bearer x"), url),
++            resolve_endpoint_secret(None, url, Some("Bearer x"), url),
+             Some("Bearer x".to_string())
+         );
+     }
+@@ -744,7 +757,7 @@ mod tests {
+         // The config API is unauthenticated: a write that repoints ntfy_url must
+         // NOT carry the stored credential to the new endpoint.
+         assert_eq!(
+-            resolve_ntfy_auth(
++            resolve_endpoint_secret(
+                 None,
+                 Some("https://evil.example/t"),
+                 Some("Bearer x"),
+@@ -758,7 +771,7 @@ mod tests {
+     fn resolve_ntfy_auth_empty_string_clears() {
+         let url = Some("https://ntfy.sh/t");
+         assert_eq!(
+-            resolve_ntfy_auth(Some(String::new()), url, Some("Bearer x"), url),
++            resolve_endpoint_secret(Some(String::new()), url, Some("Bearer x"), url),
+             None
+         );
+     }
+@@ -767,7 +780,7 @@ mod tests {
+     fn resolve_ntfy_auth_new_value_is_used() {
+         let url = Some("https://ntfy.sh/t");
+         assert_eq!(
+-            resolve_ntfy_auth(Some("Bearer new".to_string()), url, Some("Bearer old"), url),
++            resolve_endpoint_secret(Some("Bearer new".to_string()), url, Some("Bearer old"), url),
+             Some("Bearer new".to_string())
+         );
+     }
+diff --git a/daemon/web/src/lib/utils.svelte.ts b/daemon/web/src/lib/utils.svelte.ts
+index c808139..b6d2c76 100644
+--- a/daemon/web/src/lib/utils.svelte.ts
++++ b/daemon/web/src/lib/utils.svelte.ts
+@@ -62,6 +62,8 @@ export interface Config {
+     ntfy_headers: boolean;
+     ntfy_auth: string | null;
+     webhook_url: string | null;
++    gotify_url: string | null;
++    gotify_token: string | null;
+     enabled_notifications: enabled_notifications[];
+     auto_check_updates: boolean;
+     clock_sync_mode: ClockSyncMode;
+diff --git a/dist/config.toml.in b/dist/config.toml.in
+index 02c9dd7..dc45382 100644
+--- a/dist/config.toml.in
++++ b/dist/config.toml.in
+@@ -37,6 +37,12 @@ key_input_mode = 0
+ # independently of ntfy_url. Treated as a secret (it may embed a token): redacted
+ # from GET /api/config.
+ # webhook_url = "https://example.com/hooks/rayhunter"
++# Optional Gotify server. When gotify_url is set, each notification is POSTed to
++# <gotify_url>/message as Gotify JSON {title, message, priority} with the
++# application token in the X-Gotify-Key header. gotify_token is a secret: redacted
++# from GET /api/config.
++# gotify_url = "https://gotify.example.com"
++# gotify_token = "A-your-app-token"
+ # What notification types to enable. Does nothing if the above ntfy_url is not set.
+ enabled_notifications = ["Warning", "LowBattery"]
+ 
+-- 
+2.56.1
+
