@@ -45,6 +45,16 @@ These are `patches/0001-0005` on the pinned upstream v0.13.0 daemon, validated o
 check + tests). MQTT (T-OR-048) and a
 persistent retry queue (T-OR-050) are deferred. On-device validation is batched with the analyzers phase.
 
+### Added (toward v1.2.0 — analyzer phase)
+
+- **Analyzer test harness** (T-OR-051, `[UPSTREAM]` patch 0006): shared `#[cfg(test)]` helpers in
+  `lib/src/analysis/test_util` — `packet_time` (deterministic timestamps), `nas_plain` (build a plain
+  LTE NAS `InformationElement` from a raw payload), and `collect_events` (run an analyzer over a
+  sequence and gather its `Event`s for a golden comparison) — the foundation the detectors
+  (T-OR-052+) build on. The per-detector named vector builders grow with each analyzer, and the
+  capture scrubber (sanitizing a real QMDL for committed vectors) is deferred until on-device captures
+  exist (T-OR-061). Validated on `cargo test -p rayhunter` (lib).
+
 ## [1.1.1] - 2026-11-25
 
 ### Added

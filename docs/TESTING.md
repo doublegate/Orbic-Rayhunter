@@ -47,10 +47,17 @@ A golden vector is a DIAG input plus the expected analyzer output. Policy:
 
 1. **Synthetic first.** Build vectors from hand-constructed RRC/NAS messages encoded the way the
    analyzer receives them. Synthetic vectors contain no real identifiers and need no scrubbing.
-   The harness is T-OR-051.
+   The harness is T-OR-051 (`[UPSTREAM]` patch 0006, the `#[cfg(test)] analysis::test_util` module):
+   `nas_plain(payload)` builds a plain LTE NAS `InformationElement`, `packet_time(secs)` gives
+   deterministic timestamps, and `collect_events(analyzer, &[(ie, ts)])` runs an analyzer over a
+   sequence and returns `(packet_index, Event)` pairs for an inline golden comparison (the index lets
+   a test assert which packet fired, for stateful multi-packet detectors). Per-detector named vector
+   builders are added to `test_util` as each analyzer lands; the capture scrubber (step 3) is
+   deferred until on-device captures exist (T-OR-061).
 2. **Location.** Vectors that test upstream analyzers live inside the `[UPSTREAM]` patch, following
-   upstream's own test layout (to be confirmed against `lib/` when T-OR-051 is authored), so the
-   tests travel with the PR. Vectors for `[LOCAL]` behavior live in the corresponding patch.
+   upstream's own test layout (`#[cfg(test)]` modules beside each analyzer, shared helpers in
+   `analysis::test_util`), so the tests travel with the PR. Vectors for `[LOCAL]` behavior live in
+   the corresponding patch.
 3. **Real captures only scrubbed.** A real QMDL is used as a vector only after scrubbing and review:
    - replace IMSI, IMEI/IMEISV, GUTI/S-TMSI and other subscribers' S-TMSIs in paging with fixed
      dummy values of the same length and encoding;
