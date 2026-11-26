@@ -1,0 +1,366 @@
+From 55a46aa4d3848a5c379121533807bb394fb9e9fb Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Wed, 25 Nov 2026 23:11:33 -0500
+Subject: [PATCH] [UPSTREAM] notifications: optional Authorization header for
+ ntfy
+
+Add an optional `ntfy_auth` config value sent as the `Authorization` header
+on each ntfy request, for a protected ntfy topic or a reverse-proxied
+endpoint (e.g. "Bearer tk_..." or "Basic <base64>"). Unset by default, so
+nothing changes for an unauthenticated endpoint.
+
+`ntfy_auth` is a secret: it is redacted from `GET /api/config` (like
+`wifi_password`). Because the config API is unauthenticated, the stored
+secret is preserved across a config write that omits it ONLY when `ntfy_url`
+is unchanged -- a write that repoints `ntfy_url` drops the stored credential
+so it cannot be smuggled to a new endpoint, and it must be re-supplied. An
+explicit empty string clears it. This resolution is a pure, unit-tested
+helper (resolve_ntfy_auth) covering preserve / drop-on-url-change / clear /
+replace.
+
+Ref: Orbic-Rayhunter T-OR-046.
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ daemon/src/config.rs               |  6 ++
+ daemon/src/main.rs                 |  1 +
+ daemon/src/notifications.rs        | 66 +++++++++++++++++---
+ daemon/src/server.rs               | 96 +++++++++++++++++++++++++++++-
+ daemon/web/src/lib/utils.svelte.ts |  1 +
+ dist/config.toml.in                |  3 +
+ 6 files changed, 164 insertions(+), 9 deletions(-)
+
+diff --git a/daemon/src/config.rs b/daemon/src/config.rs
+index eab2433..71bdfec 100644
+--- a/daemon/src/config.rs
++++ b/daemon/src/config.rs
+@@ -80,6 +80,11 @@ pub struct Config {
+     /// the notification type. When false, the POST body is sent plain (the
+     /// historical behavior), which suits a generic webhook receiver.
+     pub ntfy_headers: bool,
++    /// Optional value for the `Authorization` header sent with each ntfy
++    /// request, e.g. "Bearer tk_..." or "Basic <base64>". For a protected ntfy
++    /// topic or a reverse-proxied endpoint. Secret: redacted from `GET
++    /// /api/config` and preserved across a config write that omits it.
++    pub ntfy_auth: Option<String>,
+     /// Vector containing the types of enabled notifications
+     pub enabled_notifications: Vec<NotificationType>,
+     /// Whether Rayhunter should periodically check GitHub for new releases
+@@ -160,6 +165,7 @@ impl Default for Config {
+             analyzers: AnalyzerConfig::default(),
+             ntfy_url: None,
+             ntfy_headers: false,
++            ntfy_auth: None,
+             enabled_notifications: vec![NotificationType::Warning, NotificationType::LowBattery],
+             auto_check_updates: true,
+             clock_sync_mode: ClockSyncMode::Prompt,
+diff --git a/daemon/src/main.rs b/daemon/src/main.rs
+index c8b8b22..6b7ccba 100644
+--- a/daemon/src/main.rs
++++ b/daemon/src/main.rs
+@@ -308,6 +308,7 @@ async fn run_with_config(
+         notification_service,
+         config.enabled_notifications.clone(),
+         config.ntfy_headers,
++        config.ntfy_auth.clone(),
+     );
+ 
+     let wifi_status = Arc::new(RwLock::new(WifiStatus::default()));
+diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
+index 54c879f..1e078dc 100644
+--- a/daemon/src/notifications.rs
++++ b/daemon/src/notifications.rs
+@@ -125,6 +125,7 @@ pub fn run_notification_worker(
+     mut notification_service: NotificationService,
+     enabled_notifications: Vec<NotificationType>,
+     ntfy_headers: bool,
++    ntfy_auth: Option<String>,
+ ) {
+     task_tracker.spawn(async move {
+         if let Some(url) = notification_service.url
+@@ -192,20 +193,23 @@ pub fn run_notification_worker(
+                         }
+                     }
+ 
+-                    let header_arr;
+-                    let headers: &[(&str, &str)] = if ntfy_headers {
+-                        header_arr = ntfy_headers_for(notification_type);
+-                        &header_arr
+-                    } else {
+-                        &[]
+-                    };
++                    let mut headers: Vec<(&str, &str)> = Vec::new();
++                    if let Some(auth) = &ntfy_auth {
++                        headers.push(("Authorization", auth.as_str()));
++                    }
++                    let presentation = ntfy_headers_for(notification_type);
++                    if ntfy_headers {
++                        for &(name, value) in &presentation {
++                            headers.push((name, value));
++                        }
++                    }
+ 
+                     match send_notification(
+                         &http_client,
+                         &url,
+                         notification.message.clone(),
+                         notification_service.timeout,
+-                        headers,
++                        &headers,
+                     )
+                     .await
+                     {
+@@ -354,6 +358,7 @@ mod tests {
+             notification_service,
+             vec![NotificationType::Warning],
+             false,
++            None,
+         );
+ 
+         notification_sender
+@@ -397,6 +402,7 @@ mod tests {
+             notification_service,
+             vec![NotificationType::Warning],
+             true, // ntfy_headers enabled
++            None,
+         );
+ 
+         notification_sender
+@@ -425,6 +431,47 @@ mod tests {
+         cleanup_worker(notification_sender, task_tracker).await;
+     }
+ 
++    #[tokio::test]
++    async fn test_notification_worker_sends_auth_header() {
++        let (received_messages, received_headers, url) = setup_test_server().await;
++
++        let task_tracker = TaskTracker::new();
++        let notification_service = NotificationService::new(Some(url));
++        let notification_sender = notification_service.new_handler();
++
++        run_notification_worker(
++            &task_tracker,
++            notification_service,
++            vec![NotificationType::Warning],
++            false,
++            Some("Bearer tk_secret".to_string()),
++        );
++
++        notification_sender
++            .send(Notification::new(
++                NotificationType::Warning,
++                "test warning".to_string(),
++                None,
++            ))
++            .await
++            .unwrap();
++
++        tokio::time::sleep(Duration::from_secs(3)).await;
++
++        let messages = received_messages.lock().await;
++        assert_eq!(messages.len(), 1);
++        drop(messages);
++
++        let headers = received_headers.lock().await;
++        assert_eq!(headers.len(), 1);
++        assert_eq!(headers[0].get("Authorization").unwrap(), "Bearer tk_secret");
++        // Auth without ntfy_headers still means a plain (untitled) POST.
++        assert!(headers[0].get("Title").is_none());
++        drop(headers);
++
++        cleanup_worker(notification_sender, task_tracker).await;
++    }
++
+     #[tokio::test]
+     async fn test_notification_worker_filters_disabled_types() {
+         let (received_messages, _received_headers, url) = setup_test_server().await;
+@@ -438,6 +485,7 @@ mod tests {
+             notification_service,
+             vec![NotificationType::Warning],
+             false,
++            None,
+         );
+ 
+         notification_sender
+@@ -481,6 +529,7 @@ mod tests {
+             notification_service,
+             vec![NotificationType::Warning, NotificationType::LowBattery],
+             false,
++            None,
+         );
+ 
+         notification_sender
+@@ -524,6 +573,7 @@ mod tests {
+             notification_service,
+             vec![NotificationType::Warning],
+             false,
++            None,
+         );
+ 
+         notification_sender
+diff --git a/daemon/src/server.rs b/daemon/src/server.rs
+index 8c080f8..df802ab 100644
+--- a/daemon/src/server.rs
++++ b/daemon/src/server.rs
+@@ -150,9 +150,32 @@ pub async fn get_config(
+ ) -> Result<Json<Config>, (StatusCode, String)> {
+     let mut config = state.config.clone();
+     config.wifi_password = None;
++    config.ntfy_auth = None;
+     Ok(Json(config))
+ }
+ 
++/// Resolve the `ntfy_auth` secret to persist on a config write.
++///
++/// `ntfy_auth` is redacted from `GET /api/config`, so a client that round-trips
++/// the config sends `None` ("unchanged"). The config API is unauthenticated, so
++/// the stored secret is preserved ONLY when `ntfy_url` is also unchanged -- a
++/// write that repoints `ntfy_url` must not carry the stored credential to a new
++/// (possibly attacker-chosen) endpoint, so the credential is dropped and must be
++/// re-supplied. An explicit empty string clears it; any other value is used.
++fn resolve_ntfy_auth(
++    incoming_auth: Option<String>,
++    incoming_url: Option<&str>,
++    stored_auth: Option<&str>,
++    stored_url: Option<&str>,
++) -> Option<String> {
++    match incoming_auth.as_deref() {
++        None if incoming_url == stored_url => stored_auth.map(str::to_string),
++        None => None,
++        Some("") => None,
++        Some(_) => incoming_auth,
++    }
++}
++
+ #[cfg_attr(feature = "apidocs", utoipa::path(
+     post,
+     path = "/api/config",
+@@ -177,6 +200,12 @@ pub async fn set_config(
+         config.gps_fixed_latitude = None;
+         config.gps_fixed_longitude = None;
+     }
++    config.ntfy_auth = resolve_ntfy_auth(
++        config.ntfy_auth.clone(),
++        config.ntfy_url.as_deref(),
++        state.config.ntfy_auth.as_deref(),
++        state.config.ntfy_url.as_deref(),
++    );
+     let mut config_to_write = config.clone();
+     config_to_write.wifi_ssid = None;
+     config_to_write.wifi_password = None;
+@@ -599,6 +628,13 @@ mod tests {
+ 
+     fn create_test_server_state(
+         store_lock: Arc<RwLock<crate::qmdl_store::RecordingStore>>,
++    ) -> Arc<ServerState> {
++        create_test_server_state_with_config(store_lock, Config::default())
++    }
++
++    fn create_test_server_state_with_config(
++        store_lock: Arc<RwLock<crate::qmdl_store::RecordingStore>>,
++        config: Config,
+     ) -> Arc<ServerState> {
+         let (tx, _rx) = tokio::sync::mpsc::channel(1);
+         let (analysis_tx, _analysis_rx) = tokio::sync::mpsc::channel(1);
+@@ -610,7 +646,7 @@ mod tests {
+ 
+         Arc::new(ServerState {
+             config_path: "/tmp/test_config.toml".to_string(),
+-            config: Config::default(),
++            config,
+             qmdl_store_lock: store_lock,
+             diag_device_ctrl_sender: tx,
+             analysis_status_lock: Arc::new(RwLock::new(analysis_status)),
+@@ -640,6 +676,64 @@ mod tests {
+         }
+     }
+ 
++    #[tokio::test]
++    async fn test_get_config_redacts_ntfy_auth() {
++        let (_temp_dir, store_lock) = create_test_qmdl_store().await;
++        let config = Config {
++            ntfy_auth: Some("Bearer tk_secret".to_string()),
++            ..Config::default()
++        };
++        let state = create_test_server_state_with_config(store_lock, config);
++
++        let Json(returned) = get_config(State(state)).await.unwrap();
++        assert_eq!(
++            returned.ntfy_auth, None,
++            "ntfy_auth must be redacted from GET /api/config"
++        );
++    }
++
++    #[test]
++    fn resolve_ntfy_auth_preserves_on_unchanged_url() {
++        let url = Some("https://ntfy.sh/t");
++        assert_eq!(
++            resolve_ntfy_auth(None, url, Some("Bearer x"), url),
++            Some("Bearer x".to_string())
++        );
++    }
++
++    #[test]
++    fn resolve_ntfy_auth_drops_secret_when_url_changes() {
++        // The config API is unauthenticated: a write that repoints ntfy_url must
++        // NOT carry the stored credential to the new endpoint.
++        assert_eq!(
++            resolve_ntfy_auth(
++                None,
++                Some("https://evil.example/t"),
++                Some("Bearer x"),
++                Some("https://ntfy.sh/t"),
++            ),
++            None
++        );
++    }
++
++    #[test]
++    fn resolve_ntfy_auth_empty_string_clears() {
++        let url = Some("https://ntfy.sh/t");
++        assert_eq!(
++            resolve_ntfy_auth(Some(String::new()), url, Some("Bearer x"), url),
++            None
++        );
++    }
++
++    #[test]
++    fn resolve_ntfy_auth_new_value_is_used() {
++        let url = Some("https://ntfy.sh/t");
++        assert_eq!(
++            resolve_ntfy_auth(Some("Bearer new".to_string()), url, Some("Bearer old"), url),
++            Some("Bearer new".to_string())
++        );
++    }
++
+     #[tokio::test]
+     async fn test_get_zip_success() {
+         let (_temp_dir, store_lock) = create_test_qmdl_store().await;
+diff --git a/daemon/web/src/lib/utils.svelte.ts b/daemon/web/src/lib/utils.svelte.ts
+index 251db14..0228f46 100644
+--- a/daemon/web/src/lib/utils.svelte.ts
++++ b/daemon/web/src/lib/utils.svelte.ts
+@@ -60,6 +60,7 @@ export interface Config {
+     key_input_mode: number;
+     ntfy_url: string | null;
+     ntfy_headers: boolean;
++    ntfy_auth: string | null;
+     enabled_notifications: enabled_notifications[];
+     auto_check_updates: boolean;
+     clock_sync_mode: ClockSyncMode;
+diff --git a/dist/config.toml.in b/dist/config.toml.in
+index b8c156e..262a866 100644
+--- a/dist/config.toml.in
++++ b/dist/config.toml.in
+@@ -29,6 +29,9 @@ key_input_mode = 0
+ # type (an ntfy client then shows a titled, prioritized notification). Leave false
+ # for a plain webhook receiver.
+ # ntfy_headers = false
++# Optional Authorization header for a protected ntfy topic or proxied endpoint,
++# e.g. "Bearer tk_..." or "Basic <base64>". Secret: redacted from GET /api/config.
++# ntfy_auth = "Bearer tk_..."
+ # What notification types to enable. Does nothing if the above ntfy_url is not set.
+ enabled_notifications = ["Warning", "LowBattery"]
+ 
+-- 
+2.56.1
+
