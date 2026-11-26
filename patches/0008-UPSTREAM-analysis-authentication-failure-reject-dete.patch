@@ -1,10 +1,10 @@
-From 3ec9b2d1f041ff182648ae7cfeee8fdce478bc64 Mon Sep 17 00:00:00 2001
+From 16521deb75e1157a83e703a4c4d0219201dec046 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 03:28:51 -0500
 Subject: [PATCH] [UPSTREAM] analysis: authentication failure / reject detector
 
 Adds the `auth_failure` analyzer: it flags a NAS Authentication Failure (uplink,
-EMM cause #20 MAC failure -> High, #21 synch failure -> Medium, #26 non-EPS
+EMM cause #20 MAC failure -> High, #21 synch failure -> Low, #26 non-EPS
 authentication unacceptable -> Medium) or an Authentication Reject (downlink ->
 High).
 
@@ -12,24 +12,27 @@ A false base station with no access to the subscriber's home keys (HSS) cannot
 produce a valid authentication token (AUTN), so the USIM rejects the challenge --
 #20 (MAC failure) is the direct signature and is near-impossible on a home
 network without an attack or a broken SIM -- or the network rejects the UE's
-response. #21 can also be a genuine SQN resynchronisation or a SIM swap, so it is
-Medium. The analyzer is stateless and keys on the message/cause alone.
+response. #21 (synch failure) also occurs on a genuine SQN resynchronisation
+(followed immediately by a successful re-authentication) or a SIM swap, so it is
+Low; a stateful check could raise it when no re-authentication follows. The
+analyzer is stateless and keys on the message/cause alone.
 
 Off by default (`AnalyzerConfig` default false) pending per-network calibration.
 
 Test harness: uses `analysis::test_util::emm_message`; tests cover #20 (High),
-#21/#26 (Medium), an ignored cause, Authentication Reject (High), and an
-unrelated EMM message, plus AnalyzerConfig default-off and Harness wiring in
-analyzer.rs.
+#21 (Low, including a realistic PDU with the AUTS parameter TLV), #26 (Medium),
+an ignored cause, Authentication Reject (High), an unrelated EMM message, and the
+emitted message text, plus AnalyzerConfig default-off and Harness wiring (by
+exact analyzer name) in analyzer.rs.
 
 Ref: Orbic-Rayhunter T-OR-053; ref-docs/lte-imsi-catcher-detection.md 3.3.
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
  dist/config.toml.in              |   4 +
- lib/src/analysis/analyzer.rs     |  31 +++++++
- lib/src/analysis/auth_failure.rs | 151 +++++++++++++++++++++++++++++++
+ lib/src/analysis/analyzer.rs     |  32 ++++++
+ lib/src/analysis/auth_failure.rs | 177 +++++++++++++++++++++++++++++++
  lib/src/analysis/mod.rs          |   1 +
- 4 files changed, 187 insertions(+)
+ 4 files changed, 214 insertions(+)
  create mode 100644 lib/src/analysis/auth_failure.rs
 
 diff --git a/dist/config.toml.in b/dist/config.toml.in
@@ -45,7 +48,7 @@ index 4a1fc05..ea5a09a 100644
 +# Off by default: a genuine SQN resync or SIM swap can also trigger it.
 +auth_failure = false
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
-index 8b09a7f..2c92326 100644
+index 8b09a7f..b99a83c 100644
 --- a/lib/src/analysis/analyzer.rs
 +++ b/lib/src/analysis/analyzer.rs
 @@ -11,6 +11,7 @@ use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, parser as gsmtap_pa
@@ -99,19 +102,20 @@ index 8b09a7f..2c92326 100644
      }
  
      #[test]
-@@ -622,6 +633,26 @@ mod tests {
+@@ -622,6 +633,27 @@ mod tests {
          }));
      }
  
 +    #[test]
 +    fn new_with_config_wires_auth_failure_only_when_enabled() {
 +        let metadata = DeviceMetadata::default();
++        let expected = AuthFailureAnalyzer.get_name().into_owned();
 +        let has = |config: &AnalyzerConfig| {
 +            Harness::new_with_config(config, &metadata)
 +                .get_metadata()
 +                .analyzers
 +                .iter()
-+                .any(|a| a.name.contains("Authentication"))
++                .any(|a| a.name == expected)
 +        };
 +        assert!(has(&AnalyzerConfig {
 +            auth_failure: true,
@@ -128,10 +132,10 @@ index 8b09a7f..2c92326 100644
          let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/auth_failure.rs b/lib/src/analysis/auth_failure.rs
 new file mode 100644
-index 0000000..3f5d559
+index 0000000..43d649a
 --- /dev/null
 +++ b/lib/src/analysis/auth_failure.rs
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,177 @@
 +//! Flags authentication failures and rejects that indicate the network could
 +//! not run a valid EPS-AKA exchange -- the signature of a false base station
 +//! that has no access to the subscriber's home keys (HSS) and therefore cannot
@@ -148,7 +152,8 @@ index 0000000..3f5d559
 +//!
 +//! #20 (MAC failure) on a home network is close to impossible without an attack
 +//! or a broken SIM (High). #21 occurs legitimately after an SQN resync (followed
-+//! immediately by a successful re-authentication) and on SIM swaps, so it is
++//! immediately by a successful re-authentication) and on SIM swaps, so it is Low
++//! (a stateful check could raise it when no re-authentication follows). #26 is
 +//! Medium. An `Authentication Reject` is High. Keys on the message/cause alone
 +//! (no state). Causal and low false-positive, but off by default until
 +//! calibrated, since a genuine resync or an unprovisioned/invalid SIM can fire
@@ -178,8 +183,8 @@ index 0000000..3f5d559
 +             station with no access to the subscriber's home keys cannot produce a valid AUTN, so \
 +             the USIM rejects the challenge (#20 especially) or the network rejects the response. \
 +             #20 on a home network is near-impossible without an attack or a broken SIM (High); #21 \
-+             can be a genuine SQN resync or a SIM swap (Medium); an Authentication Reject is High. \
-+             Keys on the message/cause alone.",
++             can be a genuine SQN resync or a SIM swap (Low); #26 is Medium; an Authentication \
++             Reject is High. Keys on the message/cause alone.",
 +        )
 +    }
 +
@@ -203,7 +208,10 @@ index 0000000..3f5d559
 +            EMMMessage::EMMAuthenticationFailure(failure) => {
 +                let (severity, cause) = match failure.emm_cause.inner {
 +                    AuthFailureCause::MACFailure => (EventType::High, "#20 (MAC failure)"),
-+                    AuthFailureCause::SynchFailure => (EventType::Medium, "#21 (synch failure)"),
++                    // #21 is benign-prone: a genuine SQN resync sends it and then
++                    // re-authenticates within milliseconds, so it is Low until a
++                    // stateful check can suppress the resync-then-success case.
++                    AuthFailureCause::SynchFailure => (EventType::Low, "#21 (synch failure)"),
 +                    AuthFailureCause::NonEPSAuthenticationUnacceptable => (
 +                        EventType::Medium,
 +                        "#26 (non-EPS authentication unacceptable)",
@@ -254,15 +262,36 @@ index 0000000..3f5d559
 +        let events = run(AUTHENTICATION_FAILURE, &[CAUSE_MAC_FAILURE]);
 +        assert_eq!(events.len(), 1);
 +        assert_eq!(events[0].1.event_type, EventType::High);
++        assert!(events[0].1.message.contains("#20"));
 +    }
 +
 +    #[test]
-+    fn synch_and_non_eps_failures_are_medium() {
-+        for cause in [CAUSE_SYNCH_FAILURE, CAUSE_NON_EPS_AUTH_UNACCEPTABLE] {
-+            let events = run(AUTHENTICATION_FAILURE, &[cause]);
-+            assert_eq!(events.len(), 1, "cause {cause}");
-+            assert_eq!(events[0].1.event_type, EventType::Medium);
-+        }
++    fn synch_failure_is_low() {
++        let events = run(AUTHENTICATION_FAILURE, &[CAUSE_SYNCH_FAILURE]);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Low);
++        assert!(events[0].1.message.contains("#21"));
++    }
++
++    #[test]
++    fn synch_failure_with_auts_tlv_parses() {
++        // A real #21 carries the Authentication-failure-parameter TLV (tag 0x30,
++        // length 14, a 14-byte AUTS) -- exercise pycrate decoding it, not just the
++        // bare cause.
++        let mut body = vec![CAUSE_SYNCH_FAILURE, 0x30, 14];
++        body.extend_from_slice(&[0xAB; 14]);
++        let events = run(AUTHENTICATION_FAILURE, &body);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Low);
++        assert!(events[0].1.message.contains("#21"));
++    }
++
++    #[test]
++    fn non_eps_failure_is_medium() {
++        let events = run(AUTHENTICATION_FAILURE, &[CAUSE_NON_EPS_AUTH_UNACCEPTABLE]);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Medium);
++        assert!(events[0].1.message.contains("#26"));
 +    }
 +
 +    #[test]
@@ -275,6 +304,7 @@ index 0000000..3f5d559
 +        let events = run(AUTHENTICATION_REJECT, &[]);
 +        assert_eq!(events.len(), 1);
 +        assert_eq!(events[0].1.event_type, EventType::High);
++        assert!(events[0].1.message.contains("Reject"));
 +    }
 +
 +    #[test]

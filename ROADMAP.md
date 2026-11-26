@@ -208,6 +208,7 @@ Details: [docs/ANALYZERS.md](docs/ANALYZERS.md).
 | T-OR-063 | Stretch: emergency-alert spoofing context (rank 11) | [UPSTREAM] | open |
 | T-OR-064 | Stretch: RRC Connection Reject DoS context (rank 12) | [UPSTREAM] | open |
 | T-OR-108 | T-OR-052 precision follow-ups: confirm the reject was integrity-unprotected (NAS security-header type -- needs DIAG/parser verification, overlaps T-OR-061) and correlate a following IMSI re-attach (needs the `epsid` EPS-mobile-identity parsing, overlaps T-OR-054); fold in the broader cause tiers (#3/#6/#7, #11-#15/#22/#42) post-calibration | [UPSTREAM] | open |
+| T-OR-109 | T-OR-053 stateful follow-up: suppress a benign Authentication Failure #21 (SQN resync) that is followed within milliseconds by a successful re-authentication, and raise its severity when no re-auth follows; likewise scope Authentication Reject to before a successful authentication; deduplicate repeated auth-failure/reject on a retry storm | [UPSTREAM] | open |
 
 Exit criteria: T-OR-051..T-OR-060 merged into the series with golden vectors; each analyzer
 off-by-default until T-OR-061 shows an acceptable false-positive rate; upstream PR opened for
