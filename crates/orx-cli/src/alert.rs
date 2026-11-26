@@ -134,10 +134,55 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .ok_or_else(|| "ntfy_url must start with http:// or https://".to_string())?;
-    // Require a non-empty host before the first '/', '?' or '#'.
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // The authority is everything before the first '/', '?' or '#'.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Reject embedded userinfo (user:pass@host): credentials belong in the
+    // config, not the URL, and a userinfo URL would be printed verbatim by
+    // `orx alert set`, leaking the secret to stdout/logs.
+    if authority.contains('@') {
+        return Err(
+            "ntfy_url must not contain embedded credentials (user:pass@); configure auth separately"
+                .to_string(),
+        );
+    }
+    // Split host[:port]. A bracketed IPv6 literal ([::1][:port]) keeps its colons.
+    let (host, port) = if let Some(after_open) = authority.strip_prefix('[') {
+        let close = after_open
+            .find(']')
+            .ok_or_else(|| "ntfy_url has an unterminated IPv6 host".to_string())?;
+        let host = &after_open[..close];
+        // A bracketed host must be a real IPv6 literal (rejects "[not-ipv6]").
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err("ntfy_url has an invalid IPv6 host".to_string());
+        }
+        let tail = &after_open[close + 1..];
+        let port = match tail {
+            "" => None,
+            _ => Some(
+                tail.strip_prefix(':')
+                    .ok_or_else(|| "ntfy_url has a malformed IPv6 authority".to_string())?,
+            ),
+        };
+        (host, port)
+    } else {
+        // split_once (not rsplit_once): a second ':' falls into the port and is
+        // rejected below, so "a:b:8080" and unbracketed IPv6 like "::1" fail.
+        match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        }
+    };
     if host.is_empty() {
         return Err("ntfy_url has no host".to_string());
+    }
+    // A port, if present, must be all ASCII digits (rejects a leading '+'/'-'
+    // that u16::parse would otherwise accept) and parse as a non-zero u16
+    // (rejects empty, non-digit, out-of-range, a stray second ':', and port 0).
+    if let Some(port) = port
+        && (!port.bytes().all(|b| b.is_ascii_digit())
+            || !matches!(port.parse::<u16>(), Ok(p) if p > 0))
+    {
+        return Err("ntfy_url has an invalid port".to_string());
     }
     Ok(())
 }
@@ -465,6 +510,29 @@ mod tests {
         assert!(validate_ntfy_url("https://").is_err());
         assert!(validate_ntfy_url("https://ntfy.sh/ has space").is_err());
         assert!(validate_ntfy_url("https://ntfy.sh/\n").is_err());
+        // No host before the path.
+        assert!(validate_ntfy_url("https://:8080/topic").is_err());
+        // Embedded credentials (would leak when printed) are rejected.
+        assert!(validate_ntfy_url("https://user:pass@ntfy.sh/topic").is_err());
+        assert!(validate_ntfy_url("https://user:pass@/topic").is_err());
+        // Invalid / out-of-range / zero port.
+        assert!(validate_ntfy_url("https://ntfy.sh:abc/topic").is_err());
+        assert!(validate_ntfy_url("https://ntfy.sh:99999/topic").is_err());
+        assert!(validate_ntfy_url("https://ntfy.sh:0/topic").is_err());
+        // A second ':' in a non-bracketed authority (and unbracketed IPv6).
+        assert!(validate_ntfy_url("https://a:b:8080/topic").is_err());
+        assert!(validate_ntfy_url("http://::1/topic").is_err());
+        // A leading sign in the port (u16::parse would accept "+8080").
+        assert!(validate_ntfy_url("https://ntfy.sh:+8080/topic").is_err());
+        // A bracketed host that is not a valid IPv6 literal.
+        assert!(validate_ntfy_url("http://[not-ipv6]/topic").is_err());
+    }
+
+    #[test]
+    fn validate_ntfy_url_accepts_host_port_and_ipv6() {
+        assert!(validate_ntfy_url("https://ntfy.sh:8080/topic").is_ok());
+        assert!(validate_ntfy_url("http://[::1]:8080/topic").is_ok());
+        assert!(validate_ntfy_url("http://[2001:db8::1]/topic").is_ok());
     }
 
     #[test]

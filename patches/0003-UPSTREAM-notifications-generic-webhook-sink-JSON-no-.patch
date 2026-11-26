@@ -1,4 +1,4 @@
-From 278a8bb30299a5b992867ab5bca603886835ccd7 Mon Sep 17 00:00:00 2001
+From 24805de9cc2fa6898452f6103a9563f3baf2bd0d Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 23:20:11 -0500
 Subject: [PATCH] [UPSTREAM] notifications: generic webhook sink (JSON, no
@@ -503,7 +503,7 @@ index 1e078dc..0029d55 100644
  
          run_notification_worker(
 diff --git a/daemon/src/server.rs b/daemon/src/server.rs
-index df802ab..843009d 100644
+index bceb08e..032ea5a 100644
 --- a/daemon/src/server.rs
 +++ b/daemon/src/server.rs
 @@ -151,9 +151,23 @@ pub async fn get_config(
@@ -543,7 +543,7 @@ index df802ab..843009d 100644
      let mut config_to_write = config.clone();
      config_to_write.wifi_ssid = None;
      config_to_write.wifi_password = None;
-@@ -681,6 +701,7 @@ mod tests {
+@@ -688,6 +708,7 @@ mod tests {
          let (_temp_dir, store_lock) = create_test_qmdl_store().await;
          let config = Config {
              ntfy_auth: Some("Bearer tk_secret".to_string()),
@@ -551,7 +551,7 @@ index df802ab..843009d 100644
              ..Config::default()
          };
          let state = create_test_server_state_with_config(store_lock, config);
-@@ -690,6 +711,23 @@ mod tests {
+@@ -697,6 +718,23 @@ mod tests {
              returned.ntfy_auth, None,
              "ntfy_auth must be redacted from GET /api/config"
          );

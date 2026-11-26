@@ -1,4 +1,4 @@
-From accb157d9f283fda9697fbdc98580448cec2f77a Mon Sep 17 00:00:00 2001
+From 29073880c9ab394771cf1b809402a8577610c8de Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 23:11:33 -0500
 Subject: [PATCH] [UPSTREAM] notifications: optional Authorization header for

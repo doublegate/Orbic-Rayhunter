@@ -121,9 +121,15 @@ Backup gate: like `orx purge` (whose verified local pull copy is the undo), `set
 on an operation-appropriate restore path rather than the firmware-grade full-device backup that
 `install`/`uninstall` require -- a config write cannot brick the device and is reversible. Before it
 POSTs, `set` writes the exact prior `/api/config` body to `--backup-dir` (default the current
-directory) as `orx-config-before-<addr>-<epoch>.json`, verifies it reads back byte-identical and
-reports its SHA-256; if that fails it aborts without touching the device. Re-POSTing that snapshot
-restores the config.
+directory, written `0600`; snapshots are gitignored) as `orx-config-before-<addr>-<epoch>.json`,
+verifies it reads back byte-identical and reports its SHA-256; if that fails it aborts without
+touching the device.
+
+Restore limitation: the snapshot is the body `GET /api/config` returns, which **redacts the secret
+keys** (`ntfy_auth`, `gotify_token`, `webhook_url`; see below). Re-POSTing it restores everything
+except those secrets, and changing `ntfy_url`/`gotify_url` additionally drops the matching stored
+credential. So if you have notification secrets configured, re-supply them after a restore, or keep a
+copy of the device's `config.toml` as the full backup.
 
 ### Notification sinks (v1.2.0, daemon patches)
 
@@ -139,5 +145,20 @@ keeps the historical behavior:
 Secret keys (`ntfy_auth`, `gotify_token`, `webhook_url`) are redacted from `GET /api/config` and
 preserved across a config round-trip that omits them; a credential is dropped if its endpoint URL
 changes, so the unauthenticated config API cannot repoint a URL and harvest the stored secret.
+
+Hardening (patch 0005) changes delivery behavior, so note:
+
+- **No HTTP redirects.** The notification client does not follow 3xx redirects (so a custom
+  credential header such as `X-Gotify-Key` cannot be forwarded to a redirect target). A sink URL
+  that relies on an `http:` -> `https:` upgrade or a proxy 30x will fail rather than be followed --
+  configure the final `https` URL directly.
+- **`gotify_url` is a base URL.** Any query/fragment is dropped before `/message` is appended, and
+  `GET /api/config` returns it without a query, so a token must go in `gotify_token` (redacted), not
+  the URL.
+- **`POST /api/test-notification`** sends a test to every configured sink and reports per-sink
+  results (it no longer tests only ntfy). The test uses the `Warning` notification type (webhook
+  `type: "Warning"`, Gotify priority 8, ntfy high priority), so a receiver whose rules key on the
+  `Warning` type/priority will treat a connectivity test like a live alert -- distinguish it by the
+  message body (`"Test notification from Rayhunter"`).
 
 MQTT (T-OR-048) and a persistent retry queue (T-OR-050) are deferred past v1.2.0.

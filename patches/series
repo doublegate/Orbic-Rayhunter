@@ -5,3 +5,4 @@
 0002-UPSTREAM-notifications-optional-Authorization-header.patch
 0003-UPSTREAM-notifications-generic-webhook-sink-JSON-no-.patch
 0004-UPSTREAM-notifications-Gotify-sink.patch
+0005-UPSTREAM-notifications-harden-sinks-per-review-redir.patch

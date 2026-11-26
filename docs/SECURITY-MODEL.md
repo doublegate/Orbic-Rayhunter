@@ -13,7 +13,7 @@ mapped to v1.6 tickets (T-OR-081..T-OR-088, [ROADMAP.md](../ROADMAP.md)). Vulner
 | Device backups | `backups/`, off-repo copy | IMEI, NV/RF calibration, keys, Wi-Fi credentials, admin password ([BACKUP-AND-RECOVERY.md](BACKUP-AND-RECOVERY.md)) |
 | Stock admin password | device; equals the Wi-Fi password on Verizon units | grants root through the web-UI injection the installer uses |
 | Wi-Fi AP key | device | network access to every service below |
-| Notification secrets | `ntfy_url` topic, WebDAV password in `config.toml`; Wi-Fi client credentials in `wpa_sta.conf` | topic disclosure lets others read or spoof alerts; WebDAV credentials expose uploaded captures |
+| Notification secrets | `ntfy_url` topic, `ntfy_auth`, `gotify_token`, `webhook_url`, WebDAV password in `config.toml` (v1.2.0 adds the notification credentials); Wi-Fi client credentials in `wpa_sta.conf` | topic/URL disclosure lets others read or spoof alerts; a leaked `ntfy_auth`/`gotify_token`/webhook token authenticates to the sink |
 | Device integrity | rootfs, init scripts, daemon binary | a tampered daemon can hide detections or exfiltrate captures |
 | Detection integrity | analyzers, display, notifications | the user's safety decisions depend on alerts being present and accurate |
 | Host | the machine running `orx` and the upstream installer | holds backups and the admin password during install |
@@ -73,7 +73,7 @@ redirect notifications without any password.
 | Admin password equals Wi-Fi key; stock remote-access settings | hardening guidance and checks for the stock admin (distinct admin password if the firmware allows, strong WPA2 key) | T-OR-084 | strong Wi-Fi key |
 | Tampered release artifacts | signed releases; `orx` verifies signatures before install | T-OR-085 | verify `SHA256SUMS` and build from source when in doubt |
 | Unwanted updates (Rayhunter or carrier) | update checker scope documented, no unattended install, OTA state reported by `orx doctor` | T-OR-086 | `auto_check_updates = false`; OTA block (T-OR-018) |
-| Secrets readable on device | restrictive permissions for `config.toml` and `wpa_sta.conf`; secrets not returned by `GET /api/config` | T-OR-087 | do not configure WebDAV; keep the ntfy topic private |
+| Secrets readable on device | restrictive permissions for `config.toml` and `wpa_sta.conf`; `GET /api/config` redacts `wifi_password`, `ntfy_auth`, `gotify_token`, `webhook_url` (v1.2.0); a config write that omits a redacted secret preserves it, but **drops** it if its endpoint URL changes, so the unauthenticated config API cannot repoint a URL and harvest the stored credential; the daemon strips the destination URL from a notification transport error before logging it; notification requests **do not follow HTTP redirects** (`reqwest` keeps `Authorization` off a cross-origin 30x but not a custom `X-Gotify-Key`, so a captive portal or redirecting proxy cannot exfiltrate the Gotify token), and a `gotify_url` query/fragment is dropped so a `?token=` cannot ride along | T-OR-087 | do not configure WebDAV; keep the ntfy topic private; prefer `https` sinks |
 | Model drift | threat-model review and security audit before v2.0.0 | T-OR-088, T-OR-104 | this document |
 | Parser crashes on hostile input | upstream fuzzing fixes (v0.9.0); golden and malformed vectors in the harness | T-OR-051 | none beyond upstream |
 | Detection suppressed by DoS or downgrade | analyzers for rejects and legacy-RAT steering | T-OR-052, T-OR-057, T-OR-064 | upstream analyzers |

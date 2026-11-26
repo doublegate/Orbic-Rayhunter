@@ -1,4 +1,4 @@
-From 18d7c630b6b41c5c42a2d3cd389c1f107f2d368e Mon Sep 17 00:00:00 2001
+From f8dd174f73048e347ad106b6ffc4eba9b47502df Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 22:57:12 -0500
 Subject: [PATCH] [UPSTREAM] notifications: optional ntfy Title/Priority/Tags

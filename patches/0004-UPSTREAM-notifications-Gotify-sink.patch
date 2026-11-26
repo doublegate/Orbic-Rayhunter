@@ -1,4 +1,4 @@
-From e506f5606a0e348ab52bd1edd29ff73112f2e6c3 Mon Sep 17 00:00:00 2001
+From b0eb2a4ae43e864f3f2bcad3cc85afa87e10e1f7 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 23:33:30 -0500
 Subject: [PATCH] [UPSTREAM] notifications: Gotify sink
@@ -397,7 +397,7 @@ index 0029d55..387c47d 100644
  
          notification_sender
 diff --git a/daemon/src/server.rs b/daemon/src/server.rs
-index 843009d..9185bd8 100644
+index 032ea5a..a3976d1 100644
 --- a/daemon/src/server.rs
 +++ b/daemon/src/server.rs
 @@ -151,6 +151,7 @@ pub async fn get_config(
@@ -465,7 +465,7 @@ index 843009d..9185bd8 100644
      // webhook_url is redacted from GET (it may embed a credential), so a
      // round-trip that omits it must keep the stored value.
      config.webhook_url = resolve_secret(
-@@ -702,6 +710,7 @@ mod tests {
+@@ -709,6 +717,7 @@ mod tests {
          let config = Config {
              ntfy_auth: Some("Bearer tk_secret".to_string()),
              webhook_url: Some("https://hooks.example/T/B/secret".to_string()),
@@ -473,7 +473,7 @@ index 843009d..9185bd8 100644
              ..Config::default()
          };
          let state = create_test_server_state_with_config(store_lock, config);
-@@ -715,6 +724,10 @@ mod tests {
+@@ -722,6 +731,10 @@ mod tests {
              returned.webhook_url, None,
              "webhook_url may embed a credential and must be redacted"
          );
@@ -484,7 +484,7 @@ index 843009d..9185bd8 100644
      }
  
      #[test]
-@@ -734,7 +747,7 @@ mod tests {
+@@ -741,7 +754,7 @@ mod tests {
      fn resolve_ntfy_auth_preserves_on_unchanged_url() {
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
@@ -493,7 +493,7 @@ index 843009d..9185bd8 100644
              Some("Bearer x".to_string())
          );
      }
-@@ -744,7 +757,7 @@ mod tests {
+@@ -751,7 +764,7 @@ mod tests {
          // The config API is unauthenticated: a write that repoints ntfy_url must
          // NOT carry the stored credential to the new endpoint.
          assert_eq!(
@@ -502,7 +502,7 @@ index 843009d..9185bd8 100644
                  None,
                  Some("https://evil.example/t"),
                  Some("Bearer x"),
-@@ -758,7 +771,7 @@ mod tests {
+@@ -765,7 +778,7 @@ mod tests {
      fn resolve_ntfy_auth_empty_string_clears() {
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
@@ -511,7 +511,7 @@ index 843009d..9185bd8 100644
              None
          );
      }
-@@ -767,7 +780,7 @@ mod tests {
+@@ -774,7 +787,7 @@ mod tests {
      fn resolve_ntfy_auth_new_value_is_used() {
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
