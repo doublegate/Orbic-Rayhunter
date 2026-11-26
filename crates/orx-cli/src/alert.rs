@@ -134,8 +134,10 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .ok_or_else(|| "ntfy_url must start with http:// or https://".to_string())?;
-    // The authority is everything before the first '/', '?' or '#'.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // The authority is everything before the first '/', '?', '#' or '\' (WHATWG
+    // URL parsers, including reqwest, treat '\' as a path delimiter for http(s),
+    // so it must not be accepted as part of the host).
+    let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or("");
     // Reject embedded userinfo (user:pass@host): credentials belong in the
     // config, not the URL, and a userinfo URL would be printed verbatim by
     // `orx alert set`, leaking the secret to stdout/logs.
@@ -526,6 +528,8 @@ mod tests {
         assert!(validate_ntfy_url("https://ntfy.sh:+8080/topic").is_err());
         // A bracketed host that is not a valid IPv6 literal.
         assert!(validate_ntfy_url("http://[not-ipv6]/topic").is_err());
+        // A backslash is a path delimiter (WHATWG), so the host is empty here.
+        assert!(validate_ntfy_url("https://\\evil.com/topic").is_err());
     }
 
     #[test]
