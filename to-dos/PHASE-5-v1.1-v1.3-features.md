@@ -52,15 +52,26 @@ curl -X POST http://192.168.1.1:8080/api/test-notification
 
 ## Sprint 5.2: Analyzer harness and causal NAS analyzers (v1.2.0, part 1)
 
-- [ ] T-OR-051: harness for synthetic RRC/NAS vectors and golden outputs; scrubber for real
-      captures ([docs/TESTING.md](../docs/TESTING.md) section 3)
-- [ ] T-OR-052: unauthenticated NAS Reject analyzer
-- [ ] T-OR-053: authentication failure / reject analyzer
-- [ ] T-OR-054: own identity disclosure analyzer; `epsid` parsing in `pycrate_rs` if needed
-- [ ] T-OR-055: EIA0 and security-never-activated analyzer
+- [x] T-OR-051: harness for synthetic RRC/NAS vectors and golden outputs (patch 0006, PR #19);
+      the real-capture scrubber is deferred to T-OR-061 (needs on-device captures)
+- [x] T-OR-052: NAS Reject identity-forcing analyzer (patch 0007, PR #20; stateless #9/#10)
+- [x] T-OR-053: authentication failure / reject analyzer (patch 0008, PR #21; stateless)
+- [ ] T-OR-054: own identity disclosure analyzer -- **BLOCKED on T-OR-110**. This `pycrate-rs`
+      leaves the mobile-identity structs (`EPSID`, `ID`) empty and `Type4LV` keeps only the length,
+      so IMSI-vs-IMEI-vs-GUTI is unreadable; a blind "any IdentityResponse" detector would be too
+      noisy to ship. Not a live blind spot -- upstream `imsi_requested` already flags the request
+      side. Build after T-OR-110, in the T-OR-061 device session.
+- [x] T-OR-055: EIA0 null-integrity analyzer -- NAS half landed (patch 0009, `null_integrity`:
+      NAS SMC EIA0 -> High). RRC-SMC-EIA0 and DRB-before-SMC parts deferred (need RRC vectors).
 
 Acceptance criteria: each analyzer has its own version, config flag (default off), heuristics
 doc entry, and positive and negative golden vectors; timeouts use packet timestamps.
+
+> **T-OR-110 (enabling, do during the T-OR-061 device session):** hand-add EPS mobile-identity IE
+> parsing (type nibble + BCD digits, TS 24.301 9.9.3.12) to `EPSID`/`ID` in EFForg/pycrate-rs (or
+> fix its generator), bump the Cargo.lock pin, and validate against real DIAG captures. Unblocks
+> T-OR-054 and the identity-correlation part of T-OR-108; sharpens T-OR-056. Written just
+> before/during the device session so real captures validate it -- not built blind.
 
 Verification:
 
@@ -111,6 +122,10 @@ Verification:
 - [ ] T-OR-061: negative baselines (days of normal use on Verizon; AT&T and T-Mobile SIMs if
       available); false-positive rate per analyzer; choose severities; decide default on/off
 - [ ] T-OR-061: ask EFF whether Devilray profiles can be run against candidates 1-6
+- [ ] T-OR-110: write the `pycrate-rs` EPS mobile-identity parsing against the real DIAG captures
+      taken here (ground-truth IMSI/IMEI/GUTI bytes), then build T-OR-054 and the T-OR-108
+      identity-correlation on top. Done here, in the device session, because the parser needs real
+      data to validate and this is the only place that data exists.
 - [ ] T-OR-062: SIB reselection-parameter features (stretch)
 - [ ] T-OR-063: emergency-alert spoofing context (stretch)
 - [ ] T-OR-064: RRC Connection Reject DoS context (stretch)

@@ -1,0 +1,275 @@
+From 7e6d80f920ae392dc027d1ca0e297d38fb7e86bb Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Thu, 26 Nov 2026 04:12:59 -0500
+Subject: [PATCH] [UPSTREAM] analysis: null integrity (EIA0) detector
+
+Adds the `null_integrity` analyzer: flags a NAS Security Mode Command that
+selects the null integrity algorithm EIA0 (High).
+
+EIA0 leaves NAS signalling with no integrity protection, so the network cannot be
+authenticated and signalling can be forged -- a harder false-base-station
+indicator than null ciphering (EEA0), which the companion `nas_null_cipher`
+analyzer already covers via the ciphering algorithm. 3GPP permits EIA0 only for an
+unauthenticated emergency-services attach (TS 33.401 5.1.4.1), so a genuine
+emergency call is the main benign trigger; off by default pending calibration.
+
+Stateless; reads `EMMSecurityModeCommand.nas_sec_algo.integ_algo`, the integrity
+counterpart of the field nas_null_cipher reads.
+
+Test harness: uses `analysis::test_util::emm_message` with a Security Mode Command
+body adapted from the pycrate test vector; tests cover EIA0 (High), a real
+algorithm (not flagged), a non-SMC EMM message, and a non-LTE IE, plus
+AnalyzerConfig default-off and Harness wiring in analyzer.rs.
+
+Ref: Orbic-Rayhunter T-OR-055; ref-docs/lte-imsi-catcher-detection.md 3.6.
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ dist/config.toml.in                |   4 +
+ lib/src/analysis/analyzer.rs       |  35 ++++++++-
+ lib/src/analysis/mod.rs            |   1 +
+ lib/src/analysis/null_integrity.rs | 122 +++++++++++++++++++++++++++++
+ 4 files changed, 160 insertions(+), 2 deletions(-)
+ create mode 100644 lib/src/analysis/null_integrity.rs
+
+diff --git a/dist/config.toml.in b/dist/config.toml.in
+index 20d8546..76cb892 100644
+--- a/dist/config.toml.in
++++ b/dist/config.toml.in
+@@ -123,3 +123,7 @@ nas_reject_identity = false
+ # inactive/unprovisioned SIM draws a legitimate Authentication Reject on every
+ # attach/auth retry.
+ auth_failure = false
++# Flags a NAS Security Mode Command selecting null integrity (EIA0) -- NAS
++# signalling left unauthenticated, a stronger signal than null ciphering (EEA0).
++# Off by default: EIA0 is legitimate for an unauthenticated emergency call.
++null_integrity = false
+diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
+index b99a83c..db87e20 100644
+--- a/lib/src/analysis/analyzer.rs
++++ b/lib/src/analysis/analyzer.rs
+@@ -16,8 +16,8 @@ use super::{
+     imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
+     information_element::InformationElement, nas_null_cipher::NasNullCipherAnalyzer,
+     nas_reject::NasRejectAnalyzer, no_nas_messages::NoNasMessagesAnalyzer,
+-    null_cipher::NullCipherAnalyzer, priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
+-    test_analyzer::TestAnalyzer,
++    null_cipher::NullCipherAnalyzer, null_integrity::NullIntegrityAnalyzer,
++    priority_2g_downgrade::LteSib6And7DowngradeAnalyzer, test_analyzer::TestAnalyzer,
+ };
+ 
+ /// A list of booleans which stores information about which analyzers are enabled
+@@ -36,6 +36,7 @@ pub struct AnalyzerConfig {
+     pub no_nas_messages: bool,
+     pub nas_reject_identity: bool,
+     pub auth_failure: bool,
++    pub null_integrity: bool,
+ }
+ 
+ impl Default for AnalyzerConfig {
+@@ -57,6 +58,9 @@ impl Default for AnalyzerConfig {
+             // Off by default: #21 (synch failure) fires on a genuine SQN resync
+             // or a SIM swap, so the severity needs calibration first.
+             auth_failure: false,
++            // Off by default: EIA0 is legitimate for an unauthenticated emergency
++            // call, so it needs per-network false-positive calibration.
++            null_integrity: false,
+         }
+     }
+ }
+@@ -406,6 +410,10 @@ impl Harness {
+             harness.add_analyzer(Box::new(AuthFailureAnalyzer))
+         }
+ 
++        if analyzer_config.null_integrity {
++            harness.add_analyzer(Box::new(NullIntegrityAnalyzer))
++        }
++
+         if analyzer_config.diagnostic_analyzer {
+             harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
+         }
+@@ -605,12 +613,14 @@ mod tests {
+         let config: AnalyzerConfig = serde_json::from_value(json!({})).unwrap();
+         assert!(!config.nas_reject_identity);
+         assert!(!config.auth_failure);
++        assert!(!config.null_integrity);
+         // A config that sets an existing key keeps the rest at their defaults.
+         let config: AnalyzerConfig =
+             serde_json::from_value(json!({ "imsi_requested": true })).unwrap();
+         assert!(config.imsi_requested);
+         assert!(!config.nas_reject_identity);
+         assert!(!config.auth_failure);
++        assert!(!config.null_integrity);
+     }
+ 
+     #[test]
+@@ -654,6 +664,27 @@ mod tests {
+         }));
+     }
+ 
++    #[test]
++    fn new_with_config_wires_null_integrity_only_when_enabled() {
++        let metadata = DeviceMetadata::default();
++        let expected = NullIntegrityAnalyzer.get_name().into_owned();
++        let has = |config: &AnalyzerConfig| {
++            Harness::new_with_config(config, &metadata)
++                .get_metadata()
++                .analyzers
++                .iter()
++                .any(|a| a.name == expected)
++        };
++        assert!(has(&AnalyzerConfig {
++            null_integrity: true,
++            ..Default::default()
++        }));
++        assert!(!has(&AnalyzerConfig {
++            null_integrity: false,
++            ..Default::default()
++        }));
++    }
++
+     #[test]
+     fn test_analysis_row_deserialize_old_format() {
+         let row: AnalysisRow = serde_json::from_value(json!({
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index 8475987..b23a60f 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -9,6 +9,7 @@ pub mod nas_null_cipher;
+ pub mod nas_reject;
+ pub mod no_nas_messages;
+ pub mod null_cipher;
++pub mod null_integrity;
+ pub mod priority_2g_downgrade;
+ pub mod test_analyzer;
+ #[cfg(test)]
+diff --git a/lib/src/analysis/null_integrity.rs b/lib/src/analysis/null_integrity.rs
+new file mode 100644
+index 0000000..7dd501d
+--- /dev/null
++++ b/lib/src/analysis/null_integrity.rs
+@@ -0,0 +1,122 @@
++//! Flags a NAS Security Mode Command that selects null integrity protection
++//! (EIA0). EIA0 leaves NAS signalling with no integrity protection at all, so the
++//! network cannot be authenticated and an attacker can forge or modify NAS
++//! messages. 3GPP permits EIA0 only for an unauthenticated emergency-services
++//! attach (TS 33.401 5.1.4.1); selecting it for any normal attach is a strong
++//! false-base-station signal and a harder indicator than null ciphering (EEA0),
++//! which merely leaves traffic unencrypted while keeping it authenticated.
++//!
++//! The companion `nas_null_cipher` analyzer covers the ciphering half (EEA0);
++//! this one covers the integrity half (EIA0). High severity, but off by default
++//! until calibrated, since a genuine emergency call legitimately uses EIA0.
++
++use std::borrow::Cow;
++
++use chrono::{DateTime, FixedOffset};
++use pycrate_rs::nas::NASMessage;
++use pycrate_rs::nas::emm::EMMMessage;
++use pycrate_rs::nas::generated::emm::emm_security_mode_command::NASSecAlgoIntegAlgo;
++
++use super::analyzer::{Analyzer, Event, EventType};
++use super::information_element::{InformationElement, LteInformationElement};
++
++pub struct NullIntegrityAnalyzer;
++
++impl Analyzer for NullIntegrityAnalyzer {
++    fn get_name(&self) -> Cow<'_, str> {
++        Cow::from("Null integrity (EIA0) requested")
++    }
++
++    fn get_description(&self) -> Cow<'_, str> {
++        Cow::from(
++            "Flags a NAS Security Mode Command that selects the null integrity algorithm EIA0. \
++             EIA0 leaves NAS signalling unauthenticated, so the network identity cannot be verified \
++             and signalling can be forged -- a stronger false-base-station indicator than null \
++             ciphering (EEA0). 3GPP permits EIA0 only for an unauthenticated emergency-services \
++             attach, so a genuine emergency call is the main benign trigger.",
++        )
++    }
++
++    fn get_version(&self) -> u32 {
++        0
++    }
++
++    fn analyze_information_element(
++        &mut self,
++        ie: &InformationElement,
++        _packet_num: usize,
++        _timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        let InformationElement::LTE(lte) = ie else {
++            return None;
++        };
++        let LteInformationElement::NAS(nas) = lte.as_ref() else {
++            return None;
++        };
++        if let NASMessage::EMMMessage(EMMMessage::EMMSecurityModeCommand(cmd)) = nas
++            && cmd.nas_sec_algo.inner.integ_algo
++                == NASSecAlgoIntegAlgo::EPSIntegrityAlgorithmEIA0Null
++        {
++            return Some(Event {
++                event_type: EventType::High,
++                message: "NAS Security Mode Command selected null integrity (EIA0)".to_string(),
++            });
++        }
++        None
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::test_util::{collect_events, emm_message, packet_time};
++
++    // EMM Security Mode Command (TS 24.301 table 9.8.1).
++    const SECURITY_MODE_COMMAND: u8 = 93;
++    // A valid Security Mode Command body (adapted from the pycrate test vector
++    // 33 00 02 f0 70 c1): nas_sec_algo | nas_ksi | ue_sec_cap (len 2) | imeisv_req.
++    // Byte 0 is the NAS security algorithms octet: high nibble = ciphering algo,
++    // low nibble = integrity algo. 0x20 => EEA2 ciphering, EIA0 (null) integrity;
++    // 0x33 => EEA3/EIA3 (a real algorithm, the negative control).
++    const TAIL: [u8; 5] = [0x00, 0x02, 0xf0, 0x70, 0xc1];
++
++    fn run(nas_sec_algo: u8) -> Vec<(usize, Event)> {
++        let mut analyzer = NullIntegrityAnalyzer;
++        let mut body = vec![nas_sec_algo];
++        body.extend_from_slice(&TAIL);
++        collect_events(
++            &mut analyzer,
++            &[(emm_message(SECURITY_MODE_COMMAND, &body), packet_time(0))],
++        )
++    }
++
++    #[test]
++    fn eia0_null_integrity_is_high() {
++        let events = run(0x20); // EEA2 ciphering, EIA0 integrity
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::High);
++        assert!(events[0].1.message.contains("EIA0"));
++    }
++
++    #[test]
++    fn real_integrity_algorithm_is_not_flagged() {
++        assert!(run(0x33).is_empty()); // EEA3 ciphering, EIA3 integrity
++    }
++
++    #[test]
++    fn non_security_mode_command_is_ignored() {
++        // An Attach Reject (type 68) is EMM but not a Security Mode Command.
++        let mut analyzer = NullIntegrityAnalyzer;
++        assert!(
++            collect_events(&mut analyzer, &[(emm_message(68, &[22]), packet_time(0))]).is_empty()
++        );
++    }
++
++    #[test]
++    fn non_lte_information_element_is_ignored() {
++        let mut analyzer = NullIntegrityAnalyzer;
++        assert!(
++            collect_events(&mut analyzer, &[(InformationElement::GSM, packet_time(0))]).is_empty()
++        );
++    }
++}
+-- 
+2.56.1
+

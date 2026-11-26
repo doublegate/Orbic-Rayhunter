@@ -3,7 +3,7 @@
 Single source of truth for the current state of Orbic-Rayhunter. Other files point here instead
 of restating status. Updated at every sprint and phase boundary.
 
-- Last updated: 2026-11-26 (v1.2.0 WIP -- sinks + hardening + analyzer harness + NAS-Reject + auth-failure detectors, patches 0001-0008)
+- Last updated: 2026-11-26 (v1.2.0 WIP -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity detectors, patches 0001-0009; T-OR-054 blocked on parser)
 - Version: 1.1.1 (`Cargo.toml` `workspace.package.version = "1.1.1"`)
 - Upstream pin: EFForg/rayhunter v0.13.0 (cd462a1)
 - Target: Orbic RC400L, `ORB400L_V1.2.0_BVZRT`
@@ -49,15 +49,15 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | OTA block | applied & reboot-persistent (oma_dm/dmclient/mdm-daemon disabled) | T-OR-018 | reversible; undo manifest in backups/ |
 | Rayhunter on device | **our reproducible build installed & validated** (reboot-persistent, capturing; device-side SHA-256 verified at install) | T-OR-022, T-OR-036 | replaced upstream v0.13.0 on 2026-11-23 |
 | `orx` ops: doctor/backup/verify/install/uninstall/pull-logs/check/purge/rescue/alert | present (zero-dep, 136 tests, backup-gated) | T-OR-032..T-OR-036, T-OR-037 (check), T-OR-038 (pull-logs), T-OR-039, T-OR-040 (purge), T-OR-041 (rescue), T-OR-044 (alert status/test), T-OR-107 (alert set) | rescue is read-only (destructive `--apply` = T-OR-041b); retention policy (T-OR-040b) remains |
-| New analyzers | harness (0006, T-OR-051) + 2 detectors landed: NAS Reject identity-forcing (0007, T-OR-052), auth failure/reject (0008, T-OR-053); T-OR-054+ not yet started | T-OR-051..T-OR-064 | detectors ship OFF by default; enabling needs T-OR-061 on-device FP calibration |
+| New analyzers | harness (0006, T-OR-051) + 3 detectors landed: NAS Reject identity-forcing (0007, T-OR-052), auth failure/reject (0008, T-OR-053), null integrity EIA0 (0009, T-OR-055); T-OR-054 blocked on T-OR-110 parser work; T-OR-056/057 next | T-OR-051..T-OR-064 | detectors ship OFF by default; enabling needs T-OR-061 on-device FP calibration |
 
 ## Metrics snapshot
 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 109 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-051, T-OR-052, T-OR-053, T-OR-106, T-OR-107 (v1.2.0 sinks 045/046/047/049 + analyzer harness 051 + detectors 052/053 done at patch level, on-device validation/calibration pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, analyzers T-OR-054..064, T-OR-052 precision follow-ups T-OR-108, T-OR-053 stateful follow-up T-OR-109, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
-| Patches in series | 8 (`[UPSTREAM]` notification sinks 0001-0004 + review hardening 0005 + analyzer test harness 0006 + NAS Reject detector 0007 + auth-failure detector 0008, T-OR-045/046/047/049/051/052/053) | `patches/series` |
+| Tickets | 110 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-051, T-OR-052, T-OR-053, T-OR-055, T-OR-106, T-OR-107 (v1.2.0 sinks 045/046/047/049 + analyzer harness 051 + detectors 052/053/055 done at patch level, on-device validation/calibration pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, T-OR-054 BLOCKED on T-OR-110 parser work, analyzers T-OR-056..064, T-OR-052 precision follow-ups T-OR-108, T-OR-053 stateful follow-up T-OR-109, pycrate mobile-identity parsing T-OR-110, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
+| Patches in series | 9 (`[UPSTREAM]` notification sinks 0001-0004 + review hardening 0005 + analyzer test harness 0006 + NAS Reject detector 0007 + auth-failure detector 0008 + null-integrity detector 0009, T-OR-045/046/047/049/051/052/053/055) | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 136 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |

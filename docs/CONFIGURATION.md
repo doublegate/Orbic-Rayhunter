@@ -79,6 +79,7 @@ Identical to upstream in v1.0.0. Descriptions and planned additions:
 | `no_nas_messages` | `false` | `false` | `false` | upstream default; candidate to enable once our SIM state is stable, since it detects a missing or inactive SIM |
 | `nas_reject_identity` | `false` | `false` | `false` | v1.2.0 (patch 0007, T-OR-052): flags an Attach/TAU/Service Reject with an identity-forcing EMM cause (#9 Medium / #10 Low) -- the Devilray NAS-Reject IMSI-catching blind spot. Keys on the cause alone (does not confirm the reject was unprotected or that an IMSI re-attach followed). Off until T-OR-061 calibrates false positives: #9/#10 also occur benignly (MME restart, GUTI/MME-pool mismatch, idle-timer implicit detach) |
 | `auth_failure` | `false` | `false` | `false` | v1.2.0 (patch 0008, T-OR-053): flags a NAS Authentication Failure (#20 MAC failure High / #21 synch Low / #26 Medium) or an Authentication Reject (High) -- a false base station that cannot produce a valid AUTN. Off until T-OR-061 calibrates: #21 fires on a genuine SQN resync or SIM swap, and an inactive/unprovisioned SIM draws a legitimate Authentication Reject on every attach/auth retry (stateful suppression/dedup is T-OR-109) |
+| `null_integrity` | `false` | `false` | `false` | v1.2.0 (patch 0009, T-OR-055): flags a NAS Security Mode Command selecting null integrity (EIA0 -> High) -- NAS signalling left unauthenticated, a stronger signal than null ciphering (EEA0). Off until T-OR-061 calibrates: EIA0 is legitimate for an unauthenticated emergency call |
 
 ## Changing configuration
 
