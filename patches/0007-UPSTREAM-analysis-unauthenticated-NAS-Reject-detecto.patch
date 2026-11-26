@@ -1,4 +1,4 @@
-From 5c6927e9e5ac2ec4c6eac00e7ef52fdcfacf0aa4 Mon Sep 17 00:00:00 2001
+From d559a82224e1a8d2cf3928a001b34ade350bcb25 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 02:43:01 -0500
 Subject: [PATCH] [UPSTREAM] analysis: unauthenticated NAS Reject detector
@@ -34,9 +34,9 @@ Signed-off-by: DoubleGate <parobek@gmail.com>
  dist/config.toml.in            |   4 +
  lib/src/analysis/analyzer.rs   |  14 +-
  lib/src/analysis/mod.rs        |   1 +
- lib/src/analysis/nas_reject.rs | 252 +++++++++++++++++++++++++++++++++
+ lib/src/analysis/nas_reject.rs | 283 +++++++++++++++++++++++++++++++++
  lib/src/analysis/test_util.rs  |  10 ++
- 5 files changed, 279 insertions(+), 2 deletions(-)
+ 5 files changed, 310 insertions(+), 2 deletions(-)
  create mode 100644 lib/src/analysis/nas_reject.rs
 
 diff --git a/dist/config.toml.in b/dist/config.toml.in
@@ -111,10 +111,10 @@ index 9a5d10f..87445a0 100644
  pub mod priority_2g_downgrade;
 diff --git a/lib/src/analysis/nas_reject.rs b/lib/src/analysis/nas_reject.rs
 new file mode 100644
-index 0000000..266f481
+index 0000000..e3ad753
 --- /dev/null
 +++ b/lib/src/analysis/nas_reject.rs
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,283 @@
 +//! Detects an unauthenticated NAS Reject carrying an identity-forcing cause --
 +//! the "IR" (Identity Reveal) blind spot the Devilray study (Oh et al., 2026)
 +//! found in Rayhunter, which had keyed identity exposure only on an explicit
@@ -141,6 +141,10 @@ index 0000000..266f481
 +use pycrate_rs::nas::generated::emm::emm_service_reject::EMMCauseEMMCause as ServiceRejectCause;
 +use pycrate_rs::nas::generated::emm::emm_tracking_area_update_reject::EMMCauseEMMCause as TauRejectCause;
 +
++use telcom_parser::lte_rrc::{
++    DL_DCCH_MessageType, DL_DCCH_MessageType_c1, UL_CCCH_MessageType, UL_CCCH_MessageType_c1,
++};
++
 +use super::analyzer::{Analyzer, Event, EventType};
 +use super::information_element::{InformationElement, LteInformationElement};
 +
@@ -165,8 +169,13 @@ index 0000000..266f481
 +#[derive(Default)]
 +pub struct NasRejectAnalyzer {
 +    /// Whether a security context was established (a `Security Mode Complete` was
-+    /// seen) in the current attach cycle. A fresh request resets it; a reject
-+    /// before it is the integrity-unprotected, forgeable reject an FBS uses.
++    /// seen) in the current RRC connection / attach cycle. It is reset at every
++    /// connection or procedure boundary (RRC connection setup or release -- which
++    /// also covers a cell change, since a new cell means a new connection -- and
++    /// each UE-initiated NAS request), so a stale "secured" from an earlier
++    /// connection can never suppress detection in a later one (fail closed, i.e.
++    /// toward flagging). A reject before it is the integrity-unprotected,
++    /// forgeable reject an FBS uses.
 +    secured_this_cycle: bool,
 +}
 +
@@ -227,37 +236,59 @@ index 0000000..266f481
 +        let InformationElement::LTE(lte) = ie else {
 +            return None;
 +        };
-+        let LteInformationElement::NAS(nas) = lte.as_ref() else {
-+            return None;
-+        };
-+        let NASMessage::EMMMessage(emm) = nas else {
-+            return None;
-+        };
 +
-+        match emm {
-+            // A fresh attach cycle: no security context yet.
-+            EMMMessage::EMMAttachRequest(_)
-+            | EMMMessage::EMMTrackingAreaUpdateRequest(_)
-+            | EMMMessage::EMMExtServiceRequest(_) => {
++        match lte.as_ref() {
++            // A new RRC connection (also a new cell) or its release ends the
++            // window in which an earlier Security Mode Complete applies.
++            LteInformationElement::UlCcch(rrc)
++                if matches!(
++                    rrc.message,
++                    UL_CCCH_MessageType::C1(
++                        UL_CCCH_MessageType_c1::RrcConnectionRequest(_)
++                            | UL_CCCH_MessageType_c1::RrcConnectionReestablishmentRequest(_)
++                    )
++                ) =>
++            {
++                self.secured_this_cycle = false;
++                None
++            }
++            LteInformationElement::DlDcch(rrc)
++                if matches!(
++                    rrc.message,
++                    DL_DCCH_MessageType::C1(DL_DCCH_MessageType_c1::RrcConnectionRelease(_))
++                ) =>
++            {
++                self.secured_this_cycle = false;
++                None
++            }
++
++            // A fresh UE-initiated NAS procedure: no security context yet.
++            LteInformationElement::NAS(NASMessage::EMMMessage(
++                EMMMessage::EMMAttachRequest(_)
++                | EMMMessage::EMMTrackingAreaUpdateRequest(_)
++                | EMMMessage::EMMExtServiceRequest(_),
++            )) => {
 +                self.secured_this_cycle = false;
 +                None
 +            }
 +            // Security context established for this cycle.
-+            EMMMessage::EMMSecurityModeComplete(_) => {
++            LteInformationElement::NAS(NASMessage::EMMMessage(
++                EMMMessage::EMMSecurityModeComplete(_),
++            )) => {
 +                self.secured_this_cycle = true;
 +                None
 +            }
-+            EMMMessage::EMMAttachReject(r)
++            LteInformationElement::NAS(NASMessage::EMMMessage(EMMMessage::EMMAttachReject(r)))
 +                if is_identity_forcing!(&r.emm_cause.inner, AttachRejectCause) =>
 +            {
 +                self.flag("Attach Reject")
 +            }
-+            EMMMessage::EMMTrackingAreaUpdateReject(r)
-+                if is_identity_forcing!(&r.emm_cause.inner, TauRejectCause) =>
-+            {
++            LteInformationElement::NAS(NASMessage::EMMMessage(
++                EMMMessage::EMMTrackingAreaUpdateReject(r),
++            )) if is_identity_forcing!(&r.emm_cause.inner, TauRejectCause) => {
 +                self.flag("Tracking Area Update Reject")
 +            }
-+            EMMMessage::EMMServiceReject(r)
++            LteInformationElement::NAS(NASMessage::EMMMessage(EMMMessage::EMMServiceReject(r)))
 +                if is_identity_forcing!(&r.emm_cause.inner, ServiceRejectCause) =>
 +            {
 +                self.flag("Service Reject")
