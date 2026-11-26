@@ -5,30 +5,48 @@
 # prints a per-detector FP table from the daemon's own analysis -- so it
 # reflects exactly what ran on-device, with no rebuild. The three v1.2.0
 # detectors must be enabled on the device (see docs/ANALYZERS.md, "Field
-# calibration"); recordings captured before they were enabled are reported as
-# "not covered".
+# calibration"); recordings captured before they were enabled contribute no
+# coverage and are reported as such.
 #
-# Captures hold real traffic and must never be committed -- keep <captures-dir>
-# outside the repo (e.g. ~/orbic-captures) or in a gitignored path.
+# Captures hold real traffic and must never be committed. This script refuses a
+# <captures-dir> that resolves inside the repo unless git ignores it.
 #
-# Usage: scripts/calib-run.sh [<captures-dir>] [--ip <addr>]
+# Usage: scripts/calib-run.sh [<captures-dir>] [--ip <addr>] [--all]
 #   <captures-dir> default: ~/orbic-captures
+#   --all  also tabulate upstream analyzers in the snapshot
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
 cap="${HOME}/orbic-captures"
 ip_args=()
+snap_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --ip) ip_args+=(--ip "$2"); shift 2 ;;
-        -*)   echo "unknown flag: $1" >&2; exit 2 ;;
-        *)    cap="$1"; shift ;;
+        -h|--help) usage 0 ;;
+        --ip)      ip_args+=(--ip "$2"); shift 2 ;;
+        --all)     snap_args+=(--all); shift ;;
+        -*)        echo "unknown flag: $1" >&2; usage 2 ;;
+        *)         cap="$1"; shift ;;
     esac
 done
 mkdir -p "$cap"
+cap="$(cd "$cap" && pwd -P)"
+
+# Fail closed: never let real captures land in a tracked path inside the repo.
+case "$cap/" in
+    "$root"/*)
+        if ! git -C "$root" check-ignore -q "$cap"; then
+            echo "refusing: captures dir '$cap' is inside the repo and not gitignored." >&2
+            echo "Use a path outside the repo (e.g. ~/orbic-captures) -- captures are never committed." >&2
+            exit 2
+        fi
+        ;;
+esac
 
 echo "[1/2] pull-logs -> $cap"
-(cd "$root" && cargo run -q -p orx-cli -- pull-logs --to "$cap" "${ip_args[@]}") 2>&1 | tail -1
+(cd "$root" && cargo run -q -p orx-cli -- pull-logs --to "$cap" ${ip_args[@]+"${ip_args[@]}"}) 2>&1 | tail -1
 
 echo "[2/2] snapshot"
-python3 "$root/scripts/calib-snapshot.py" "$cap"
+python3 "$root/scripts/calib-snapshot.py" "$cap" ${snap_args[@]+"${snap_args[@]}"}
