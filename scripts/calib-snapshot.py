@@ -75,7 +75,7 @@ def analyze(files: list[Path], want_all: bool = False) -> dict:
     other: dict[str, int] = {}
     samples: list[str] = []
     recs_total = recs_covered = recs_unreadable = 0
-    total_rows = skipped_rows = malformed_rows = analyzed_rows = 0
+    skipped_rows = malformed_rows = analyzed_rows = 0
 
     for f in files:
         recs_total += 1
@@ -83,23 +83,43 @@ def analyze(files: list[Path], want_all: bool = False) -> dict:
         det_idx: dict[int, str] = {}
         header_ok = False
         rec_analyzed = 0
+        # The NDJSON comes from the device and is an untrusted boundary: read
+        # bytes and decode per line so a garbled byte (e.g. a flash cut on power
+        # loss) is contained to one line, and validate every shape before use.
+        unreadable = False
         try:
-            fh = f.open(encoding="utf-8")
+            fh = f.open("rb")
         except OSError:
             recs_unreadable += 1
             continue
         with fh:
             for raw in fh:
-                line = raw.strip()
+                try:
+                    line = raw.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    if not header_ok:
+                        unreadable = True
+                        break
+                    malformed_rows += 1
+                    continue
                 if not line:
                     continue
                 if not header_ok:
                     try:
                         header = json.loads(line)
-                        names = [a["name"] for a in header.get("analyzers", [])]
-                    except (json.JSONDecodeError, KeyError, TypeError):
-                        recs_unreadable += 1
+                    except json.JSONDecodeError:
+                        unreadable = True
                         break
+                    if not isinstance(header, dict) or not isinstance(
+                        header.get("analyzers"), list
+                    ):
+                        unreadable = True
+                        break
+                    names = [
+                        a["name"]
+                        for a in header["analyzers"]
+                        if isinstance(a, dict) and isinstance(a.get("name"), str)
+                    ]
                     det_idx = {
                         i: DETECTORS[n] for i, n in enumerate(names) if n in DETECTORS
                     }
@@ -112,13 +132,20 @@ def analyze(files: list[Path], want_all: bool = False) -> dict:
                 except json.JSONDecodeError:
                     malformed_rows += 1
                     continue
-                total_rows += 1
+                if not isinstance(row, dict):
+                    malformed_rows += 1
+                    continue
                 if row.get("skipped_message_reason") is not None:
                     skipped_rows += 1
                     continue
+                events = row.get("events")
+                if not isinstance(events, list):
+                    # not skipped, but no analyzable events array -> schema-invalid
+                    malformed_rows += 1
+                    continue
                 analyzed_rows += 1
                 rec_analyzed += 1
-                for i, ev in enumerate(row.get("events") or []):
+                for i, ev in enumerate(events):
                     if ev is None:
                         continue
                     if i in det_idx:
@@ -131,6 +158,12 @@ def analyze(files: list[Path], want_all: bool = False) -> dict:
                     elif want_all:
                         name = names[i] if i < len(names) else f"#{i}"
                         other[name] = other.get(name, 0) + 1
+        # An empty or header-less file provides no evidence -> unreadable.
+        if not header_ok:
+            unreadable = True
+        if unreadable:
+            recs_unreadable += 1
+            continue
         # Credit this recording's analyzed messages to each detector it enabled.
         for key in det_idx.values():
             per[key]["covered_msgs"] += rec_analyzed
@@ -142,7 +175,6 @@ def analyze(files: list[Path], want_all: bool = False) -> dict:
         "recs_total": recs_total,
         "recs_covered": recs_covered,
         "recs_unreadable": recs_unreadable,
-        "total_rows": total_rows,
         "skipped_rows": skipped_rows,
         "malformed_rows": malformed_rows,
         "analyzed_rows": analyzed_rows,
@@ -317,6 +349,47 @@ def selftest() -> int:
             "malformed row counted, excluded from analyzed",
             r["malformed_rows"] == 1 and r["analyzed_rows"] == 1,
         )
+
+        # non-object JSON header (null / [] / number) -> unreadable, no crash
+        (dd / "nonobj.ndjson").write_text(
+            "[1, 2, 3]\n" + row([None, None, None, None]) + "\n"
+        )
+        r = analyze([dd / "nonobj.ndjson"])
+        check(
+            "non-object header -> unreadable",
+            r["recs_unreadable"] == 1 and r["recs_covered"] == 0,
+        )
+
+        # header dict without "analyzers" -> unreadable
+        (dd / "noan.ndjson").write_text('{"rayhunter": {}}\n' + row([None]) + "\n")
+        r = analyze([dd / "noan.ndjson"])
+        check("header without analyzers -> unreadable", r["recs_unreadable"] == 1)
+
+        # empty file -> unreadable, not a clean recording
+        (dd / "empty.ndjson").write_text("")
+        r = analyze([dd / "empty.ndjson"])
+        check(
+            "empty file -> unreadable",
+            r["recs_unreadable"] == 1 and r["recs_covered"] == 0,
+        )
+
+        # non-object row and row lacking events -> malformed, not analyzed
+        (dd / "badrows.ndjson").write_text(
+            json.dumps(hdr10)
+            + "\n"
+            + "123\n"
+            + '{"packet_timestamp": "x", "skipped_message_reason": null}\n'
+        )
+        r = analyze([dd / "badrows.ndjson"])
+        check(
+            "non-object / no-events rows -> malformed, 0 analyzed",
+            r["malformed_rows"] == 2 and r["analyzed_rows"] == 0,
+        )
+
+        # invalid UTF-8 in the header line -> unreadable, no exception
+        (dd / "utf8.ndjson").write_bytes(b"\xff\xfe not utf8\n")
+        r = analyze([dd / "utf8.ndjson"])
+        check("invalid UTF-8 header -> unreadable", r["recs_unreadable"] == 1)
 
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

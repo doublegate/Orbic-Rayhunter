@@ -3,7 +3,7 @@
 Single source of truth for the current state of Orbic-Rayhunter. Other files point here instead
 of restating status. Updated at every sprint and phase boundary.
 
-- Last updated: 2026-11-26 (v1.2.0 WIP -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity detectors, patches 0001-0009; T-OR-054 blocked on parser; T-OR-061 device session started -- patched build installed, detectors live, calibration tooling + 0-FP baseline)
+- Last updated: 2026-11-26 (v1.2.0 WIP -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity detectors, patches 0001-0009; T-OR-054 blocked on parser; T-OR-061 device session started -- patched build installed, detectors live, calibration tooling + indicative 0-FP baseline via a local check patch, committed offline path T-OR-113)
 - Version: 1.1.1 (`Cargo.toml` `workspace.package.version = "1.1.1"`)
 - Upstream pin: EFForg/rayhunter v0.13.0 (cd462a1)
 - Target: Orbic RC400L, `ORB400L_V1.2.0_BVZRT`
@@ -108,8 +108,11 @@ is in progress** (user present):
 
 - DONE: patched daemon (patches 0001-0009) built and installed on the device over a verified
   checksummed backup; all 3 detectors enabled on-device and live in the capture pipeline.
-- DONE: calibration tooling (`scripts/calib-run.sh`, `scripts/calib-snapshot.py`) + initial
-  baseline -- 0 detector firings over ~600k messages of real Verizon traffic (offline re-analysis).
+- DONE: calibration tooling (`scripts/calib-run.sh`, `scripts/calib-snapshot.py`) + an indicative
+  baseline -- 0 detector firings over ~600k messages of real Verizon traffic, from offline
+  re-analysis using a **local, uncommitted** `rayhunter-check` patch that enables the default-off
+  detectors (the committed offline path is T-OR-113; the committed tooling reads the live daemon
+  NDJSON). Treat as indicative pending the live-NDJSON soak.
 - Remaining: continue the false-positive soak and decide each detector's default on/off; write
   T-OR-110 (mobile-identity parsing) against real identity IEs to unblock T-OR-054; seed T-OR-112
   (RRC golden vectors) to unblock T-OR-056/057; verify the T-OR-055 EIA0 rejection path; read the

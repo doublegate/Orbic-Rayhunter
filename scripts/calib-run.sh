@@ -15,7 +15,9 @@
 #   <captures-dir> default: ~/orbic-captures
 #   --all  also tabulate upstream analyzers in the snapshot
 set -euo pipefail
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve physically (pwd -P) so the repo-containment check below is not fooled
+# by a symlinked repo path.
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
@@ -31,8 +33,10 @@ while [ $# -gt 0 ]; do
         *)         cap="$1"; shift ;;
     esac
 done
-mkdir -p "$cap"
-cap="$(cd "$cap" && pwd -P)"
+# Canonicalise WITHOUT creating anything (realpath -m works on a nonexistent
+# path), so the repo-containment check runs BEFORE any mkdir -- a rejected path
+# must not leave a directory behind inside the repo.
+cap="$(realpath -m "$cap")"
 
 # Fail closed: never let real captures land in a tracked path inside the repo.
 case "$cap/" in
@@ -44,6 +48,7 @@ case "$cap/" in
         fi
         ;;
 esac
+mkdir -p "$cap"
 
 echo "[1/2] pull-logs -> $cap"
 (cd "$root" && cargo run -q -p orx-cli -- pull-logs --to "$cap" ${ip_args[@]+"${ip_args[@]}"}) 2>&1 | tail -1
