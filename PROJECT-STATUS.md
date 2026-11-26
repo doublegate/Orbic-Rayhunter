@@ -48,7 +48,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Verified device backup | on-device `tar` archives of every writable fs captured and verified (`backups/2026-11-23-V1.2.0/fs/`, two-pass + tar-exit-status + readable); encrypted off-repo copy on the DS-1621+ (GPG to the owner's key) | T-OR-015..T-OR-017 done | gates every device write |
 | OTA block | applied & reboot-persistent (oma_dm/dmclient/mdm-daemon disabled) | T-OR-018 | reversible; undo manifest in backups/ |
 | Rayhunter on device | **our reproducible build installed & validated** (reboot-persistent, capturing; device-side SHA-256 verified at install) | T-OR-022, T-OR-036 | replaced upstream v0.13.0 on 2026-11-23 |
-| `orx` ops: doctor/backup/verify/install/uninstall/pull-logs/check/purge/rescue/alert | present (zero-dep, 135 tests, backup-gated) | T-OR-032..T-OR-036, T-OR-037 (check), T-OR-038 (pull-logs), T-OR-039, T-OR-040 (purge), T-OR-041 (rescue), T-OR-044 (alert status/test), T-OR-107 (alert set) | rescue is read-only (destructive `--apply` = T-OR-041b); retention policy (T-OR-040b) remains |
+| `orx` ops: doctor/backup/verify/install/uninstall/pull-logs/check/purge/rescue/alert | present (zero-dep, 136 tests, backup-gated) | T-OR-032..T-OR-036, T-OR-037 (check), T-OR-038 (pull-logs), T-OR-039, T-OR-040 (purge), T-OR-041 (rescue), T-OR-044 (alert status/test), T-OR-107 (alert set) | rescue is read-only (destructive `--apply` = T-OR-041b); retention policy (T-OR-040b) remains |
 | New analyzers | absent | T-OR-051..T-OR-064 | |
 
 ## Metrics snapshot
@@ -59,7 +59,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Tickets | 107 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-106, T-OR-107 (v1.2.0 sinks 045/046/047/049 done at patch level, on-device validation pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 5 (`[UPSTREAM]` notification sinks 0001-0004 + review hardening 0005, T-OR-045/046/047/049) | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
-| Host unit tests | 135 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
+| Host unit tests | 136 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
 | Latest release | v1.1.1 (2026-11-25, via PR) | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |

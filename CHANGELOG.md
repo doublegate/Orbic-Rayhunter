@@ -30,12 +30,14 @@
   the retry time; sinks are **delivered concurrently** per tick so a hung sink cannot block the
   others; `POST /api/test-notification` now tests every configured sink and reports per-sink results.
 - **`orx-cli` hardening** (`orx alert set`): `validate_ntfy_url` rejects embedded `user:pass@`
-  userinfo (which leaked when the URL was printed) and validates the host + optional non-zero port;
+  userinfo (which leaked when the URL was printed) and checks the authority shape (non-empty host, a
+  bracketed IPv6 literal, and an optional numeric non-zero port -- it is a shape check, not full
+  WHATWG host validation);
   the config snapshot (`pull::write_atomic`) now writes via an O_EXCL, mode-`0600` temp with a unique
   name and removes the partial temp on error; `.gitignore` ignores `orx-config-before-*.json`.
 
 These are `patches/0001-0005` on the pinned upstream v0.13.0 daemon, validated on upstream's own gates
-(`cargo fmt`, `clippy -D warnings`, 110 tests from `cargo test -p rayhunter-daemon`, `daemon/web`
+(`cargo fmt`, `clippy -D warnings`, 112 tests from `cargo test -p rayhunter-daemon`, `daemon/web`
 check + tests). MQTT (T-OR-048) and a
 persistent retry queue (T-OR-050) are deferred. On-device validation is batched with the analyzers phase.
 

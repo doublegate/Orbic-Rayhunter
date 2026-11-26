@@ -730,6 +730,30 @@ mod tests {
     }
 
     #[test]
+    fn write_atomic_removes_temp_on_failure() {
+        let dir = tmp();
+        // The final rename(file -> existing directory) fails (EISDIR), exercising
+        // the error path; the partial temp must be cleaned up, not left behind.
+        let target = dir.join("target-is-a-dir");
+        std::fs::create_dir(&target).unwrap();
+        assert!(
+            write_atomic(&target, b"data").is_err(),
+            "rename onto a directory should fail"
+        );
+        let leftover: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "temp not cleaned up on failure: {leftover:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn parse_manifest_collects_entries_and_current() {
         let body = r#"{"entries":[{"name":"1795","qmdl_size_bytes":100,"stop_reason":"UserRequested"}],"current_entry":{"name":"1796","qmdl_size_bytes":200,"stop_reason":null}}"#;
         let r = parse_manifest(body).unwrap();

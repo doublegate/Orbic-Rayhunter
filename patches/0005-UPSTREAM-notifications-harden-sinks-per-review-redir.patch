@@ -1,4 +1,4 @@
-From 26abac90f489dbfbcd647b1d30d79fb4cf233703 Mon Sep 17 00:00:00 2001
+From 7002afecb8a4913b49acad21322e9f292e4a8993 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 00:24:06 -0500
 Subject: [PATCH] [UPSTREAM] notifications: harden sinks per review (redirects,
@@ -41,13 +41,13 @@ Hardening of the notification sinks (0001-0004) after the Antigravity review:
 Ref: Orbic-Rayhunter T-OR-045..049 (PR #16/#17 review follow-up).
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- daemon/src/notifications.rs | 358 ++++++++++++++++++++++++++++++++----
- daemon/src/server.rs        | 240 +++++++++++++++++++-----
+ daemon/src/notifications.rs | 402 ++++++++++++++++++++++++++++++++----
+ daemon/src/server.rs        | 250 ++++++++++++++++++----
  dist/config.toml.in         |   3 +-
- 3 files changed, 518 insertions(+), 83 deletions(-)
+ 3 files changed, 571 insertions(+), 84 deletions(-)
 
 diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
-index 387c47d..ac255b9 100644
+index 387c47d..1a85ae5 100644
 --- a/daemon/src/notifications.rs
 +++ b/daemon/src/notifications.rs
 @@ -4,6 +4,7 @@ use std::{
@@ -351,7 +351,58 @@ index 387c47d..ac255b9 100644
                          status.failed_since_last_success += 1;
                          status.last_attempt = Some(Instant::now());
                      }
-@@ -820,4 +920,182 @@ mod tests {
+@@ -568,6 +668,50 @@ mod tests {
+         cleanup_worker(notification_sender, task_tracker).await;
+     }
+ 
++    #[tokio::test]
++    async fn test_notification_worker_omits_whitespace_auth_header() {
++        let (received_messages, received_headers, url) = setup_test_server().await;
++
++        let task_tracker = TaskTracker::new();
++        let notification_service = NotificationService::new(Some(url), None, None);
++        let notification_sender = notification_service.new_handler();
++
++        run_notification_worker(
++            &task_tracker,
++            notification_service,
++            vec![NotificationType::Warning],
++            false,
++            Some("   ".to_string()), // whitespace-only ntfy_auth => treated as unset
++            None,
++        );
++
++        notification_sender
++            .send(Notification::new(
++                NotificationType::Warning,
++                "test warning".to_string(),
++                None,
++            ))
++            .await
++            .unwrap();
++
++        tokio::time::sleep(Duration::from_secs(3)).await;
++
++        let messages = received_messages.lock().await;
++        assert_eq!(messages.len(), 1); // still delivered...
++        drop(messages);
++
++        let headers = received_headers.lock().await;
++        assert_eq!(headers.len(), 1);
++        // ...but a whitespace-only credential sends NO Authorization header.
++        assert!(
++            headers[0].get("Authorization").is_none(),
++            "whitespace-only ntfy_auth must not send an Authorization header"
++        );
++        drop(headers);
++
++        cleanup_worker(notification_sender, task_tracker).await;
++    }
++
+     #[tokio::test]
+     async fn test_notification_worker_sends_webhook_json() {
+         let (received_messages, received_headers, url) = setup_test_server().await;
+@@ -820,4 +964,182 @@ mod tests {
  
          cleanup_worker(notification_sender, task_tracker).await;
      }
@@ -535,7 +586,7 @@ index 387c47d..ac255b9 100644
 +    }
  }
 diff --git a/daemon/src/server.rs b/daemon/src/server.rs
-index a3976d1..2d2f2ae 100644
+index a3976d1..ce3df15 100644
 --- a/daemon/src/server.rs
 +++ b/daemon/src/server.rs
 @@ -155,6 +155,12 @@ pub async fn get_config(
@@ -551,7 +602,19 @@ index a3976d1..2d2f2ae 100644
      Ok(Json(config))
  }
  
-@@ -216,6 +222,19 @@ pub async fn set_config(
+@@ -187,7 +193,10 @@ fn resolve_endpoint_secret(
+     match incoming_secret.as_deref() {
+         None if incoming_url == stored_url => stored_secret.map(str::to_string),
+         None => None,
+-        Some("") => None,
++        // An empty or whitespace-only secret clears the credential (the worker
++        // and test endpoint also treat whitespace-only as unset), so inert
++        // whitespace is never persisted to config.toml.
++        Some(s) if s.trim().is_empty() => None,
+         Some(_) => incoming_secret,
+     }
+ }
+@@ -216,6 +225,19 @@ pub async fn set_config(
          config.gps_fixed_latitude = None;
          config.gps_fixed_longitude = None;
      }
@@ -571,7 +634,7 @@ index a3976d1..2d2f2ae 100644
      config.ntfy_auth = resolve_endpoint_secret(
          config.ntfy_auth.clone(),
          config.ntfy_url.as_deref(),
-@@ -226,7 +245,7 @@ pub async fn set_config(
+@@ -226,7 +248,7 @@ pub async fn set_config(
          config.gotify_token.clone(),
          config.gotify_url.as_deref(),
          state.config.gotify_token.as_deref(),
@@ -580,7 +643,7 @@ index a3976d1..2d2f2ae 100644
      );
      // webhook_url is redacted from GET (it may embed a credential), so a
      // round-trip that omits it must keep the stored value.
-@@ -278,53 +297,139 @@ pub async fn set_config(
+@@ -278,53 +300,139 @@ pub async fn set_config(
  pub async fn test_notification(
      State(state): State<Arc<ServerState>>,
  ) -> Result<(StatusCode, String), (StatusCode, String)> {
@@ -591,11 +654,11 @@ index a3976d1..2d2f2ae 100644
 +    use crate::notifications::{
 +        NotificationType, gotify_body, gotify_message_url, ntfy_headers_for, webhook_body,
 +    };
-+
-+    let cfg = &state.config;
-+    let message = "Test notification from Rayhunter".to_string();
  
 -    if url.is_empty() {
++    let cfg = &state.config;
++    let message = "Test notification from Rayhunter".to_string();
++
 +    // One test request per CONFIGURED sink (each with the same headers/body a
 +    // real notification uses), so a webhook-only or Gotify-only setup is tested,
 +    // and a multi-sink setup tests every sink rather than just ntfy.
@@ -670,7 +733,12 @@ index a3976d1..2d2f2ae 100644
 +                format!("failed to create HTTP client: {err}"),
 +            )
 +        })?;
-+
+ 
+-    // Include the configured Authorization header so the test reaches a
+-    // protected ntfy endpoint, just like a real notification does.
+-    let mut headers: Vec<(&str, &str)> = Vec::new();
+-    if let Some(auth) = &state.config.ntfy_auth {
+-        headers.push(("Authorization", auth.as_str()));
 +    // Send to every configured sink concurrently (matching the worker).
 +    let mut set = tokio::task::JoinSet::new();
 +    for s in sinks {
@@ -695,21 +763,6 @@ index a3976d1..2d2f2ae 100644
 +            .map_err(|e| format!("{e}"));
 +            (name, result)
 +        });
-+    }
- 
--    // Include the configured Authorization header so the test reaches a
--    // protected ntfy endpoint, just like a real notification does.
--    let mut headers: Vec<(&str, &str)> = Vec::new();
--    if let Some(auth) = &state.config.ntfy_auth {
--        headers.push(("Authorization", auth.as_str()));
-+    let mut ok: Vec<&'static str> = Vec::new();
-+    let mut failed: Vec<String> = Vec::new();
-+    while let Some(joined) = set.join_next().await {
-+        match joined {
-+            Ok((name, Ok(()))) => ok.push(name),
-+            Ok((name, Err(e))) => failed.push(format!("{name}: {e}")),
-+            Err(e) => failed.push(format!("task: {e}")),
-+        }
      }
  
 -    crate::notifications::send_notification(
@@ -722,6 +775,16 @@ index a3976d1..2d2f2ae 100644
 -    .await
 -    .map(|()| {
 -        (
++    let mut ok: Vec<&'static str> = Vec::new();
++    let mut failed: Vec<String> = Vec::new();
++    while let Some(joined) = set.join_next().await {
++        match joined {
++            Ok((name, Ok(()))) => ok.push(name),
++            Ok((name, Err(e))) => failed.push(format!("{name}: {e}")),
++            Err(e) => failed.push(format!("task: {e}")),
++        }
++    }
++
 +    ok.sort_unstable();
 +    failed.sort();
 +    if failed.is_empty() {
@@ -756,7 +819,7 @@ index a3976d1..2d2f2ae 100644
  }
  
  /// Response for GET /api/time
-@@ -712,7 +817,7 @@ mod tests {
+@@ -712,7 +820,7 @@ mod tests {
      }
  
      #[tokio::test]
@@ -765,7 +828,7 @@ index a3976d1..2d2f2ae 100644
          let (_temp_dir, store_lock) = create_test_qmdl_store().await;
          let config = Config {
              ntfy_auth: Some("Bearer tk_secret".to_string()),
-@@ -737,6 +842,57 @@ mod tests {
+@@ -737,6 +845,57 @@ mod tests {
          );
      }
  
@@ -823,7 +886,7 @@ index a3976d1..2d2f2ae 100644
      #[test]
      fn resolve_secret_preserves_clears_replaces() {
          // None -> keep the stored value
-@@ -751,7 +907,7 @@ mod tests {
+@@ -751,7 +910,7 @@ mod tests {
      }
  
      #[test]
@@ -832,7 +895,7 @@ index a3976d1..2d2f2ae 100644
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
              resolve_endpoint_secret(None, url, Some("Bearer x"), url),
-@@ -760,7 +916,7 @@ mod tests {
+@@ -760,7 +919,7 @@ mod tests {
      }
  
      #[test]
@@ -841,7 +904,7 @@ index a3976d1..2d2f2ae 100644
          // The config API is unauthenticated: a write that repoints ntfy_url must
          // NOT carry the stored credential to the new endpoint.
          assert_eq!(
-@@ -775,7 +931,7 @@ mod tests {
+@@ -775,16 +934,21 @@ mod tests {
      }
  
      #[test]
@@ -850,7 +913,13 @@ index a3976d1..2d2f2ae 100644
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
              resolve_endpoint_secret(Some(String::new()), url, Some("Bearer x"), url),
-@@ -784,7 +940,7 @@ mod tests {
+             None
+         );
++        // A whitespace-only secret also clears (never persisted as an inert value).
++        assert_eq!(
++            resolve_endpoint_secret(Some("   ".to_string()), url, Some("Bearer x"), url),
++            None
++        );
      }
  
      #[test]
