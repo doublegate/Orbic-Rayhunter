@@ -115,11 +115,21 @@ def analyze(files: list[Path], want_all: bool = False) -> dict:
                     ):
                         unreadable = True
                         break
-                    names = [
-                        a["name"]
-                        for a in header["analyzers"]
-                        if isinstance(a, dict) and isinstance(a.get("name"), str)
-                    ]
+                    entries = header["analyzers"]
+                    # `names` must stay 1:1 with each row's `events` array, so a
+                    # bad entry cannot be filtered out (that would shift indices
+                    # and misattribute firings) -- fail closed instead. Duplicate
+                    # names would also double-count coverage, so reject them.
+                    if not all(
+                        isinstance(a, dict) and isinstance(a.get("name"), str)
+                        for a in entries
+                    ):
+                        unreadable = True
+                        break
+                    names = [a["name"] for a in entries]
+                    if len(set(names)) != len(names):
+                        unreadable = True
+                        break
                     det_idx = {
                         i: DETECTORS[n] for i, n in enumerate(names) if n in DETECTORS
                     }
@@ -139,8 +149,10 @@ def analyze(files: list[Path], want_all: bool = False) -> dict:
                     skipped_rows += 1
                     continue
                 events = row.get("events")
-                if not isinstance(events, list):
-                    # not skipped, but no analyzable events array -> schema-invalid
+                if not isinstance(events, list) or len(events) != len(names):
+                    # not skipped, but the events array is missing, the wrong
+                    # type, or not 1:1 with the analyzer header (truncated row):
+                    # its indices can't be trusted -> schema-invalid, not analyzed
                     malformed_rows += 1
                     continue
                 analyzed_rows += 1
@@ -164,8 +176,10 @@ def analyze(files: list[Path], want_all: bool = False) -> dict:
         if unreadable:
             recs_unreadable += 1
             continue
-        # Credit this recording's analyzed messages to each detector it enabled.
-        for key in det_idx.values():
+        # Credit this recording's analyzed messages to each detector it enabled
+        # (set() so a detector is credited once even if something slipped a
+        # duplicate index through).
+        for key in set(det_idx.values()):
             per[key]["covered_msgs"] += rec_analyzed
 
     return {
@@ -390,6 +404,45 @@ def selftest() -> int:
         (dd / "utf8.ndjson").write_bytes(b"\xff\xfe not utf8\n")
         r = analyze([dd / "utf8.ndjson"])
         check("invalid UTF-8 header -> unreadable", r["recs_unreadable"] == 1)
+
+        # a non-dict analyzer entry before a detector must NOT shift indices:
+        # fail closed (unreadable) rather than filter it out
+        shifted = {
+            "analyzers": [123] + hdr10["analyzers"],
+            "rayhunter": {},
+            "report_version": 1,
+        }
+        (dd / "shift.ndjson").write_text(
+            json.dumps(shifted) + "\n" + row([None] * 5) + "\n"
+        )
+        r = analyze([dd / "shift.ndjson"])
+        check(
+            "bad analyzer entry -> unreadable (no index shift)",
+            r["recs_unreadable"] == 1 and r["recs_covered"] == 0,
+        )
+
+        # truncated events row (len != analyzer count) -> malformed, not analyzed
+        (dd / "trunc.ndjson").write_text(
+            json.dumps(hdr10) + "\n" + row([None, None]) + "\n"
+        )
+        r = analyze([dd / "trunc.ndjson"])
+        check(
+            "truncated events row -> malformed, 0 analyzed",
+            r["malformed_rows"] == 1
+            and r["analyzed_rows"] == 0
+            and r["per"]["auth_failure"]["covered_msgs"] == 0,
+        )
+
+        # duplicate analyzer name in header -> unreadable (would double-count)
+        dup = {
+            "analyzers": hdr10["analyzers"]
+            + [{"name": "Authentication failure or reject", "version": 0}],
+            "rayhunter": {},
+            "report_version": 1,
+        }
+        (dd / "dup.ndjson").write_text(json.dumps(dup) + "\n" + row([None] * 5) + "\n")
+        r = analyze([dd / "dup.ndjson"])
+        check("duplicate analyzer name -> unreadable", r["recs_unreadable"] == 1)
 
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
