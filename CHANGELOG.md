@@ -67,8 +67,10 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   `auth_failure`): flags a NAS Authentication Failure (EMM cause #20 MAC failure -> High, #21 synch
   failure -> Low, #26 -> Medium) or an Authentication Reject (-> High). A false base station with
   no access to the subscriber's home keys cannot produce a valid AUTN, so the USIM rejects the
-  challenge (#20 is the direct signature, near-impossible benignly on a home network) or the network
-  rejects the response. Stateless. **Off by default**: #21 also fires on a genuine SQN resync or a
+  challenge with an Authentication Failure (#20 is the direct signature, near-impossible benignly on
+  a home network); an Authentication Reject is sent by a network that cannot validate the UE or
+  injected by a rogue base station to invalidate the USIM. Stateless. **Off by default**: #21 also
+  fires on a genuine SQN resync or a
   SIM swap, and an inactive/unprovisioned SIM draws a legitimate Authentication Reject on every
   attach/auth retry (stateful suppression and dedup are tracked as T-OR-109), so it needs T-OR-061
   calibration.

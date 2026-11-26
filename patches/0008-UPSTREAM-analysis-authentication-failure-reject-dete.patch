@@ -1,4 +1,4 @@
-From c20188ce1dd83b37c40f5d0d9fb53476fcee6a5a Mon Sep 17 00:00:00 2001
+From 8a687852d13403e3eb9c87e680ead5a018325e40 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 03:28:51 -0500
 Subject: [PATCH] [UPSTREAM] analysis: authentication failure / reject detector
@@ -29,10 +29,10 @@ Ref: Orbic-Rayhunter T-OR-053; ref-docs/lte-imsi-catcher-detection.md 3.3.
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
  dist/config.toml.in              |   6 +
- lib/src/analysis/analyzer.rs     |  32 ++++++
- lib/src/analysis/auth_failure.rs | 188 +++++++++++++++++++++++++++++++
+ lib/src/analysis/analyzer.rs     |  32 +++++
+ lib/src/analysis/auth_failure.rs | 204 +++++++++++++++++++++++++++++++
  lib/src/analysis/mod.rs          |   1 +
- 4 files changed, 227 insertions(+)
+ 4 files changed, 243 insertions(+)
  create mode 100644 lib/src/analysis/auth_failure.rs
 
 diff --git a/dist/config.toml.in b/dist/config.toml.in
@@ -134,10 +134,10 @@ index 8b09a7f..b99a83c 100644
          let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/auth_failure.rs b/lib/src/analysis/auth_failure.rs
 new file mode 100644
-index 0000000..d4ed6df
+index 0000000..09a7338
 --- /dev/null
 +++ b/lib/src/analysis/auth_failure.rs
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,204 @@
 +//! Flags authentication failures and rejects that indicate the network could
 +//! not run a valid EPS-AKA exchange -- the signature of a false base station
 +//! that has no access to the subscriber's home keys (HSS) and therefore cannot
@@ -148,9 +148,13 @@ index 0000000..d4ed6df
 +//!   is wrong, i.e. a forged or invalid challenge), #21 (synch failure -- a
 +//!   replayed/old vector, or a genuine SQN desynchronisation), or #26 (non-EPS
 +//!   authentication unacceptable).
-+//! - The network sends an `Authentication Reject` (downlink) when it cannot
-+//!   validate the UE's response; on a home network with a valid USIM this should
-+//!   not happen.
++//! - An `Authentication Reject` (downlink) is sent by a network that cannot
++//!   validate the UE -- an invalid RES, or an unprovisioned/revoked/roaming-barred
++//!   SIM -- or is injected unilaterally by a rogue base station to invalidate the
++//!   USIM until reboot (TS 24.301 5.4.2.5). Note the UE replies to a bad AUTN with
++//!   an `Authentication Failure`, not a Response, so there is no response to
++//!   reject. On a home network with a valid, active USIM a reject should not
++//!   happen.
 +//!
 +//! #20 (MAC failure) on a home network is close to impossible without an attack
 +//! or a broken SIM (High). #21 occurs legitimately after an SQN resync (followed
@@ -169,7 +173,9 @@ index 0000000..d4ed6df
 +//! holds a current EPS security context it may send `Authentication Failure`
 +//! integrity-protected (TS 24.301 4.4.4.2); on a raw GSMTAP/PCAP feed that
 +//! carried an unciphered security-protected wrapper, that message would be
-+//! skipped rather than decoded. Does not apply to the decrypted DIAG logs.
++//! skipped rather than decoded. The decrypted DIAG logs Rayhunter feeds it are
++//! not expected to carry such a wrapper, pending on-device verification of the
++//! modem's NAS security-header handling.
 +
 +use std::borrow::Cow;
 +
@@ -193,11 +199,13 @@ index 0000000..d4ed6df
 +            "Flags a NAS Authentication Failure (EMM cause #20 MAC failure, #21 synch failure, or \
 +             #26 non-EPS authentication unacceptable) or an Authentication Reject. A false base \
 +             station with no access to the subscriber's home keys cannot produce a valid AUTN, so \
-+             the USIM rejects the challenge (#20 especially) or the network rejects the response. \
-+             #20 on a home network is near-impossible without an attack or a broken SIM (High); #21 \
-+             can be a genuine SQN resync or a SIM swap (Low); #26 is Medium; an Authentication \
-+             Reject is High, but an inactive/unprovisioned SIM can draw one legitimately on every \
-+             attach/auth retry. Keys on the message/cause alone.",
++             the USIM rejects the challenge with an Authentication Failure (#20 especially). An \
++             Authentication Reject is sent by a network that cannot validate the UE (invalid RES, or \
++             an unprovisioned/revoked SIM) or injected by a rogue base station to invalidate the \
++             USIM. #20 on a home network is near-impossible without an attack or a broken SIM \
++             (High); #21 can be a genuine SQN resync or a SIM swap (Low); #26 is Medium; an \
++             Authentication Reject is High, but an inactive/unprovisioned SIM can draw one \
++             legitimately on every attach/auth retry. Keys on the message/cause alone.",
 +        )
 +    }
 +
@@ -238,10 +246,9 @@ index 0000000..d4ed6df
 +            }
 +            EMMMessage::EMMAuthenticationReject(_) => Some(Event {
 +                event_type: EventType::High,
-+                message:
-+                    "Authentication Reject: the network rejected the UE's authentication (a home \
-+                     network with a valid USIM should not do this)"
-+                        .to_string(),
++                // Factual only -- the analyzer checks neither PLMN nor SIM state;
++                // interpretation is in get_description().
++                message: "Authentication Reject received".to_string(),
 +            }),
 +            _ => None,
 +        }
@@ -324,6 +331,15 @@ index 0000000..d4ed6df
 +    fn unrelated_emm_message_is_ignored() {
 +        // An Identity Request (type 85) is EMM but neither a failure nor a reject.
 +        assert!(run(85, &[0x01]).is_empty());
++    }
++
++    #[test]
++    fn non_lte_information_element_is_ignored() {
++        // Exercises the outer `InformationElement::LTE(..)` guard: a non-LTE IE
++        // (here GSM) must be skipped rather than panic or match.
++        let mut analyzer = AuthFailureAnalyzer;
++        let events = collect_events(&mut analyzer, &[(InformationElement::GSM, packet_time(0))]);
++        assert!(events.is_empty());
 +    }
 +}
 diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
