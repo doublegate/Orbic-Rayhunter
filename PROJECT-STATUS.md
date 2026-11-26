@@ -49,14 +49,14 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | OTA block | applied & reboot-persistent (oma_dm/dmclient/mdm-daemon disabled) | T-OR-018 | reversible; undo manifest in backups/ |
 | Rayhunter on device | **our reproducible build installed & validated** (reboot-persistent, capturing; device-side SHA-256 verified at install) | T-OR-022, T-OR-036 | replaced upstream v0.13.0 on 2026-11-23 |
 | `orx` ops: doctor/backup/verify/install/uninstall/pull-logs/check/purge/rescue/alert | present (zero-dep, 136 tests, backup-gated) | T-OR-032..T-OR-036, T-OR-037 (check), T-OR-038 (pull-logs), T-OR-039, T-OR-040 (purge), T-OR-041 (rescue), T-OR-044 (alert status/test), T-OR-107 (alert set) | rescue is read-only (destructive `--apply` = T-OR-041b); retention policy (T-OR-040b) remains |
-| New analyzers | harness (0006, T-OR-051) + 3 detectors landed: NAS Reject identity-forcing (0007, T-OR-052), auth failure/reject (0008, T-OR-053), null integrity EIA0 (0009, T-OR-055); T-OR-054 blocked on T-OR-110 parser work; T-OR-056/057 next | T-OR-051..T-OR-064 | detectors ship OFF by default; enabling needs T-OR-061 on-device FP calibration |
+| New analyzers | harness (0006, T-OR-051) + 3 NAS detectors landed: NAS Reject identity-forcing (0007, T-OR-052), auth failure/reject (0008, T-OR-053), null integrity EIA0 (0009, T-OR-055). **Off-device NAS-decodable tranche complete.** Remaining detectors all need the device session: T-OR-054 (parser T-OR-110), T-OR-056/057 (RRC vectors T-OR-112), T-OR-058 (ML1 plumbing), T-OR-059 (cell-id state) | T-OR-051..T-OR-064 | detectors ship OFF by default; enabling needs T-OR-061 on-device FP calibration |
 
 ## Metrics snapshot
 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 111 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-051, T-OR-052, T-OR-053, T-OR-055, T-OR-106, T-OR-107 (v1.2.0 sinks 045/046/047/049 + analyzer harness 051 + detectors 052/053/055 done at patch level, on-device validation/calibration pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, T-OR-054 BLOCKED on T-OR-110 parser work, analyzers T-OR-056..064, T-OR-052 precision follow-ups T-OR-108, T-OR-053 stateful follow-up T-OR-109, pycrate mobile-identity parsing T-OR-110, T-OR-055 RRC/no-SMC follow-up T-OR-111, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
+| Tickets | 112 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-051, T-OR-052, T-OR-053, T-OR-055, T-OR-106, T-OR-107 (v1.2.0 sinks 045/046/047/049 + analyzer harness 051 + detectors 052/053/055 done at patch level, on-device validation/calibration pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, T-OR-054 BLOCKED on T-OR-110 parser work, T-OR-056/057 blocked on T-OR-112 RRC vectors, analyzers T-OR-058..064, T-OR-052 precision follow-ups T-OR-108, T-OR-053 stateful follow-up T-OR-109, pycrate mobile-identity parsing T-OR-110, T-OR-055 RRC/emergency follow-up T-OR-111, RRC test-vector harness T-OR-112, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 9 (`[UPSTREAM]` notification sinks 0001-0004 + review hardening 0005 + analyzer test harness 0006 + NAS Reject detector 0007 + auth-failure detector 0008 + null-integrity detector 0009, T-OR-045/046/047/049/051/052/053/055) | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 136 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
@@ -102,8 +102,16 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 
 ## Next steps
 
-- Tag v0.1.0 (T-OR-011) following [docs/RELEASE-PROCESS.md](docs/RELEASE-PROCESS.md).
-- Start Phase 1 with read-only recon (T-OR-012..T-OR-014), then the verified backup.
+v1.2.0 analyzer phase: the off-device, NAS-decodable detector tranche is complete (harness + 3
+detectors landed on `main`, patches 0006-0009, all OFF by default). The remaining ranked detectors
+and the release all gate on the **T-OR-061 device session** (user present):
+
+- Rebuild the firmware with patches 0001-0009, verified checksummed backup, then `orx` install.
+- Capture real traffic to: calibrate the 3 landed detectors (false-positive rate; decide default
+  on/off); write T-OR-110 (mobile-identity parsing) against real identity IEs to unblock T-OR-054;
+  seed T-OR-112 (RRC golden vectors) to unblock T-OR-056/057; verify the T-OR-055 EIA0 rejection
+  path; read the device IMSI (AT) for T-OR-056.
+- Then the v1.2.0 release ceremony (tag + GitHub release + on-device install validated).
 
 ## Readiness checklist (v0.1.0)
 

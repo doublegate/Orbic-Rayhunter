@@ -95,9 +95,18 @@ scripts/apply-patches.sh
 
 ## Sprint 5.3: RRC/paging analyzers and plumbing (v1.2.0, part 2)
 
+> These are the RRC-dependent detectors. Upstream Rayhunter unit-tests NONE of its RRC analyzers,
+> so there is no synthetic-RRC-vector pattern and hand-encoding UPER PDUs blind is error-prone.
+> They are all blocked on **T-OR-112** (RRC golden-vector harness), which is best seeded from real
+> captures in the T-OR-061 device session. This is the off-device detector boundary: the
+> NAS-decodable tranche (T-OR-051/052/053/055) is done; the rest needs the device.
+
+- [ ] T-OR-112: RRC golden-vector harness -- extend `test_util` with PCCH/DL-DCCH/SIB builders
+      (wrap bytes -> `LteInformationElement` via `lte_rrc` decode), seeded from T-OR-061 captures
 - [ ] T-OR-056: IMSI paging analyzer; IMSI read from the SIM via AT and held only as a salted
-      in-memory hash
-- [ ] T-OR-057: dedicated-priority and sunset-RAT downgrade, SIB8; MCC policy table as config
+      in-memory hash -- **blocked on T-OR-112** (PCCH = RRC) and the device IMSI (AT, T-OR-061)
+- [ ] T-OR-057: dedicated-priority and sunset-RAT downgrade, SIB8; MCC policy table as config --
+      **blocked on T-OR-112** (RRC)
 - [ ] T-OR-058: measurement plumbing (new `InformationElement` input for ML1 and RACH TA);
       upstream issue opened before the patch
 - [ ] T-OR-059: recording-scoped cell identity consistency
