@@ -1,8 +1,8 @@
-From 5204f7a6b779d379c85fc829114b46c81ec2449b Mon Sep 17 00:00:00 2001
+From 121ac4c8889c4b116fcea44d5741c2801adc54e6 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
-Date: Thu, 26 Nov 2026 13:03:13 -0500
-Subject: [PATCH] [UPSTREAM] check: --config to select analyzers for offline
- re-analysis
+Date: Thu, 26 Nov 2026 13:16:45 -0500
+Subject: [PATCH] [UPSTREAM] check: --config to select analyzers; attribute
+ each event to its analyzer
 
 rayhunter-check hardcoded AnalyzerConfig::default(), so offline re-analysis of a
 capture ran only the default-on analyzers and could not exercise any detector
@@ -12,15 +12,20 @@ that is off by default (the v1.2.0 NAS detectors, or a future one). Add a
 pcap and qmdl analysis paths and the report metadata; without it the defaults
 are unchanged.
 
+Also record the producing analyzer's name on each event in the JSON report
+(AnalysisRow::events is indexed by analyzer, so process_row labels each event by
+position). This lets a consumer attribute a firing exactly, without matching on
+message text, which the calibration snapshot relies on.
+
 This makes false-positive calibration reproducible from committed code: a
-capture can be re-scored with the detectors enabled (T-OR-113), which the daemon
-already runs on-device. Adds a toml dependency to the check crate (already in the
-workspace lockfile via the daemon).
+capture can be re-scored with the detectors enabled (T-OR-113). Adds a toml
+dependency to the check crate (already in the workspace lockfile via the daemon).
 ---
- Cargo.lock        |  1 +
- check/Cargo.toml  |  1 +
- check/src/main.rs | 57 +++++++++++++++++++++++++++++++++++++++++------
- 3 files changed, 52 insertions(+), 7 deletions(-)
+ Cargo.lock        |   1 +
+ check/Cargo.toml  |   1 +
+ check/src/json.rs |   1 +
+ check/src/main.rs | 116 +++++++++++++++++++++++++++++++++++++---------
+ 4 files changed, 97 insertions(+), 22 deletions(-)
 
 diff --git a/Cargo.lock b/Cargo.lock
 index 627b379..c20d9bb 100644
@@ -43,8 +48,20 @@ index 903b856..f111065 100644
  serde = "1.0.229"
  serde_json = "1.0.151"
 +toml = "0.8.8"
+diff --git a/check/src/json.rs b/check/src/json.rs
+index 5ad0cd9..847d2c9 100644
+--- a/check/src/json.rs
++++ b/check/src/json.rs
+@@ -81,6 +81,7 @@ mod test {
+                 event_type: EventType::High,
+                 message: "hi".into(),
+             },
++            analyzer: "TestAnalyzer".into(),
+             timestamp: chrono::DateTime::default(),
+         });
+         report
 diff --git a/check/src/main.rs b/check/src/main.rs
-index cee1933..342da38 100644
+index cee1933..405ffff 100644
 --- a/check/src/main.rs
 +++ b/check/src/main.rs
 @@ -33,6 +33,14 @@ struct Args {
@@ -62,10 +79,90 @@ index cee1933..342da38 100644
      #[arg(short, long, help = "Only print warnings/errors to stdout")]
      quiet: bool,
  
-@@ -131,13 +139,35 @@ mod tests {
-     }
+@@ -43,6 +51,9 @@ struct Args {
+ #[derive(Debug, Serialize, Deserialize, PartialEq)]
+ struct EventWithTimestamp {
+     timestamp: DateTime<FixedOffset>,
++    /// Name of the analyzer that produced this event, so a consumer can
++    /// attribute a firing without matching on the message text.
++    analyzer: String,
+     event: Event,
  }
  
+@@ -64,17 +75,22 @@ impl Report {
+         }
+     }
+ 
+-    fn process_row(&mut self, row: AnalysisRow) {
++    fn process_row(&mut self, row: AnalysisRow, analyzer_names: &[String]) {
+         self.total_messages += 1;
+         if let Some(reason) = row.skipped_message_reason {
+             *self.skipped_reasons.entry(reason).or_insert(0) += 1;
+             self.skipped += 1;
+         }
+-        for maybe_event in row.events {
++        for (i, maybe_event) in row.events.into_iter().enumerate() {
+             let Some(event) = maybe_event else { continue };
+             let Some(timestamp) = row.packet_timestamp else {
+                 continue;
+             };
++            // row.events is indexed by analyzer, so index i names the source.
++            let analyzer = analyzer_names
++                .get(i)
++                .cloned()
++                .unwrap_or_else(|| format!("analyzer_{i}"));
+             match event.event_type {
+                 EventType::Informational => {
+                     info!("{}: INFO - {} {}", self.file_path, timestamp, event.message,);
+@@ -87,7 +103,11 @@ impl Report {
+                     self.warnings += 1;
+                 }
+             }
+-            self.events.push(EventWithTimestamp { timestamp, event });
++            self.events.push(EventWithTimestamp {
++                timestamp,
++                analyzer,
++                event,
++            });
+         }
+     }
+ 
+@@ -113,31 +133,69 @@ mod tests {
+     #[test]
+     fn process_row_records_skip_reason_and_event() {
+         let mut report = Report::new("test");
+-        report.process_row(AnalysisRow {
+-            packet_timestamp: Some(
+-                DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").unwrap(),
+-            ),
+-            skipped_message_reason: Some("parse error".to_string()),
+-            events: vec![Some(Event {
+-                event_type: EventType::Low,
+-                message: "warning".to_string(),
+-            })],
+-        });
++        report.process_row(
++            AnalysisRow {
++                packet_timestamp: Some(
++                    DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").unwrap(),
++                ),
++                skipped_message_reason: Some("parse error".to_string()),
++                events: vec![Some(Event {
++                    event_type: EventType::Low,
++                    message: "warning".to_string(),
++                })],
++            },
++            &["TestAnalyzer".to_string()],
++        );
+ 
+         assert_eq!(report.skipped, 1);
+         assert_eq!(report.skipped_reasons["parse error"], 1);
+         assert_eq!(report.warnings, 1);
+         assert_eq!(report.events.len(), 1);
++        assert_eq!(report.events[0].analyzer, "TestAnalyzer");
++    }
++}
++
 +/// Load the analyzer selection from a rayhunter config file's `[analyzers]`
 +/// table, or the built-in defaults when no `--config` is given. Without this,
 +/// the tool always runs `AnalyzerConfig::default()` and silently skips every
@@ -80,7 +177,7 @@ index cee1933..342da38 100644
 +    struct ConfigFile {
 +        #[serde(default)]
 +        analyzers: AnalyzerConfig,
-+    }
+     }
 +    let text = std::fs::read_to_string(path)
 +        .unwrap_or_else(|e| panic!("failed to read --config {}: {e}", path.display()));
 +    let parsed: ConfigFile = toml::from_str(&text)
@@ -88,6 +185,17 @@ index cee1933..342da38 100644
 +    parsed.analyzers
 +}
 +
++/// The ordered analyzer names for a harness. `AnalysisRow::events` is indexed by
++/// analyzer position, so `Report::process_row` uses this to label each event.
++fn analyzer_names(harness: &Harness) -> Vec<String> {
++    harness
++        .get_metadata()
++        .analyzers
++        .iter()
++        .map(|a| a.name.clone())
++        .collect()
+ }
+ 
  async fn analyze_pcap(
      pcap_path: &str,
      show_skipped: bool,
@@ -97,10 +205,20 @@ index cee1933..342da38 100644
 -    let mut harness =
 -        Harness::new_with_config(&AnalyzerConfig::default(), &DeviceMetadata::default());
 +    let mut harness = Harness::new_with_config(config, &DeviceMetadata::default());
++    let analyzer_names = analyzer_names(&harness);
      let pcap_file = &mut File::open(&pcap_path).await.expect("failed to open file");
      let mut pcap_reader = PcapNgReader::new(pcap_file)
          .await
-@@ -165,10 +195,10 @@ async fn analyze_pcap(
+@@ -151,7 +209,7 @@ async fn analyze_pcap(
+                 continue;
+             }
+         };
+-        report.process_row(row);
++        report.process_row(row, &analyzer_names);
+     }
+     report.print_summary(show_skipped);
+     if let Some(writer) = json_writer {
+@@ -165,10 +223,11 @@ async fn analyze_pcap(
  async fn analyze_qmdl(
      qmdl_path: &str,
      show_skipped: bool,
@@ -110,10 +228,20 @@ index cee1933..342da38 100644
 -    let mut harness =
 -        Harness::new_with_config(&AnalyzerConfig::default(), &DeviceMetadata::default());
 +    let mut harness = Harness::new_with_config(config, &DeviceMetadata::default());
++    let analyzer_names = analyzer_names(&harness);
      let qmdl_file = &mut File::open(&qmdl_path).await.expect("failed to open file");
      let mut qmdl_reader = QmdlMessageReader::new(qmdl_file)
          .await
-@@ -233,7 +263,8 @@ async fn main() {
+@@ -179,7 +238,7 @@ async fn analyze_qmdl(
+         .await
+         .expect("failed to get message")
+     {
+-        report.process_row(harness.analyze_qmdl_message(maybe_message));
++        report.process_row(harness.analyze_qmdl_message(maybe_message), &analyzer_names);
+     }
+     report.print_summary(show_skipped);
+     if let Some(writer) = json_writer {
+@@ -233,7 +292,8 @@ async fn main() {
      };
      rayhunter::init_logging(level);
  
@@ -123,7 +251,7 @@ index cee1933..342da38 100644
      let metadata = harness.get_metadata();
      info!("Analyzers:");
      for analyzer in &metadata.analyzers {
-@@ -271,14 +302,26 @@ async fn main() {
+@@ -271,14 +331,26 @@ async fn main() {
          let path_str = path.to_str().unwrap();
          if name_str.ends_with(".qmdl") || name_str.ends_with(".qmdl.gz") {
              info!("**** Beginning analysis of {name_str}");
