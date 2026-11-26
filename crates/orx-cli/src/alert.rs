@@ -161,7 +161,9 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
         };
         (host, port)
     } else {
-        match authority.rsplit_once(':') {
+        // split_once (not rsplit_once): a second ':' falls into the port and is
+        // rejected below, so "a:b:8080" and unbracketed IPv6 like "::1" fail.
+        match authority.split_once(':') {
             Some((h, p)) => (h, Some(p)),
             None => (authority, None),
         }
@@ -169,10 +171,10 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("ntfy_url has no host".to_string());
     }
+    // A port, if present, must parse as a non-zero u16 (rejects empty, non-digit,
+    // out-of-range, a stray second ':', and port 0).
     if let Some(port) = port
-        && (port.is_empty()
-            || !port.chars().all(|c| c.is_ascii_digit())
-            || port.parse::<u16>().is_err())
+        && !matches!(port.parse::<u16>(), Ok(p) if p > 0)
     {
         return Err("ntfy_url has an invalid port".to_string());
     }
@@ -507,9 +509,13 @@ mod tests {
         // Embedded credentials (would leak when printed) are rejected.
         assert!(validate_ntfy_url("https://user:pass@ntfy.sh/topic").is_err());
         assert!(validate_ntfy_url("https://user:pass@/topic").is_err());
-        // Invalid / out-of-range port.
+        // Invalid / out-of-range / zero port.
         assert!(validate_ntfy_url("https://ntfy.sh:abc/topic").is_err());
         assert!(validate_ntfy_url("https://ntfy.sh:99999/topic").is_err());
+        assert!(validate_ntfy_url("https://ntfy.sh:0/topic").is_err());
+        // A second ':' in a non-bracketed authority (and unbracketed IPv6).
+        assert!(validate_ntfy_url("https://a:b:8080/topic").is_err());
+        assert!(validate_ntfy_url("http://::1/topic").is_err());
     }
 
     #[test]

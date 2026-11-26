@@ -1,7 +1,7 @@
-From edeae798c8bb00d0342b4062e1aa20ee8fcfa3c1 Mon Sep 17 00:00:00 2001
+From 24805de9cc2fa6898452f6103a9563f3baf2bd0d Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 23:20:11 -0500
-Subject: [PATCH 3/5] [UPSTREAM] notifications: generic webhook sink (JSON, no
+Subject: [PATCH] [UPSTREAM] notifications: generic webhook sink (JSON, no
  identifiers)
 
 Add an optional `webhook_url`. When set, each notification is POSTed there as

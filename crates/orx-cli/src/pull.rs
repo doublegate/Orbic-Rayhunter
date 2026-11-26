@@ -630,22 +630,43 @@ pub fn pull_logs_at(
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    // Unique temp beside the target, created fresh with O_EXCL (so it never
-    // follows or clobbers a planted symlink) and mode 0600 (the data may be
-    // sensitive -- e.g. a config snapshot with a private topic URL), then
-    // atomically renamed over the target.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    // Unique temp beside the target (pid + a process-local counter + a clock
+    // nonce, so repeated/concurrent writes and a shared dir never collide),
+    // created fresh with O_EXCL (never follows or clobbers a planted symlink, and
+    // fails closed if the name is pre-created) and mode 0600 (the data may be
+    // sensitive -- e.g. a config snapshot with a private topic URL).
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_file_name(format!(".{name}.{}.{seq}.{nonce}.tmp", std::process::id()));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&tmp)
         .map_err(|e| format!("create {}: {e}", tmp.display()))?;
-    f.write_all(data)
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    f.sync_all().ok();
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", tmp.display()))
+
+    // On any failure, remove the partial temp before returning (it may hold
+    // sensitive data and would otherwise block a retry with EEXIST).
+    let result = (|| {
+        f.write_all(data)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        // Propagate flush/ENOSPC errors: renaming an incompletely-written file
+        // over the target would defeat the crash-safety guarantee.
+        f.sync_all()
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", tmp.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Read `name<TAB>qmdl_size_bytes` lines into a map (missing/garbled -> empty).

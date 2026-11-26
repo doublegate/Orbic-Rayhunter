@@ -146,4 +146,16 @@ Secret keys (`ntfy_auth`, `gotify_token`, `webhook_url`) are redacted from `GET 
 preserved across a config round-trip that omits them; a credential is dropped if its endpoint URL
 changes, so the unauthenticated config API cannot repoint a URL and harvest the stored secret.
 
+Hardening (patch 0005) changes delivery behavior, so note:
+
+- **No HTTP redirects.** The notification client does not follow 3xx redirects (so a custom
+  credential header such as `X-Gotify-Key` cannot be forwarded to a redirect target). A sink URL
+  that relies on an `http:` -> `https:` upgrade or a proxy 30x will fail rather than be followed --
+  configure the final `https` URL directly.
+- **`gotify_url` is a base URL.** Any query/fragment is dropped before `/message` is appended, and
+  `GET /api/config` returns it without a query, so a token must go in `gotify_token` (redacted), not
+  the URL.
+- **`POST /api/test-notification`** sends a test to every configured sink and reports per-sink
+  results (it no longer tests only ntfy).
+
 MQTT (T-OR-048) and a persistent retry queue (T-OR-050) are deferred past v1.2.0.

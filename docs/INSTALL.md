@@ -393,10 +393,10 @@ Finally **close the `:24` shell** to restore the hardened posture, and VERIFY it
 
 ```sh
 # in the :24 shell, kill its listener (and any spawned handler). busybox may
-# lack pkill or match its own command line, so kill each matching PID from `ps`.
-# Do NOT quote the substitution -- with more than one PID that makes a single
-# invalid argument; pipe to `xargs` so each PID is killed separately:
-ps | awk '/[n]c -ll -p 24/ {print $1}' | xargs -r kill
+# lack pkill or match its own command line, and its xargs may lack -r, so
+# collect the matching PIDs (unquoted, so each is a separate kill argument) and
+# kill them only when the list is non-empty:
+pids=$(ps | awk '/[n]c -ll -p 24/ {print $1}'); [ -n "$pids" ] && kill $pids
 ```
 
 Then confirm from the host that it is gone — `orx check` must report `root shell port 24 closed`

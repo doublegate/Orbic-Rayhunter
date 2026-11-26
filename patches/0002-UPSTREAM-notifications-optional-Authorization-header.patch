@@ -1,8 +1,8 @@
-From ba6b364f58a72a5ce8018eca42a7443162b0c81a Mon Sep 17 00:00:00 2001
+From 29073880c9ab394771cf1b809402a8577610c8de Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 23:11:33 -0500
-Subject: [PATCH 2/5] [UPSTREAM] notifications: optional Authorization header
- for ntfy
+Subject: [PATCH] [UPSTREAM] notifications: optional Authorization header for
+ ntfy
 
 Add an optional `ntfy_auth` config value sent as the `Authorization` header
 on each ntfy request, for a protected ntfy topic or a reverse-proxied

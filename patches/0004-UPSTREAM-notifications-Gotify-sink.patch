@@ -1,7 +1,7 @@
-From d9527cf3a80989164bb5901437b0d9a022e8390e Mon Sep 17 00:00:00 2001
+From b0eb2a4ae43e864f3f2bcad3cc85afa87e10e1f7 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 23:33:30 -0500
-Subject: [PATCH 4/5] [UPSTREAM] notifications: Gotify sink
+Subject: [PATCH] [UPSTREAM] notifications: Gotify sink
 
 Add an optional Gotify sink: when `gotify_url` is set, each notification is
 POSTed to `<gotify_url>/message` as Gotify JSON {title, message, priority}
