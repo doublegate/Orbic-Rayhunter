@@ -51,3 +51,8 @@ no_nas_messages = false
 # alone. Kept OFF until T-OR-061 calibrates its false-positive rate: #9/#10 also
 # occur benignly (MME restart, GUTI/pool mismatch, idle-timer implicit detach).
 nas_reject_identity = false
+# ORX: v1.2.0 T-OR-053 (patch 0008). NAS Authentication Failure (#20/#21/#26) or
+# Authentication Reject -- a false base station that cannot produce a valid AUTN.
+# Kept OFF until T-OR-061 calibrates FP: a genuine SQN resync / SIM swap fires #21,
+# and an inactive/unprovisioned SIM draws a legit Authentication Reject on retries.
+auth_failure = false
