@@ -193,8 +193,8 @@ Details: [docs/ANALYZERS.md](docs/ANALYZERS.md).
 
 | ID | Ticket | Tag | Status |
 |---|---|---|---|
-| T-OR-051 | Analyzer test harness: synthetic RRC/NAS vectors, golden-output checks, capture scrubber | [UPSTREAM] | in progress (harness landed, patch 0006: `nas_plain`/`packet_time`/`collect_events`; the capture scrubber needs on-device captures, so it is deferred to T-OR-061) |
-| T-OR-052 | Unauthenticated NAS Reject with identity-forcing or service-denying cause (rank 1, Devilray blind spot) | [UPSTREAM] | open |
+| T-OR-051 | Analyzer test harness: synthetic RRC/NAS vectors, golden-output checks, capture scrubber | [UPSTREAM] | landed at patch level (patch 0006: `nas_plain`/`packet_time`/`collect_events`/`emm_message`); the capture scrubber needs on-device captures, so it is deferred to T-OR-061 |
+| T-OR-052 | Unauthenticated NAS Reject with identity-forcing or service-denying cause (rank 1, Devilray blind spot) | [UPSTREAM] | landed (patch 0007, `nas_reject_identity`; keys on cause #9 Medium / #10 Low; unprotected + IMSI-re-attach confirmation deferred to parser support; off by default pending T-OR-061 calibration) |
 | T-OR-053 | Authentication failure / authentication reject (rank 2) | [UPSTREAM] | open |
 | T-OR-054 | Own permanent-identity disclosure, incl. `epsid` parsing gap (rank 3) | [UPSTREAM] | open |
 | T-OR-055 | Null integrity (EIA0) and security never activated (rank 4) | [UPSTREAM] | open |
@@ -207,6 +207,7 @@ Details: [docs/ANALYZERS.md](docs/ANALYZERS.md).
 | T-OR-062 | Stretch: SIB reselection-parameter anomaly features (rank 9) | [UPSTREAM] | open |
 | T-OR-063 | Stretch: emergency-alert spoofing context (rank 11) | [UPSTREAM] | open |
 | T-OR-064 | Stretch: RRC Connection Reject DoS context (rank 12) | [UPSTREAM] | open |
+| T-OR-108 | T-OR-052 precision follow-ups: confirm the reject was integrity-unprotected (NAS security-header type -- needs DIAG/parser verification, overlaps T-OR-061) and correlate a following IMSI re-attach (needs the `epsid` EPS-mobile-identity parsing, overlaps T-OR-054); fold in the broader cause tiers (#3/#6/#7, #11-#15/#22/#42) post-calibration | [UPSTREAM] | open |
 
 Exit criteria: T-OR-051..T-OR-060 merged into the series with golden vectors; each analyzer
 off-by-default until T-OR-061 shows an acceptable false-positive rate; upstream PR opened for
