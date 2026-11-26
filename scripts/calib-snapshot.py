@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
 """T-OR-061 calibration snapshot: false-positive table for the v1.2.0 detectors.
 
-Parses the analysis NDJSON that the daemon writes alongside each recording (as
-pulled by `orx pull-logs`) and prints a per-detector false-positive table. Every
-detector firing over normal carrier traffic is a false positive to understand
-before deciding an analyzer's default on/off.
+Reads a `rayhunter-check` JSON report (produced over pulled QMDL with the
+detectors enabled via `--config`, see scripts/calib-run.sh) and prints a
+per-detector false-positive table. Every detector firing over normal carrier
+traffic is a false positive to understand before deciding an analyzer's default
+on/off.
 
-It reads the daemon's OWN analysis output, so it reflects exactly what ran
-on-device -- no re-analysis, no rebuild. Coverage is tracked PER DETECTOR: a
-recording counts toward a detector's denominator only if that detector appears
-in the recording's analyzer header (i.e. it was enabled when the daemon analyzed
-it). Recordings captured before a detector was enabled contribute no coverage
-for it, and the tool fails closed (exit 2) when NO detector-enabled traffic was
-analyzed, rather than printing a misleading "clean" verdict.
+Why the check report and not the daemon's live NDJSON: the daemon only writes an
+analysis row for a *skipped* or *firing* message (`if !row.is_empty()`), so its
+NDJSON has no count of cleanly-analyzed messages and therefore no denominator for
+a false-positive rate. `rayhunter-check` processes every message and records
+`total_messages` per recording, used here as the denominator.
 
-Only messages that were actually analyzed count toward the denominator: rows the
-daemon skipped (`skipped_message_reason`) and malformed rows are counted and
-reported separately, never folded into the FP rate.
-
-Each NDJSON file is a header line {analyzers,rayhunter,report_version} followed
-by one row per message {packet_timestamp, skipped_message_reason, events:[...]}.
-`events` is indexed to the header's `analyzers` array; a non-null entry is a
-firing by that analyzer.
+Firings are the Low/Medium/High events ("warnings"). Each event carries the
+`analyzer` name that produced it (patch 0010), so attribution is exact -- no
+message-text matching. As a correctness guard the attributed firings are
+cross-checked against each recording's declared `warnings` total; a mismatch, or
+any schema violation, fails the run closed (exit 2) rather than reporting a
+possibly-incomplete CLEAN verdict.
 
 Usage:
-    scripts/calib-snapshot.py <captures-dir> [--all]
+    scripts/calib-snapshot.py <check-report.json>
     scripts/calib-snapshot.py --selftest
 
-<captures-dir> holds <name>.ndjson files (see docs/ANALYZERS.md, "Field
-calibration"). --all also tabulates the upstream analyzers across every
-recording. Exit: 0 clean, 1 firings present, 2 no coverage / usage error.
+Exit: 0 clean, 1 detector firings present, 2 no coverage / mismatch / malformed.
 """
 
 from __future__ import annotations
@@ -39,227 +34,191 @@ import json
 import sys
 from pathlib import Path
 
-# Detector header names -> short keys (the three v1.2.0 detectors under
-# calibration). The strings are the analyzers' get_name() values from patches
-# 0007 (nas_reject_identity), 0008 (auth_failure), 0009 (null_integrity); keep
-# them in sync if an analyzer is renamed, or matching silently breaks.
-DETECTORS = {
+# metadata.analyzers name -> short key (the three v1.2.0 detectors under
+# calibration). Attribution is by these exact names, which the check report
+# copies from each analyzer's get_name().
+DETECTOR_NAMES = {
     "NAS Reject with identity-forcing cause": "nas_reject_identity",
     "Authentication failure or reject": "auth_failure",
     "Null integrity (EIA0) requested": "null_integrity",
 }
+KEY_FROM_NAME = {v: k for k, v in DETECTOR_NAMES.items()}
 DET_KEYS = ("nas_reject_identity", "auth_failure", "null_integrity")
 
-
-def _message(ev: object) -> str:
-    if isinstance(ev, dict):
-        inner = ev.get("event") if isinstance(ev.get("event"), dict) else ev
-        return str((inner or {}).get("message", ""))
-    return str(ev)
+WARN_SEVERITIES = {"Low", "Medium", "High"}
+VALID_SEVERITIES = WARN_SEVERITIES | {"Informational"}
 
 
-def _severity(ev: object) -> str:
-    if isinstance(ev, dict):
-        inner = ev.get("event") if isinstance(ev.get("event"), dict) else ev
-        return str((inner or {}).get("event_type", "?"))
-    return "?"
+def _fail(msg: str) -> int:
+    print(f"calib-snapshot: {msg}", file=sys.stderr)
+    return 2
 
 
-def analyze(files: list[Path], want_all: bool = False) -> dict:
-    """Aggregate detector firings and per-detector coverage over NDJSON files.
+def analyze(doc: object) -> dict | None:
+    """Aggregate detector firings from a parsed rayhunter-check report.
 
-    Streams each file line by line (soak captures can be large). Returns a result
-    dict; see `render` for the fields consumed.
+    Returns a result dict, or None if the document violates the report schema
+    (fail closed -- a malformed report must not yield a clean verdict).
     """
-    per = {k: {"covered_msgs": 0, "firings": 0} for k in DET_KEYS}
-    other: dict[str, int] = {}
-    samples: list[str] = []
-    recs_total = recs_covered = recs_unreadable = 0
-    skipped_rows = malformed_rows = analyzed_rows = 0
+    if not isinstance(doc, dict):
+        return None
+    md = doc.get("metadata")
+    reports = doc.get("reports")
+    if not isinstance(md, dict) or not isinstance(reports, list):
+        return None
+    analyzers = md.get("analyzers")
+    if not isinstance(analyzers, list):
+        return None
+    # Fail closed on any malformed analyzer entry rather than filtering it out
+    # (a filtered entry would shift nothing here, but a missing name is a sign of
+    # a report we do not understand).
+    analyzer_names: set[str] = set()
+    for a in analyzers:
+        if not isinstance(a, dict) or not isinstance(a.get("name"), str):
+            return None
+        analyzer_names.add(a["name"])
+    covered = {k: KEY_FROM_NAME[k] in analyzer_names for k in DET_KEYS}
 
-    for f in files:
-        recs_total += 1
-        names: list[str] = []
-        det_idx: dict[int, str] = {}
-        header_ok = False
-        rec_analyzed = 0
-        # The NDJSON comes from the device and is an untrusted boundary: read
-        # bytes and decode per line so a garbled byte (e.g. a flash cut on power
-        # loss) is contained to one line, and validate every shape before use.
-        unreadable = False
-        try:
-            fh = f.open("rb")
-        except OSError:
-            recs_unreadable += 1
-            continue
-        with fh:
-            for raw in fh:
-                try:
-                    line = raw.decode("utf-8").strip()
-                except UnicodeDecodeError:
-                    if not header_ok:
-                        unreadable = True
-                        break
-                    malformed_rows += 1
-                    continue
-                if not line:
-                    continue
-                if not header_ok:
-                    try:
-                        header = json.loads(line)
-                    except json.JSONDecodeError:
-                        unreadable = True
-                        break
-                    if not isinstance(header, dict) or not isinstance(
-                        header.get("analyzers"), list
-                    ):
-                        unreadable = True
-                        break
-                    entries = header["analyzers"]
-                    # `names` must stay 1:1 with each row's `events` array, so a
-                    # bad entry cannot be filtered out (that would shift indices
-                    # and misattribute firings) -- fail closed instead. Duplicate
-                    # names would also double-count coverage, so reject them.
-                    if not all(
-                        isinstance(a, dict) and isinstance(a.get("name"), str)
-                        for a in entries
-                    ):
-                        unreadable = True
-                        break
-                    names = [a["name"] for a in entries]
-                    if len(set(names)) != len(names):
-                        unreadable = True
-                        break
-                    det_idx = {
-                        i: DETECTORS[n] for i, n in enumerate(names) if n in DETECTORS
-                    }
-                    if det_idx:
-                        recs_covered += 1
-                    header_ok = True
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    malformed_rows += 1
-                    continue
-                if not isinstance(row, dict):
-                    malformed_rows += 1
-                    continue
-                if row.get("skipped_message_reason") is not None:
-                    skipped_rows += 1
-                    continue
-                events = row.get("events")
-                if not isinstance(events, list) or len(events) != len(names):
-                    # not skipped, but the events array is missing, the wrong
-                    # type, or not 1:1 with the analyzer header (truncated row):
-                    # its indices can't be trusted -> schema-invalid, not analyzed
-                    malformed_rows += 1
-                    continue
-                analyzed_rows += 1
-                rec_analyzed += 1
-                for i, ev in enumerate(events):
-                    if ev is None:
-                        continue
-                    if i in det_idx:
-                        key = det_idx[i]
-                        per[key]["firings"] += 1
-                        ts = row.get("packet_timestamp") or "?"
-                        samples.append(
-                            f"{f.name} @ {ts}  {key} [{_severity(ev)}]: {_message(ev)[:80]}"
-                        )
-                    elif want_all:
-                        name = names[i] if i < len(names) else f"#{i}"
-                        other[name] = other.get(name, 0) + 1
-        # An empty or header-less file provides no evidence -> unreadable.
-        if not header_ok:
-            unreadable = True
-        if unreadable:
-            recs_unreadable += 1
-            continue
-        # Credit this recording's analyzed messages to each detector it enabled
-        # (set() so a detector is credited once even if something slipped a
-        # duplicate index through).
-        for key in set(det_idx.values()):
-            per[key]["covered_msgs"] += rec_analyzed
+    total_messages = 0
+    skipped_messages = 0
+    declared_warnings = 0
+    per = {k: 0 for k in DET_KEYS}
+    other_warnings = 0
+    samples: list[str] = []
+    unmatched: list[str] = []
+
+    for r in reports:
+        if not isinstance(r, dict):
+            return None  # fail closed on a malformed report entry
+        tm = r.get("total_messages")
+        sk = r.get("skipped")
+        wn = r.get("warnings")
+        events = r.get("events")
+        if (
+            not isinstance(tm, int)
+            or not isinstance(sk, int)
+            or not isinstance(wn, int)
+            or not isinstance(events, list)
+            or not (0 <= sk <= tm)
+        ):
+            return None
+        total_messages += tm
+        skipped_messages += sk
+        declared_warnings += wn
+        fname = Path(str(r.get("file_path", "?"))).name
+        rec_warnings = 0
+        for e in events:
+            if not isinstance(e, dict):
+                return None
+            ev = e.get("event")
+            if not isinstance(ev, dict):
+                return None
+            sev = ev.get("event_type")
+            if sev not in VALID_SEVERITIES:
+                return None  # unknown severity -> do not assume Informational
+            if sev not in WARN_SEVERITIES:
+                continue  # Informational events are not firings
+            rec_warnings += 1
+            name = e.get("analyzer")
+            if not isinstance(name, str) or name not in analyzer_names:
+                return None  # a warning we cannot attribute -> fail closed
+            msg = str(ev.get("message", ""))
+            key = DETECTOR_NAMES.get(name)
+            if key is not None:
+                per[key] += 1
+                ts = e.get("timestamp", "?")
+                samples.append(f"{fname} @ {ts}  {key} [{sev}]: {msg[:80]}")
+            else:
+                other_warnings += 1
+                unmatched.append(f"{fname}  [{name}] {msg[:80]}")
+        # Per-recording cross-check: the warning events must account for exactly
+        # this recording's declared warnings (a global total could net out a
+        # surplus in one recording against a deficit in another).
+        if rec_warnings != wn:
+            return None
 
     return {
+        "covered": covered,
+        "total_messages": total_messages,
+        "skipped_messages": skipped_messages,
+        "analyzed_messages": total_messages - skipped_messages,
+        "declared_warnings": declared_warnings,
         "per": per,
-        "other": other,
+        "other_warnings": other_warnings,
         "samples": samples,
-        "recs_total": recs_total,
-        "recs_covered": recs_covered,
-        "recs_unreadable": recs_unreadable,
-        "skipped_rows": skipped_rows,
-        "malformed_rows": malformed_rows,
-        "analyzed_rows": analyzed_rows,
+        "unmatched": unmatched,
+        "n_reports": len(reports),
     }
 
 
-def render(r: dict, want_all: bool, out=sys.stdout) -> int:
-    per = r["per"]
-    any_cov = any(per[k]["covered_msgs"] > 0 for k in DET_KEYS)
-
+def render(r: dict, out=sys.stdout) -> int:
     def p(*a: object) -> None:
         print(*a, file=out)
 
     p("=" * 72)
-    p("T-OR-061 CALIBRATION SNAPSHOT (daemon NDJSON analysis)")
+    p("T-OR-061 CALIBRATION SNAPSHOT (rayhunter-check report)")
     p("=" * 72)
+    p(f"recordings     : {r['n_reports']}")
     p(
-        f"recordings       : {r['recs_total']}  "
-        f"({r['recs_covered']} detector-enabled, "
-        f"{r['recs_total'] - r['recs_covered'] - r['recs_unreadable']} pre-enablement, "
-        f"{r['recs_unreadable']} unreadable)"
+        f"messages       : {r['analyzed_messages']:,} analyzed "
+        f"({r['skipped_messages']:,} skipped of {r['total_messages']:,} total -- excluded)"
     )
     p(
-        f"messages         : {r['analyzed_rows']:,} analyzed  "
-        f"({r['skipped_rows']:,} skipped, {r['malformed_rows']:,} malformed rows -- excluded)"
+        f"warnings       : {r['declared_warnings']} declared "
+        f"({sum(r['per'].values())} from the 3 detectors, {r['other_warnings']} from upstream analyzers)"
     )
     p("-" * 72)
-    if not any_cov:
-        p("NO CALIBRATION COVERAGE: none of the 3 detectors were enabled for any")
-        p("analyzed message. Enable them on the device and capture traffic first")
-        p('(see docs/ANALYZERS.md, "Field calibration").')
+
+    # analyze() has already failed closed (returned None -> exit 2) on any
+    # per-recording warning-count mismatch or schema violation, so a result here
+    # is internally consistent: declared warnings == detector firings + other.
+    any_covered = any(r["covered"].values())
+    if not any_covered or r["analyzed_messages"] == 0:
+        p("NO CALIBRATION COVERAGE: the 3 detectors were not enabled for this run")
+        p("(pass --config scripts/calib-analyzers.toml to rayhunter-check), or no")
+        p("messages were actually analyzed (all skipped). No evidence to report.")
         p("=" * 72)
         p("verdict: NO COVERAGE")
         return 2
 
-    p("v1.2.0 DETECTOR FALSE POSITIVES (firings over each detector's own coverage):")
-    total_firings = 0
+    p("v1.2.0 DETECTOR FALSE POSITIVES (firings over normal traffic):")
     for key in DET_KEYS:
-        cov = per[key]["covered_msgs"]
-        fir = per[key]["firings"]
-        total_firings += fir
-        if cov == 0:
-            p(f"  {key:22} :  no coverage (not enabled in any analyzed recording)")
-        else:
-            rate = fir / cov * 100_000
-            p(f"  {key:22} : {fir:4d} firings over {cov:,} msgs  ({rate:.3f} per 100k)")
+        if not r["covered"][key]:
+            p(f"  {key:22} :  not enabled for this run")
+            continue
+        n = r["per"][key]
+        rate = n / r["analyzed_messages"] * 100_000
+        p(
+            f"  {key:22} : {n:4d} firings over {r['analyzed_messages']:,} msgs  ({rate:.3f} per 100k)"
+        )
     if r["samples"]:
         p("-" * 72)
-        p("firing samples:")
+        p("detector firing samples:")
         for s in r["samples"][:20]:
             p("   -", s)
-    if want_all and r["other"]:
+    if r["unmatched"]:
         p("-" * 72)
-        p("other (upstream) analyzer firings:")
-        for name, n in sorted(r["other"].items(), key=lambda kv: -kv[1]):
-            p(f"  {n:5d}  {name}")
-    p("=" * 72)
-    covered = sum(1 for k in DET_KEYS if per[k]["covered_msgs"] > 0)
-    if total_firings:
         p(
-            f"verdict: {total_firings} detector firings -- investigate ({covered}/3 detectors covered)"
+            f"upstream-analyzer warnings ({len(r['unmatched'])}; shown so drift is never hidden):"
+        )
+        for s in r["unmatched"][:20]:
+            p("   -", s)
+    p("=" * 72)
+    our = sum(r["per"].values())
+    covered_n = sum(1 for k in DET_KEYS if r["covered"][k])
+    if our:
+        p(
+            f"verdict: {our} detector firings -- investigate ({covered_n}/3 detectors covered)"
         )
         return 1
-    p(f"verdict: CLEAN (0 FP over {covered}/3 covered detectors)")
+    p(
+        f"verdict: CLEAN (0 FP over {covered_n}/3 covered detectors, {r['analyzed_messages']:,} analyzed msgs)"
+    )
     return 0
 
 
 def selftest() -> int:
-    """Synthetic NDJSON cases covering the correctness fixes."""
     import io
-    import tempfile
 
     ok = True
     null = io.StringIO()
@@ -269,180 +228,222 @@ def selftest() -> int:
         ok = ok and cond
         print(f"  {'ok  ' if cond else 'FAIL'}  {label}")
 
-    hdr10 = {
-        "analyzers": [
-            {"name": "Null Cipher", "version": 1},
-            {"name": "NAS Reject with identity-forcing cause", "version": 0},
-            {"name": "Authentication failure or reject", "version": 0},
-            {"name": "Null integrity (EIA0) requested", "version": 0},
-        ],
-        "rayhunter": {},
-        "report_version": 1,
-    }
-    hdr_old = {
-        "analyzers": [{"name": "Null Cipher", "version": 1}],
-        "rayhunter": {},
-        "report_version": 1,
-    }
+    def valid(doc: object) -> dict:
+        res = analyze(doc)
+        assert res is not None
+        return res
 
-    def row(events, skipped=None):
-        return json.dumps(
+    names = [
+        {
+            "name": "Identity (IMSI or IMEI) requested in suspicious manner",
+            "version": 5,
+        },
+        {"name": "NAS Reject with identity-forcing cause", "version": 0},
+        {"name": "Authentication failure or reject", "version": 0},
+        {"name": "Null integrity (EIA0) requested", "version": 0},
+        {"name": "Null Cipher", "version": 1},
+    ]
+
+    def ev(analyzer, sev, msg):
+        return {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "analyzer": analyzer,
+            "event": {"event_type": sev, "message": msg},
+        }
+
+    def rep(total, warnings, events, skipped=0, fp="a.qmdl"):
+        return {
+            "total_messages": total,
+            "skipped": skipped,
+            "warnings": warnings,
+            "events": events,
+            "file_path": fp,
+        }
+
+    # clean run: coverage, no warnings
+    doc = {"metadata": {"analyzers": names}, "reports": [rep(1000, 0, [])]}
+    r = valid(doc)
+    check(
+        "clean run -> all covered, 0 firings",
+        all(r["covered"].values()) and sum(r["per"].values()) == 0,
+    )
+    check("clean run -> render exits 0", render(r, out=null) == 0)
+
+    # a firing attributed to auth_failure by analyzer name, plus an upstream warning
+    doc = {
+        "metadata": {"analyzers": names},
+        "reports": [
+            rep(
+                500,
+                2,
+                [
+                    ev(
+                        "Authentication failure or reject",
+                        "High",
+                        "Authentication Reject received",
+                    ),
+                    ev("Null Cipher", "Medium", "null cipher suggested"),
+                    ev("Diagnostic", "Informational", "Diagnostic: foo"),
+                ],
+            )
+        ],
+    }
+    r = valid(doc)
+    check(
+        "auth_failure firing attributed by analyzer name", r["per"]["auth_failure"] == 1
+    )
+    check("upstream warning counted as other", r["other_warnings"] == 1)
+    check(
+        "informational not a firing", sum(r["per"].values()) + r["other_warnings"] == 2
+    )
+    check("firing render exits 1", render(r, out=null) == 1)
+
+    # per-recording warning-count mismatch (declares a warning with no event) -> None
+    check(
+        "warning declared but no event -> None",
+        analyze({"metadata": {"analyzers": names}, "reports": [rep(1000, 1, [])]})
+        is None,
+    )
+    # a warning event whose analyzer is unknown / missing -> fail closed
+    check(
+        "warning with unknown analyzer -> None",
+        analyze(
             {
-                "packet_timestamp": "2026-01-01T00:00:00Z",
-                "skipped_message_reason": skipped,
-                "events": events,
+                "metadata": {"analyzers": names},
+                "reports": [rep(10, 1, [ev("Some Renamed Analyzer", "High", "x")])],
             }
         )
-
-    with tempfile.TemporaryDirectory() as d:
-        dd = Path(d)
-        # zero coverage: only the old 7-analyzer-style header, no detectors
-        (dd / "old.ndjson").write_text(json.dumps(hdr_old) + "\n" + row([None]) + "\n")
-        r = analyze([dd / "old.ndjson"])
-        check(
-            "zero coverage -> all detectors uncovered",
-            all(r["per"][k]["covered_msgs"] == 0 for k in DET_KEYS),
-        )
-        check("zero coverage -> render exits 2", render(r, False, out=null) == 2)
-
-        # full coverage, one firing on auth_failure (index 2), one skipped row
-        fire = [
-            None,
-            None,
+        is None,
+    )
+    check(
+        "warning with missing analyzer field -> None",
+        analyze(
             {
-                "event": {
-                    "event_type": "High",
-                    "message": "Authentication Reject received",
-                }
-            },
-            None,
-        ]
-        (dd / "cov.ndjson").write_text(
-            json.dumps(hdr10)
-            + "\n"
-            + row([None, None, None, None])
-            + "\n"
-            + row(fire)
-            + "\n"
-            + row([None, None, None, None], skipped="UnsupportedGsmtapType")
-            + "\n"
+                "metadata": {"analyzers": names},
+                "reports": [
+                    rep(
+                        10,
+                        1,
+                        [
+                            {
+                                "timestamp": "t",
+                                "event": {"event_type": "High", "message": "x"},
+                            }
+                        ],
+                    )
+                ],
+            }
         )
-        r = analyze([dd / "cov.ndjson"])
-        check("skipped row excluded from denominator", r["analyzed_rows"] == 2)
-        check(
-            "auth_failure credited 1 firing", r["per"]["auth_failure"]["firings"] == 1
+        is None,
+    )
+    # unknown severity string -> fail closed (not silently treated as informational)
+    check(
+        "unknown event_type -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [rep(10, 0, [ev("Null Cipher", "Critical", "x")])],
+            }
         )
-        check(
-            "auth_failure covered_msgs == analyzed (2)",
-            r["per"]["auth_failure"]["covered_msgs"] == 2,
+        is None,
+    )
+    # malformed analyzer entry in metadata -> fail closed
+    check(
+        "malformed analyzer entry -> None",
+        analyze(
+            {"metadata": {"analyzers": [{"version": 1}]}, "reports": [rep(10, 0, [])]}
         )
-        check("render with a firing exits 1", render(r, False, out=null) == 1)
+        is None,
+    )
+    # per-recording check is not netted across recordings
+    check(
+        "cross-recording net-out -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [
+                    rep(10, 1, [], fp="a"),
+                    rep(10, 0, [ev("Null Cipher", "High", "x")], fp="b"),
+                ],
+            }
+        )
+        is None,
+    )
 
-        # partial enablement: header missing null_integrity would read as "no coverage"
-        # for that one; here all 3 are present, so confirm clean exits 0
-        (dd / "clean.ndjson").write_text(
-            json.dumps(hdr10) + "\n" + row([None, None, None, None]) + "\n"
-        )
-        r = analyze([dd / "clean.ndjson"])
-        check("clean covered -> render exits 0", render(r, False, out=null) == 0)
+    # detectors not enabled -> no coverage
+    doc = {"metadata": {"analyzers": [names[0]]}, "reports": [rep(1000, 0, [])]}
+    r = valid(doc)
+    check("no detectors enabled -> render exits 2", render(r, out=null) == 2)
 
-        # corrupt header -> unreadable, not counted as covered
-        (dd / "bad.ndjson").write_text("{not json\n")
-        r = analyze([dd / "bad.ndjson"])
-        check(
-            "corrupt header -> unreadable, no coverage",
-            r["recs_unreadable"] == 1 and r["recs_covered"] == 0,
-        )
+    # zero messages -> fail closed
+    r = valid({"metadata": {"analyzers": names}, "reports": []})
+    check("zero messages -> render exits 2", render(r, out=null) == 2)
 
-        # malformed row counted separately, not in analyzed
-        (dd / "malf.ndjson").write_text(
-            json.dumps(hdr10) + "\n" + "{bad\n" + row([None, None, None, None]) + "\n"
-        )
-        r = analyze([dd / "malf.ndjson"])
-        check(
-            "malformed row counted, excluded from analyzed",
-            r["malformed_rows"] == 1 and r["analyzed_rows"] == 1,
-        )
+    # all messages skipped -> analyzed == 0 -> fail closed, not a clean verdict
+    r = valid(
+        {"metadata": {"analyzers": names}, "reports": [rep(1000, 0, [], skipped=1000)]}
+    )
+    check("all skipped -> render exits 2 (NO COVERAGE)", render(r, out=null) == 2)
 
-        # non-object JSON header (null / [] / number) -> unreadable, no crash
-        (dd / "nonobj.ndjson").write_text(
-            "[1, 2, 3]\n" + row([None, None, None, None]) + "\n"
+    # skipped excluded from the denominator (analyzed = total - skipped)
+    r = valid(
+        {"metadata": {"analyzers": names}, "reports": [rep(1000, 0, [], skipped=400)]}
+    )
+    check("analyzed = total - skipped", r["analyzed_messages"] == 600)
+    check(
+        "skipped > total -> None",
+        analyze(
+            {"metadata": {"analyzers": names}, "reports": [rep(10, 0, [], skipped=11)]}
         )
-        r = analyze([dd / "nonobj.ndjson"])
-        check(
-            "non-object header -> unreadable",
-            r["recs_unreadable"] == 1 and r["recs_covered"] == 0,
+        is None,
+    )
+    check(
+        "non-int skipped -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [
+                    {"total_messages": 10, "skipped": None, "warnings": 0, "events": []}
+                ],
+            }
         )
+        is None,
+    )
 
-        # header dict without "analyzers" -> unreadable
-        (dd / "noan.ndjson").write_text('{"rayhunter": {}}\n' + row([None]) + "\n")
-        r = analyze([dd / "noan.ndjson"])
-        check("header without analyzers -> unreadable", r["recs_unreadable"] == 1)
-
-        # empty file -> unreadable, not a clean recording
-        (dd / "empty.ndjson").write_text("")
-        r = analyze([dd / "empty.ndjson"])
-        check(
-            "empty file -> unreadable",
-            r["recs_unreadable"] == 1 and r["recs_covered"] == 0,
+    # schema violations -> analyze returns None (fail closed)
+    check("non-dict doc -> None", analyze([1, 2, 3]) is None)
+    check(
+        "analyzers not a list -> None",
+        analyze({"metadata": {"analyzers": 5}, "reports": []}) is None,
+    )
+    check(
+        "events not a list -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [
+                    {"total_messages": 1, "skipped": 0, "warnings": 0, "events": 7}
+                ],
+            }
         )
-
-        # non-object row and row lacking events -> malformed, not analyzed
-        (dd / "badrows.ndjson").write_text(
-            json.dumps(hdr10)
-            + "\n"
-            + "123\n"
-            + '{"packet_timestamp": "x", "skipped_message_reason": null}\n'
+        is None,
+    )
+    check(
+        "non-int total_messages -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [
+                    {"total_messages": None, "skipped": 0, "warnings": 0, "events": []}
+                ],
+            }
         )
-        r = analyze([dd / "badrows.ndjson"])
-        check(
-            "non-object / no-events rows -> malformed, 0 analyzed",
-            r["malformed_rows"] == 2 and r["analyzed_rows"] == 0,
-        )
-
-        # invalid UTF-8 in the header line -> unreadable, no exception
-        (dd / "utf8.ndjson").write_bytes(b"\xff\xfe not utf8\n")
-        r = analyze([dd / "utf8.ndjson"])
-        check("invalid UTF-8 header -> unreadable", r["recs_unreadable"] == 1)
-
-        # a non-dict analyzer entry before a detector must NOT shift indices:
-        # fail closed (unreadable) rather than filter it out
-        shifted = {
-            "analyzers": [123] + hdr10["analyzers"],
-            "rayhunter": {},
-            "report_version": 1,
-        }
-        (dd / "shift.ndjson").write_text(
-            json.dumps(shifted) + "\n" + row([None] * 5) + "\n"
-        )
-        r = analyze([dd / "shift.ndjson"])
-        check(
-            "bad analyzer entry -> unreadable (no index shift)",
-            r["recs_unreadable"] == 1 and r["recs_covered"] == 0,
-        )
-
-        # truncated events row (len != analyzer count) -> malformed, not analyzed
-        (dd / "trunc.ndjson").write_text(
-            json.dumps(hdr10) + "\n" + row([None, None]) + "\n"
-        )
-        r = analyze([dd / "trunc.ndjson"])
-        check(
-            "truncated events row -> malformed, 0 analyzed",
-            r["malformed_rows"] == 1
-            and r["analyzed_rows"] == 0
-            and r["per"]["auth_failure"]["covered_msgs"] == 0,
-        )
-
-        # duplicate analyzer name in header -> unreadable (would double-count)
-        dup = {
-            "analyzers": hdr10["analyzers"]
-            + [{"name": "Authentication failure or reject", "version": 0}],
-            "rayhunter": {},
-            "report_version": 1,
-        }
-        (dd / "dup.ndjson").write_text(json.dumps(dup) + "\n" + row([None] * 5) + "\n")
-        r = analyze([dd / "dup.ndjson"])
-        check("duplicate analyzer name -> unreadable", r["recs_unreadable"] == 1)
+        is None,
+    )
+    check(
+        "non-dict report entry -> None",
+        analyze({"metadata": {"analyzers": names}, "reports": [42]}) is None,
+    )
 
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
@@ -450,10 +451,7 @@ def selftest() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="T-OR-061 calibration FP snapshot")
-    ap.add_argument("captures_dir", nargs="?", type=Path)
-    ap.add_argument(
-        "--all", action="store_true", help="also tabulate upstream analyzers"
-    )
+    ap.add_argument("report", nargs="?", type=Path, help="rayhunter-check JSON report")
     ap.add_argument(
         "--selftest", action="store_true", help="run synthetic self-tests and exit"
     )
@@ -461,14 +459,16 @@ def main() -> int:
 
     if args.selftest:
         return selftest()
-    if args.captures_dir is None:
-        ap.error("captures_dir is required (or pass --selftest)")
-
-    files = sorted(args.captures_dir.glob("*.ndjson"))
-    if not files:
-        print(f"no .ndjson files in {args.captures_dir}", file=sys.stderr)
-        return 2
-    return render(analyze(files, want_all=args.all), want_all=args.all)
+    if args.report is None:
+        ap.error("report is required (or pass --selftest)")
+    try:
+        doc = json.loads(args.report.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        return _fail(f"cannot read report {args.report}: {e}")
+    result = analyze(doc)
+    if result is None:
+        return _fail(f"{args.report} is not a valid rayhunter-check report")
+    return render(result)
 
 
 if __name__ == "__main__":

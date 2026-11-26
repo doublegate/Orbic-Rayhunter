@@ -82,11 +82,15 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   unauthenticated emergency-services attach (accepted as a known false positive until T-OR-111 adds
   emergency-attach suppression), so it needs T-OR-061 calibration. (NAS half only; the RRC Security
   Mode Command and no-SMC-before-DRB parts are deferred to T-OR-111 pending RRC test vectors.)
-- **Field-calibration tooling** (T-OR-061): `scripts/calib-run.sh` and `scripts/calib-snapshot.py`
-  pull a device's recordings and print a per-detector false-positive table from the daemon's own
-  analysis NDJSON, so the v1.2.0 detectors' firing rate on real traffic can be measured before
-  deciding default-on/off. Captures stay out of the repo. See [docs/ANALYZERS.md](docs/ANALYZERS.md)
-  ("Field calibration"); offline re-analysis of archived QMDL is tracked as T-OR-113.
+- **`rayhunter-check --config`** (T-OR-113, `[UPSTREAM]` patch 0010): select which analyzers run by
+  loading a config's `[analyzers]` table, so offline re-analysis can exercise detectors that are off
+  by default (it otherwise ran only the default-on set). This is the reproducible calibration path.
+- **Field-calibration tooling** (T-OR-061): `scripts/calib-run.sh`, `scripts/calib-snapshot.py` and
+  `scripts/calib-analyzers.toml` pull a device's recordings, re-score every message offline with
+  `rayhunter-check --config` (the v1.2.0 detectors enabled), and print a per-detector false-positive
+  table with a real per-message denominator, so their firing rate on real traffic can be measured
+  before deciding default-on/off. Captures stay out of the repo. See
+  [docs/ANALYZERS.md](docs/ANALYZERS.md) ("Field calibration").
 
 ## [1.1.1] - 2026-11-25
 
