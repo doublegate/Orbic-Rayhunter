@@ -101,8 +101,8 @@ calibrated severity (#9 Medium, #10 Low). Two more precise signals were consider
 this version because the parser does not yet support them: confirming the reject was
 integrity-unprotected (the NAS security-header type is not preserved through the decrypted-NAS log)
 and confirming an IMSI re-attach followed (the EPS mobile identity in an Attach Request is an empty
-generated struct in the current `pycrate-rs`). The broader cause tiers (#3/#6/#7 USIM-invalidating,
-#11-#15/#22/#42 DoS/roaming) stay with the informational diagnostic analyzer. Folding the broader
+generated struct in the current `pycrate-rs`). The broader cause tiers (USIM-invalidating #3/#6/#7,
+DoS/roaming #11-#15/#22/#42) stay with the informational diagnostic analyzer. Folding the broader
 causes in, and adding the two confirmations once the parser supports them, is post-calibration work.
 
 The remaining proposed config keys are placeholders until the upstream PR discussion settles names.
