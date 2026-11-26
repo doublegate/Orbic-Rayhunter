@@ -56,7 +56,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 107 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-106, T-OR-107 (0x11EB-empirical part of T-OR-019 deferred; rescue delete T-OR-041b and retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
+| Tickets | 107 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-106, T-OR-107 (v1.2.0 sinks 045/046/047/049 done at patch level, on-device validation pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 4 (`[UPSTREAM]` notification sinks, T-OR-045/046/047/049) | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 132 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |

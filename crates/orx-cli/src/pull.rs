@@ -628,8 +628,23 @@ pub fn pull_logs_at(
 /// Write `data` to `path` atomically (temp in the same dir, then rename), so a
 /// crash or ENOSPC never leaves a truncated manifest/state file.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    let tmp = Path::new(&format!("{}.tmp", path.display())).to_path_buf();
-    std::fs::write(&tmp, data).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Unique temp beside the target, created fresh with O_EXCL (so it never
+    // follows or clobbers a planted symlink) and mode 0600 (the data may be
+    // sensitive -- e.g. a config snapshot with a private topic URL), then
+    // atomically renamed over the target.
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    f.write_all(data)
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    f.sync_all().ok();
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", tmp.display()))
 }
 

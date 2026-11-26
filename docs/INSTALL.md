@@ -379,17 +379,24 @@ rm -f -- /data/rayhunter/qmdl/<ts>.qmdl.gz /data/rayhunter/qmdl/<ts>.ndjson /dat
 ```
 
 Then verify recovery with `orx check` (expect the daemon reachable again). **If it does not come
-back**, a dangling manifest entry is the likely cause: restore the bookkeeping with
-`cp /var/volatile/manifest.toml.bak /data/rayhunter/qmdl/manifest.toml` and restart, or consult the
-upstream project before editing the manifest by hand. (Note: `/var/volatile` is cleared on reboot,
-so restore before rebooting.)
+back**, the likely cause is a dangling manifest entry: `manifest.toml` still lists a `[[entries]]`
+block for a recording whose files you just deleted. Restoring the `.bak` does **not** fix this --
+the backup was taken *before* the delete, so it contains the very same dangling entry. The `.bak` is
+the undo for a *botched hand-edit* of the manifest, not for the dangling entry itself. To remove the
+dangling entry, edit `/data/rayhunter/qmdl/manifest.toml` and delete the `[[entries]]` block whose
+`name` matches each `<ts>` you removed (then restart); if that hand-edit goes wrong, restore the
+pre-edit state with `cp /var/volatile/manifest.toml.bak /data/rayhunter/qmdl/manifest.toml`. Consult
+the upstream project if unsure. (Note: `/var/volatile` is cleared on reboot, so restore before
+rebooting.)
 
 Finally **close the `:24` shell** to restore the hardened posture, and VERIFY it closed:
 
 ```sh
-# in the :24 shell, kill its listener. busybox may lack pkill or match its own
-# command line, so fall back to killing the PID from `ps` if needed:
-pkill -f 'nc -ll -p 24' || kill "$(ps | grep '[n]c -ll -p 24' | awk '{print $1}')"
+# in the :24 shell, kill its listener (and any spawned handler). busybox may
+# lack pkill or match its own command line, so kill each matching PID from `ps`.
+# Do NOT quote the substitution -- with more than one PID that makes a single
+# invalid argument; pipe to `xargs` so each PID is killed separately:
+ps | awk '/[n]c -ll -p 24/ {print $1}' | xargs -r kill
 ```
 
 Then confirm from the host that it is gone — `orx check` must report `root shell port 24 closed`

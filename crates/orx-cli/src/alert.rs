@@ -134,10 +134,47 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .ok_or_else(|| "ntfy_url must start with http:// or https://".to_string())?;
-    // Require a non-empty host before the first '/', '?' or '#'.
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // The authority is everything before the first '/', '?' or '#'.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Reject embedded userinfo (user:pass@host): credentials belong in the
+    // config, not the URL, and a userinfo URL would be printed verbatim by
+    // `orx alert set`, leaking the secret to stdout/logs.
+    if authority.contains('@') {
+        return Err(
+            "ntfy_url must not contain embedded credentials (user:pass@); configure auth separately"
+                .to_string(),
+        );
+    }
+    // Split host[:port]. A bracketed IPv6 literal ([::1][:port]) keeps its colons.
+    let (host, port) = if let Some(after_open) = authority.strip_prefix('[') {
+        let close = after_open
+            .find(']')
+            .ok_or_else(|| "ntfy_url has an unterminated IPv6 host".to_string())?;
+        let host = &after_open[..close];
+        let tail = &after_open[close + 1..];
+        let port = match tail {
+            "" => None,
+            _ => Some(
+                tail.strip_prefix(':')
+                    .ok_or_else(|| "ntfy_url has a malformed IPv6 authority".to_string())?,
+            ),
+        };
+        (host, port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        }
+    };
     if host.is_empty() {
         return Err("ntfy_url has no host".to_string());
+    }
+    if let Some(port) = port
+        && (port.is_empty()
+            || !port.chars().all(|c| c.is_ascii_digit())
+            || port.parse::<u16>().is_err())
+    {
+        return Err("ntfy_url has an invalid port".to_string());
     }
     Ok(())
 }
@@ -465,6 +502,21 @@ mod tests {
         assert!(validate_ntfy_url("https://").is_err());
         assert!(validate_ntfy_url("https://ntfy.sh/ has space").is_err());
         assert!(validate_ntfy_url("https://ntfy.sh/\n").is_err());
+        // No host before the path.
+        assert!(validate_ntfy_url("https://:8080/topic").is_err());
+        // Embedded credentials (would leak when printed) are rejected.
+        assert!(validate_ntfy_url("https://user:pass@ntfy.sh/topic").is_err());
+        assert!(validate_ntfy_url("https://user:pass@/topic").is_err());
+        // Invalid / out-of-range port.
+        assert!(validate_ntfy_url("https://ntfy.sh:abc/topic").is_err());
+        assert!(validate_ntfy_url("https://ntfy.sh:99999/topic").is_err());
+    }
+
+    #[test]
+    fn validate_ntfy_url_accepts_host_port_and_ipv6() {
+        assert!(validate_ntfy_url("https://ntfy.sh:8080/topic").is_ok());
+        assert!(validate_ntfy_url("http://[::1]:8080/topic").is_ok());
+        assert!(validate_ntfy_url("http://[2001:db8::1]/topic").is_ok());
     }
 
     #[test]

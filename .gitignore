@@ -53,3 +53,7 @@ CLAUDE.local.md
 # Python bytecode
 __pycache__/
 *.pyc
+
+# `orx alert set` config snapshots (may contain a private ntfy topic URL, Wi-Fi
+# SSID, fixed GPS coordinates); written 0600, default dir is the CWD.
+orx-config-before-*.json
