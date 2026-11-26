@@ -112,6 +112,36 @@ The test harness all of these depend on is T-OR-051; severity calibration is T-O
 given Devilray; asking whether its attack profiles can be run against candidates 1-6 before
 release is part of T-OR-061.
 
+## Field calibration (T-OR-061)
+
+New detectors ship off by default and are enabled only after their false-positive rate is measured
+on real carrier traffic. The calibration loop, run with the device connected and the detectors
+enabled on it:
+
+1. Enable the detectors on the device for the calibration run (they default off in the installed
+   config): a `POST /api/config` carrying the `[analyzers]` flags set true. The daemon writes them
+   to `/data/rayhunter/config.toml` and **triggers its own restart**, so the new config takes effect
+   within seconds (not immediately on the running process, and not only at the next reboot); the
+   next recording is analyzed with the detectors on. This is a calibration-only on-device change;
+   the committed config (`device/config/config.orbic.toml`) stays off.
+2. Let the device capture normal use (the daemon analyzes live and writes an analysis NDJSON
+   beside each QMDL).
+3. Snapshot the false positives: `scripts/calib-run.sh [<captures-dir>]` pulls the recordings
+   (`orx pull-logs`) and prints a per-detector firing table from the daemon's own NDJSON
+   (`scripts/calib-snapshot.py`). A firing over normal traffic is a false positive. Every firing
+   should be explained before a detector is proposed for default-on.
+4. When calibration is done, turn them back off the same way (`POST /api/config` with the three
+   flags false), which again triggers a restart. A reinstall (`orx install`) also restores the
+   committed off config.
+
+The snapshot reads the daemon's NDJSON, so it covers only recordings the detectors were enabled
+for, and it reports per detector (a detector not enabled in a recording gets no coverage from it);
+with no detector-enabled traffic at all it fails closed rather than printing a clean verdict. To
+re-score **archived** QMDL (captured before enablement, or after a detector change) the offline
+`rayhunter-check` path is needed, which currently runs only the default-on analyzers; a
+`--config`/`--all-analyzers` flag for it is **T-OR-113**. Captures contain real traffic and are
+never committed (keep them outside the repo, e.g. `~/orbic-captures`).
+
 ## Out of scope on this hardware
 
 2G A5/x and 3G UEA0 checks, MM-level 2G identity requests and other 2G/3G message analysis: the
