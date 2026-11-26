@@ -145,6 +145,14 @@ keeps the historical behavior:
 Secret keys (`ntfy_auth`, `gotify_token`, `webhook_url`) are redacted from `GET /api/config` and
 preserved across a config round-trip that omits them; a credential is dropped if its endpoint URL
 changes, so the unauthenticated config API cannot repoint a URL and harvest the stored secret.
+An **empty or whitespace-only** value for any of these secret keys **clears** the stored secret
+(it is treated as "unset", never persisted as inert whitespace).
+
+A sink is **disabled** (skipped by both the daemon's notification worker and
+`POST /api/test-notification`) when its URL is absent, empty, or whitespace-only. For `gotify_url`
+this also covers a value that normalizes to empty after stripping the query/fragment and trailing
+slash (for example `"/"` or `"?token=x"`), so such a value does not produce a POST to a bare
+`/message`.
 
 Hardening (patch 0005) changes delivery behavior, so note:
 
