@@ -84,8 +84,8 @@ commercial cell-site simulator, and upstreamability.
 |---|---|---|---|---|---|---|---|
 | 1 | T-OR-052 | **Landed** (patch 0007, key `nas_reject_identity`) | Attach/TAU/Service Reject carrying an identity-forcing EMM cause (#9 or #10) | yes (NAS) | **Medium** #9; **Low** #10 (keys on the cause alone) | low-medium | [UPSTREAM] |
 | 2 | T-OR-053 | **Landed** (patch 0008, key `auth_failure`) | UE `AuthenticationFailure` #20/#21/#26; network `AuthenticationReject` | yes (NAS) | **High** #20 / **Low** #21 / **Medium** #26 / **High** reject (stateless; stateful suppression T-OR-109) | low for failures; reject can storm High on an inactive/unprovisioned SIM until T-OR-109 dedup | [UPSTREAM] |
-| 3 | T-OR-054 | Own identity disclosure (`identity_disclosure`) | UE `IdentityResponse` with IMSI/IMEI; `AttachRequest` with IMSI-type identity; no authentication within T seconds | yes, `epsid` parsing gap | High on home PLMN without following auth; else Low | low | [UPSTREAM] (may need a `pycrate_rs` change) |
-| 4 | T-OR-055 | Null integrity and missing security (`null_integrity`) | RRC/NAS SMC with EIA0; DRB setup or measurement reconfiguration with no prior SMC | yes (RRC/NAS) | High EIA0 outside emergency; Medium no SMC | low / medium | [UPSTREAM] |
+| 3 | T-OR-054 | **Blocked on T-OR-110** (`identity_disclosure`) | UE `IdentityResponse` with IMSI/IMEI; `AttachRequest` with IMSI-type identity; no authentication within T seconds | no -- `EPSID`/`ID` empty in `pycrate-rs` | High on home PLMN without following auth; else Low | low | [UPSTREAM] (needs T-OR-110 parser change; request side already covered by upstream `imsi_requested`) |
+| 4 | T-OR-055 | **NAS half landed** (patch 0009, key `null_integrity`) | NAS Security Mode Command with EIA0 (RRC SMC and DRB-before-SMC deferred, T-OR-111) | yes (NAS) | **High** EIA0 in NAS SMC | low (emergency attach uses EIA0) | [UPSTREAM] |
 | 5 | T-OR-056 | IMSI paging (`imsi_paging`) | PCCH `PagingRecord` with `ue-Identity` = imsi, compared with the SIM IMSI by salted hash | yes (PCCH); IMSI via AT | High if ours; Low if another IMSI | low | [UPSTREAM] |
 | 6 | T-OR-057 | Dedicated-priority and sunset-RAT downgrade (`legacy_rat_downgrade`) | `idleModeMobilityControlInfo` favoring legacy RATs; redirect to UTRA/CDMA2000 where decommissioned; `MobilityFromEUTRACommand`; SIB8 priorities | yes (RRC) | High in sunset markets (MCC policy table); Informational elsewhere | low in US | [UPSTREAM] |
 | 7 | T-OR-059 | Cell identity consistency (`cell_consistency`) | same ECGI with different TAC or PCI; TAC change while GPS is stationary; MCC mismatch; short-lived cells, all within one recording | partial (PCI needs T-OR-058) | Low alone; raises 1-6 on the same cell | medium-high | [UPSTREAM] (partially) |
@@ -104,7 +104,8 @@ and confirming an IMSI re-attach followed (the EPS mobile identity in an Attach 
 generated struct in the current `pycrate-rs`). The broader cause tiers (USIM-invalidating #3/#6/#7,
 DoS/roaming #11-#15/#22/#42) stay with the informational diagnostic analyzer. Folding the broader
 causes in, and adding the two confirmations once the parser supports them, is tracked as T-OR-108
-(the `epsid` parsing it needs overlaps T-OR-054; the integrity-protection check overlaps T-OR-061).
+(the mobile-identity parsing it needs is T-OR-110, which also unblocks T-OR-054; the
+integrity-protection check overlaps T-OR-061).
 
 The remaining proposed config keys are placeholders until the upstream PR discussion settles names.
 The test harness all of these depend on is T-OR-051; severity calibration is T-OR-061. EFF has been

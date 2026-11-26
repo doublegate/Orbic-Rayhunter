@@ -74,6 +74,14 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   SIM swap, and an inactive/unprovisioned SIM draws a legitimate Authentication Reject on every
   attach/auth retry (stateful suppression and dedup are tracked as T-OR-109), so it needs T-OR-061
   calibration.
+- **Null integrity (EIA0) detector** (T-OR-055, `[UPSTREAM]` patch 0009, config key `null_integrity`):
+  flags a NAS Security Mode Command that selects the null integrity algorithm EIA0 (-> High). EIA0
+  leaves NAS signalling unauthenticated, so the network cannot be verified and signalling can be
+  forged -- a stronger false-base-station indicator than the null ciphering (EEA0) the existing
+  `nas_null_cipher` analyzer covers. Stateless. **Off by default**: EIA0 is legitimate for an
+  unauthenticated emergency-services attach (accepted as a known false positive until T-OR-111 adds
+  emergency-attach suppression), so it needs T-OR-061 calibration. (NAS half only; the RRC Security
+  Mode Command and no-SMC-before-DRB parts are deferred to T-OR-111 pending RRC test vectors.)
 
 ## [1.1.1] - 2026-11-25
 
