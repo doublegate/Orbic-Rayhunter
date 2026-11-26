@@ -7,4 +7,4 @@
 0004-UPSTREAM-notifications-Gotify-sink.patch
 0005-UPSTREAM-notifications-harden-sinks-per-review-redir.patch
 0006-UPSTREAM-analysis-test-harness-for-analyzer-unit-tes.patch
-0007-UPSTREAM-analysis-unauthenticated-NAS-Reject-detecto.patch
+0007-UPSTREAM-analysis-NAS-Reject-identity-forcing-cause-.patch

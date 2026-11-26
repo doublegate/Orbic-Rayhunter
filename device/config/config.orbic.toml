@@ -50,4 +50,4 @@ no_nas_messages = false
 # cause (#9/#10) -- the Devilray IMSI-catching blind spot. Keys on the cause
 # alone. Kept OFF until T-OR-061 calibrates its false-positive rate: #9/#10 also
 # occur benignly (MME restart, GUTI/pool mismatch, idle-timer implicit detach).
-unauthenticated_nas_reject = false
+nas_reject_identity = false
