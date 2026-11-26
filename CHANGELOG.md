@@ -82,6 +82,10 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   unauthenticated emergency-services attach (accepted as a known false positive until T-OR-111 adds
   emergency-attach suppression), so it needs T-OR-061 calibration. (NAS half only; the RRC Security
   Mode Command and no-SMC-before-DRB parts are deferred to T-OR-111 pending RRC test vectors.)
+- **RRC golden-vector test harness** (T-OR-112, `[UPSTREAM]` patch 0011): `test_util` gains
+  `lte_rrc`/`bcch_dl_sch`/`dl_dcch` builders that wrap raw RRC octets through the live `lte_rrc`
+  decode path, seeded with identifier-free vectors captured from the device, so the RRC analyzers
+  (which upstream ships untested) can finally be unit-tested. Unblocks T-OR-056/T-OR-057.
 - **`rayhunter-check --config`** (T-OR-113, `[UPSTREAM]` patch 0010): select which analyzers run by
   loading a config's `[analyzers]` table, so offline re-analysis can exercise detectors that are off
   by default (it otherwise ran only the default-on set). This is the reproducible calibration path.

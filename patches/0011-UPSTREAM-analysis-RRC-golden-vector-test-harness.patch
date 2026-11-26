@@ -1,0 +1,149 @@
+From 3f0f764d04dc9eefb43f34c1324ff7f99fb40669 Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Thu, 26 Nov 2026 13:59:50 -0500
+Subject: [PATCH] [UPSTREAM] analysis: RRC golden-vector test harness
+ (test_util RRC builders)
+
+Upstream ships no unit tests for its RRC analyzers (connection_redirect_downgrade,
+incomplete_sib, priority_2g_downgrade), so there was no pattern for building an
+RRC InformationElement in a test, and hand-encoding UPER PDUs blind is
+error-prone. Add builders to the analyzer test harness that wrap raw RRC octets
+and decode them through the same `lte_rrc` path the live pipeline uses:
+`lte_rrc(subtype, payload)` plus `bcch_dl_sch` and `dl_dcch` conveniences.
+
+Seed with golden vectors captured from a real device (T-OR-061), chosen to carry
+no subscriber or location identifiers: a BCCH-DL-SCH SystemInformation (SIB2+
+radio parameters only, not a SIB1 with cellIdentity/PLMN/TAC) and a DL-DCCH
+DLInformationTransfer. A test runs IncompleteSibAnalyzer over the real SIB to
+prove the build->decode->analyze seam end to end. Real PCCH paging always
+carries an S-TMSI, so no paging vector is committed; the IMSI-paging analyzer
+(T-OR-056) builds synthetic paging via lte_rrc(PCCH, ..). Unblocks the RRC
+analyzers T-OR-056/T-OR-057 and the RRC half of T-OR-111.
+---
+ lib/src/analysis/test_util.rs | 96 ++++++++++++++++++++++++++++++++++-
+ 1 file changed, 95 insertions(+), 1 deletion(-)
+
+diff --git a/lib/src/analysis/test_util.rs b/lib/src/analysis/test_util.rs
+index b772fa2..1914284 100644
+--- a/lib/src/analysis/test_util.rs
++++ b/lib/src/analysis/test_util.rs
+@@ -8,7 +8,7 @@ use chrono::{DateTime, FixedOffset, TimeDelta};
+ 
+ use crate::analysis::analyzer::{Analyzer, Event};
+ use crate::analysis::information_element::InformationElement;
+-use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, LteNasSubtype};
++use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, LteNasSubtype, LteRrcSubtype};
+ 
+ /// A fixed, deterministic base time plus `seconds`, for sequencing packets
+ /// within a test without depending on the wall clock.
+@@ -40,6 +40,33 @@ pub(crate) fn emm_message(message_type: u8, body: &[u8]) -> InformationElement {
+     nas_plain(&payload)
+ }
+ 
++/// Build an LTE RRC [`InformationElement`] from a raw RRC PDU on the given
++/// logical channel, decoded through the same `lte_rrc` path the live pipeline
++/// uses (`InformationElement::try_from` a GSMTAP message). This is the seam for
++/// testing the RRC analyzers (connection-redirect, SIB, priority downgrade,
++/// paging), which upstream ships with no unit tests and therefore no vector
++/// pattern (T-OR-112). `payload` is the RRC message octets exactly as they
++/// follow the GSMTAP header in a capture.
++pub(crate) fn lte_rrc(subtype: LteRrcSubtype, payload: &[u8]) -> InformationElement {
++    InformationElement::try_from(&GsmtapMessage {
++        header: GsmtapHeader::new(GsmtapType::LteRrc(subtype)),
++        payload: payload.to_vec(),
++    })
++    .expect("valid synthetic RRC information element")
++}
++
++/// A system-information block on BCCH-DL-SCH (SIB1 and the SIB container the
++/// downgrade/SIB analyzers inspect).
++pub(crate) fn bcch_dl_sch(payload: &[u8]) -> InformationElement {
++    lte_rrc(LteRrcSubtype::BcchDlSch, payload)
++}
++
++/// A dedicated downlink message on DL-DCCH (RRC Connection Release/Reconfig, the
++/// channel the connection-redirect and measurement analyzers inspect).
++pub(crate) fn dl_dcch(payload: &[u8]) -> InformationElement {
++    lte_rrc(LteRrcSubtype::DlDcch, payload)
++}
++
+ /// Run `analyzer` over a sequence of `(information element, timestamp)` pairs and
+ /// collect every [`Event`] it emits, each paired with the 0-based index of the
+ /// element that produced it. Returning the index (rather than a bare
+@@ -95,6 +122,73 @@ mod tests {
+         }
+     }
+ 
++    // Golden RRC vectors captured from the Orbic RC400L (T-OR-061) and chosen to
++    // carry no subscriber or location identifiers, so they are safe to commit to
++    // a public repo:
++    //   - A BCCH-DL-SCH `SystemInformation` message (carries SIB2+ radio-resource
++    //     parameters only; deliberately NOT a SIB1, which holds cellIdentity /
++    //     PLMN / TAC = location). Verified identifier-free when selected.
++    //   - A DL-DCCH `DLInformationTransfer` (a downlink NAS transport; its only
++    //     payload here is a NAS reject cause -- no persistent identity).
++    // Real PCCH paging always carries an S-TMSI/M-TMSI, so a paging vector is not
++    // committed here; the IMSI-paging analyzer (T-OR-056) builds its own synthetic
++    // paging via `lte_rrc(LteRrcSubtype::PCCH, ..)` with a test identity.
++    const REAL_SYSTEM_INFORMATION: &str =
++        "00025b30542fdb28c44605a28158000c032073bd156124000c026dd096af81c6892003c00310030000";
++    const REAL_DL_INFORMATION_TRANSFER: &str = "0a00183a2040074408";
++
++    fn hex_literal_decode(s: &str) -> Vec<u8> {
++        (0..s.len())
++            .step_by(2)
++            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
++            .collect()
++    }
++
++    fn lte_variant(b: &LteInformationElement) -> &'static str {
++        match b {
++            LteInformationElement::BcchDlSch(_) => "BcchDlSch",
++            LteInformationElement::DlDcch(_) => "DlDcch",
++            LteInformationElement::PCCH(_) => "PCCH",
++            _ => "other",
++        }
++    }
++
++    #[test]
++    fn bcch_dl_sch_decodes_a_real_system_information() {
++        // The builder wraps raw device RRC bytes and decodes them through the
++        // live `lte_rrc` path into the BcchDlSch variant -- the seam the SIB and
++        // downgrade analyzers need (T-OR-112).
++        let ie = bcch_dl_sch(&hex_literal_decode(REAL_SYSTEM_INFORMATION));
++        let InformationElement::LTE(lte) = ie else {
++            panic!("expected an LTE information element");
++        };
++        assert_eq!(lte_variant(&lte), "BcchDlSch");
++    }
++
++    #[test]
++    fn dl_dcch_decodes_a_real_dl_information_transfer() {
++        let ie = dl_dcch(&hex_literal_decode(REAL_DL_INFORMATION_TRANSFER));
++        let InformationElement::LTE(lte) = ie else {
++            panic!("expected an LTE information element");
++        };
++        assert_eq!(lte_variant(&lte), "DlDcch");
++    }
++
++    #[test]
++    fn an_rrc_analyzer_consumes_a_real_rrc_vector() {
++        // End-to-end proof that the harness lets an RRC analyzer run over a real
++        // captured message: IncompleteSibAnalyzer inspects BCCH-DL-SCH. On a plain
++        // SystemInformation it simply does not fire -- the point is that the build
++        // + decode + analyze path works without hand-encoding UPER.
++        use crate::analysis::incomplete_sib::IncompleteSibAnalyzer;
++        let ie = bcch_dl_sch(&hex_literal_decode(REAL_SYSTEM_INFORMATION));
++        let mut analyzer = IncompleteSibAnalyzer {};
++        let events = collect_events(&mut analyzer, &[(ie, packet_time(0))]);
++        // Benign system information -> no event; asserting the call returns at all
++        // is the harness check (it must decode and be analyzable, not panic).
++        assert!(events.len() <= 1);
++    }
++
+     #[test]
+     fn nas_plain_builds_an_lte_nas_information_element() {
+         // A minimal NAS payload parses specifically into an LTE NAS element
+-- 
+2.56.1
+
