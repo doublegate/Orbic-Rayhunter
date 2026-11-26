@@ -1,0 +1,144 @@
+From da29df3a651af0ed2314b65e44fbed14bde60a31 Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Thu, 26 Nov 2026 02:06:39 -0500
+Subject: [PATCH] [UPSTREAM] analysis: test harness for analyzer unit tests
+ (synthetic vectors)
+
+Shared `#[cfg(test)]` helpers in `analysis/test_util` so each analyzer's tests do
+not re-roll raw GSMTAP payloads or re-implement the run-and-collect loop:
+
+- `packet_time(secs)`: a fixed, deterministic base time + offset (no wall clock).
+- `nas_plain(payload)`: build a plain (unciphered) LTE NAS `InformationElement`
+  from a raw NAS payload.
+- `collect_events(analyzer, &[(ie, ts)])`: run an analyzer over a sequence and
+  collect every emitted `Event`, for a concise golden comparison.
+
+The per-analyzer named vector builders (identity request, attach/auth reject with
+cause, security-mode EIA0, SIB builders) grow here as each detector lands. The
+capture scrubber (sanitizing a real QMDL for committed vectors) is deferred until
+on-device captures exist.
+
+Ref: Orbic-Rayhunter T-OR-051 (analyzer phase foundation).
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ lib/src/analysis/mod.rs       |  2 +
+ lib/src/analysis/test_util.rs | 96 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 98 insertions(+)
+ create mode 100644 lib/src/analysis/test_util.rs
+
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index b520c1f..9a5d10f 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -9,4 +9,6 @@ pub mod no_nas_messages;
+ pub mod null_cipher;
+ pub mod priority_2g_downgrade;
+ pub mod test_analyzer;
++#[cfg(test)]
++pub(crate) mod test_util;
+ pub mod util;
+diff --git a/lib/src/analysis/test_util.rs b/lib/src/analysis/test_util.rs
+new file mode 100644
+index 0000000..22c132e
+--- /dev/null
++++ b/lib/src/analysis/test_util.rs
+@@ -0,0 +1,96 @@
++//! Shared test helpers for analyzer unit tests -- the analyzer test harness
++//! (T-OR-051). Provides synthetic information-element builders and an
++//! event-collection helper so each analyzer's tests do not re-roll raw GSMTAP
++//! payloads or re-implement the run-and-collect loop. Compiled only under
++//! `cfg(test)`; the per-analyzer vector builders grow here as analyzers land.
++
++use chrono::{DateTime, FixedOffset, TimeDelta};
++
++use crate::analysis::analyzer::{Analyzer, Event};
++use crate::analysis::information_element::InformationElement;
++use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, LteNasSubtype};
++
++/// A fixed, deterministic base time plus `seconds`, for sequencing packets
++/// within a test without depending on the wall clock.
++pub(crate) fn packet_time(seconds: i64) -> DateTime<FixedOffset> {
++    DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").unwrap() + TimeDelta::seconds(seconds)
++}
++
++/// Build a plain (unciphered) LTE NAS [`InformationElement`] from a raw NAS
++/// payload. The first octet carries the security-header-type and protocol
++/// discriminator, the second the message type, then the message body.
++pub(crate) fn nas_plain(payload: Vec<u8>) -> InformationElement {
++    InformationElement::try_from(&GsmtapMessage {
++        header: GsmtapHeader::new(GsmtapType::LteNas(LteNasSubtype::Plain)),
++        payload,
++    })
++    .expect("valid synthetic NAS information element")
++}
++
++/// Run `analyzer` over a sequence of `(information element, timestamp)` pairs
++/// and collect every [`Event`] it emits, so a test can golden-compare the
++/// result. Each element's index is passed as its `packet_num`.
++pub(crate) fn collect_events(
++    analyzer: &mut dyn Analyzer,
++    elements: &[(InformationElement, DateTime<FixedOffset>)],
++) -> Vec<Event> {
++    elements
++        .iter()
++        .enumerate()
++        .filter_map(|(packet_num, (ie, ts))| {
++            analyzer.analyze_information_element(ie, packet_num, *ts)
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::analyzer::EventType;
++    use std::borrow::Cow;
++
++    /// A trivial analyzer that emits one `Low` event per information element,
++    /// used to exercise [`collect_events`].
++    struct EveryElementAnalyzer;
++
++    impl Analyzer for EveryElementAnalyzer {
++        fn get_name(&self) -> Cow<'_, str> {
++            Cow::Borrowed("every-element (test)")
++        }
++        fn get_description(&self) -> Cow<'_, str> {
++            Cow::Borrowed("emits one event per information element")
++        }
++        fn analyze_information_element(
++            &mut self,
++            _ie: &InformationElement,
++            _packet_num: usize,
++            _timestamp: DateTime<FixedOffset>,
++        ) -> Option<Event> {
++            Some(Event {
++                event_type: EventType::Low,
++                message: "tick".to_string(),
++            })
++        }
++        fn get_version(&self) -> u32 {
++            0
++        }
++    }
++
++    #[test]
++    fn nas_plain_parses_as_an_information_element() {
++        // A minimal NAS payload must parse into an information element.
++        let _ie = nas_plain(vec![0x07, 0x55, 0x01]);
++    }
++
++    #[test]
++    fn collect_events_gathers_one_event_per_element() {
++        let mut analyzer = EveryElementAnalyzer;
++        let elements = vec![
++            (nas_plain(vec![0x07, 0x55, 0x01]), packet_time(0)),
++            (nas_plain(vec![0x07, 0x55, 0x01]), packet_time(1)),
++        ];
++        let events = collect_events(&mut analyzer, &elements);
++        assert_eq!(events.len(), 2);
++        assert!(events.iter().all(|e| e.event_type == EventType::Low));
++    }
++}
+-- 
+2.56.1
+
