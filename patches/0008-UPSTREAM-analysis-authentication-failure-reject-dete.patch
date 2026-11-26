@@ -1,4 +1,4 @@
-From 16521deb75e1157a83e703a4c4d0219201dec046 Mon Sep 17 00:00:00 2001
+From c20188ce1dd83b37c40f5d0d9fb53476fcee6a5a Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 03:28:51 -0500
 Subject: [PATCH] [UPSTREAM] analysis: authentication failure / reject detector
@@ -28,24 +28,26 @@ exact analyzer name) in analyzer.rs.
 Ref: Orbic-Rayhunter T-OR-053; ref-docs/lte-imsi-catcher-detection.md 3.3.
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- dist/config.toml.in              |   4 +
+ dist/config.toml.in              |   6 +
  lib/src/analysis/analyzer.rs     |  32 ++++++
- lib/src/analysis/auth_failure.rs | 177 +++++++++++++++++++++++++++++++
+ lib/src/analysis/auth_failure.rs | 188 +++++++++++++++++++++++++++++++
  lib/src/analysis/mod.rs          |   1 +
- 4 files changed, 214 insertions(+)
+ 4 files changed, 227 insertions(+)
  create mode 100644 lib/src/analysis/auth_failure.rs
 
 diff --git a/dist/config.toml.in b/dist/config.toml.in
-index 4a1fc05..ea5a09a 100644
+index 4a1fc05..20d8546 100644
 --- a/dist/config.toml.in
 +++ b/dist/config.toml.in
-@@ -117,3 +117,7 @@ no_nas_messages = false
+@@ -117,3 +117,9 @@ no_nas_messages = false
  # the reject was unprotected or that an IMSI re-attach followed). Off by default:
  # #9/#10 also occur benignly, so this needs false-positive calibration first.
  nas_reject_identity = false
 +# Flags a NAS Authentication Failure (#20 MAC failure / #21 synch / #26) or an
 +# Authentication Reject -- a false base station that cannot produce a valid AUTN.
-+# Off by default: a genuine SQN resync or SIM swap can also trigger it.
++# Off by default: a genuine SQN resync or SIM swap triggers #21, and an
++# inactive/unprovisioned SIM draws a legitimate Authentication Reject on every
++# attach/auth retry.
 +auth_failure = false
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
 index 8b09a7f..b99a83c 100644
@@ -132,10 +134,10 @@ index 8b09a7f..b99a83c 100644
          let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/auth_failure.rs b/lib/src/analysis/auth_failure.rs
 new file mode 100644
-index 0000000..43d649a
+index 0000000..d4ed6df
 --- /dev/null
 +++ b/lib/src/analysis/auth_failure.rs
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,188 @@
 +//! Flags authentication failures and rejects that indicate the network could
 +//! not run a valid EPS-AKA exchange -- the signature of a false base station
 +//! that has no access to the subscriber's home keys (HSS) and therefore cannot
@@ -156,8 +158,18 @@ index 0000000..43d649a
 +//! (a stateful check could raise it when no re-authentication follows). #26 is
 +//! Medium. An `Authentication Reject` is High. Keys on the message/cause alone
 +//! (no state). Causal and low false-positive, but off by default until
-+//! calibrated, since a genuine resync or an unprovisioned/invalid SIM can fire
-+//! it. See TS 24.301 5.4.2; the Devilray study and prior CSS literature.
++//! calibrated: a genuine SQN resync fires #21, and an inactive/unprovisioned SIM
++//! can draw a legitimate `Authentication Reject` on every attach/auth retry
++//! (deduplication is deferred). See TS 24.301 5.4.2; the Devilray study and
++//! prior CSS literature.
++//!
++//! Scope: this operates on the plain/decrypted NAS the Rayhunter DIAG pipeline
++//! delivers, like every analyzer here -- it matches `NASMessage::EMMMessage`
++//! directly and does not unwrap a security-protected NAS container. Once a UE
++//! holds a current EPS security context it may send `Authentication Failure`
++//! integrity-protected (TS 24.301 4.4.4.2); on a raw GSMTAP/PCAP feed that
++//! carried an unciphered security-protected wrapper, that message would be
++//! skipped rather than decoded. Does not apply to the decrypted DIAG logs.
 +
 +use std::borrow::Cow;
 +
@@ -184,7 +196,8 @@ index 0000000..43d649a
 +             the USIM rejects the challenge (#20 especially) or the network rejects the response. \
 +             #20 on a home network is near-impossible without an attack or a broken SIM (High); #21 \
 +             can be a genuine SQN resync or a SIM swap (Low); #26 is Medium; an Authentication \
-+             Reject is High. Keys on the message/cause alone.",
++             Reject is High, but an inactive/unprovisioned SIM can draw one legitimately on every \
++             attach/auth retry. Keys on the message/cause alone.",
 +        )
 +    }
 +

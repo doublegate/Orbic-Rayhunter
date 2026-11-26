@@ -195,7 +195,7 @@ Details: [docs/ANALYZERS.md](docs/ANALYZERS.md).
 |---|---|---|---|
 | T-OR-051 | Analyzer test harness: synthetic RRC/NAS vectors, golden-output checks, capture scrubber | [UPSTREAM] | landed at patch level (patch 0006: `nas_plain`/`packet_time`/`collect_events`/`emm_message`); the capture scrubber needs on-device captures, so it is deferred to T-OR-061 |
 | T-OR-052 | Unauthenticated NAS Reject with identity-forcing or service-denying cause (rank 1, Devilray blind spot) | [UPSTREAM] | landed (patch 0007, `nas_reject_identity`; keys on cause #9 Medium / #10 Low; unprotected + IMSI-re-attach confirmation deferred to parser support; off by default pending T-OR-061 calibration) |
-| T-OR-053 | Authentication failure / authentication reject (rank 2) | [UPSTREAM] | landed (patch 0008, `auth_failure`; #20 High / #21/#26 Medium / reject High; stateless; off by default pending T-OR-061) |
+| T-OR-053 | Authentication failure / authentication reject (rank 2) | [UPSTREAM] | landed (patch 0008, `auth_failure`; #20 High / #21 Low / #26 Medium / reject High; stateless; off by default pending T-OR-061; stateful suppression T-OR-109) |
 | T-OR-054 | Own permanent-identity disclosure, incl. `epsid` parsing gap (rank 3) | [UPSTREAM] | open |
 | T-OR-055 | Null integrity (EIA0) and security never activated (rank 4) | [UPSTREAM] | open |
 | T-OR-056 | IMSI paging, IMSI held as a salted in-memory hash (rank 5) | [UPSTREAM] | open |

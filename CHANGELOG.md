@@ -69,7 +69,9 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   no access to the subscriber's home keys cannot produce a valid AUTN, so the USIM rejects the
   challenge (#20 is the direct signature, near-impossible benignly on a home network) or the network
   rejects the response. Stateless. **Off by default**: #21 also fires on a genuine SQN resync or a
-  SIM swap (stateful suppression is tracked as T-OR-109), so it needs T-OR-061 calibration.
+  SIM swap, and an inactive/unprovisioned SIM draws a legitimate Authentication Reject on every
+  attach/auth retry (stateful suppression and dedup are tracked as T-OR-109), so it needs T-OR-061
+  calibration.
 
 ## [1.1.1] - 2026-11-25
 
