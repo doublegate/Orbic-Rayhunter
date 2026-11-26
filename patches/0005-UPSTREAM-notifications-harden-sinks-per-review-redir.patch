@@ -1,0 +1,570 @@
+From ba0c798b356173e2851dad35ad1f1986ca5de339 Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Thu, 26 Nov 2026 00:24:06 -0500
+Subject: [PATCH 5/5] [UPSTREAM] notifications: harden sinks per review
+ (redirects, secrets, concurrency)
+
+Hardening of the notification sinks (0001-0004) after the Antigravity review:
+
+- BLOCKING: the notification HTTP client now disables redirects
+  (reqwest::redirect::Policy::none()). reqwest strips Authorization on a
+  cross-origin 30x but NOT a custom credential header like X-Gotify-Key, so a
+  redirecting proxy / captive portal could otherwise harvest the Gotify token.
+  Credential header values are also marked sensitive.
+- Empty-string secrets (ntfy_auth="" / gotify_token="") no longer send a blank
+  header; a header value with invalid bytes is dropped rather than sent.
+- gotify_url with a query/fragment is handled (insert /message before ?...).
+- Webhook payload timestamp is the notification's receipt time, not the retry
+  time after a backhaul outage (NotificationStatus.event_time).
+- Sinks are delivered concurrently per tick (JoinSet), so a slow/hung sink no
+  longer blocks delivery to the healthy ones (head-of-line blocking).
+- test_notification works for a webhook-only or Gotify-only setup and applies
+  ntfy_headers, using the same redirect-disabled client.
+- Tests: send_notification strips the URL from a transport error; webhook
+  payload has no subscriber-identifier fields; LowBattery/Update header and
+  priority mappings; gotify_message_url slash/query handling.
+- Nitpicks: sink_urls.get() (no panicking index); sink-collect comment includes
+  Gotify; stale enabled_notifications config comment; resolve_endpoint_secret_*
+  / redacts_secrets test names.
+
+Ref: Orbic-Rayhunter T-OR-045..049 (PR #16 review follow-up).
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ daemon/src/notifications.rs | 248 ++++++++++++++++++++++++++++++------
+ daemon/src/server.rs        |  90 ++++++++-----
+ dist/config.toml.in         |   3 +-
+ 3 files changed, 271 insertions(+), 70 deletions(-)
+
+diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
+index 387c47d..deda49d 100644
+--- a/daemon/src/notifications.rs
++++ b/daemon/src/notifications.rs
+@@ -4,6 +4,7 @@ use std::{
+     time::{Duration, Instant},
+ };
+ 
++use chrono::{DateTime, Utc};
+ use log::error;
+ use serde::{Deserialize, Serialize};
+ use thiserror::Error;
+@@ -51,6 +52,9 @@ impl Notification {
+ 
+ struct NotificationStatus {
+     message: String,
++    /// When the pending message was received (so a webhook payload reports the
++    /// detection time, not the retry time after a backhaul outage).
++    event_time: DateTime<Utc>,
+     needs_sending: bool,
+     last_sent: Option<Instant>,
+     last_attempt: Option<Instant>,
+@@ -104,7 +108,11 @@ impl NotificationService {
+ /// JSON payload for the generic webhook sink. Deliberately carries no
+ /// subscriber identifiers (IMSI/IMEI/GUTI) -- only the event type, the
+ /// human-readable message (the same text ntfy receives) and a timestamp.
+-fn webhook_body(notification_type: &NotificationType, message: &str) -> String {
++pub(crate) fn webhook_body(
++    notification_type: &NotificationType,
++    message: &str,
++    event_time: DateTime<Utc>,
++) -> String {
+     let type_str = match notification_type {
+         NotificationType::Warning => "Warning",
+         NotificationType::LowBattery => "LowBattery",
+@@ -114,14 +122,24 @@ fn webhook_body(notification_type: &NotificationType, message: &str) -> String {
+         "source": "rayhunter",
+         "type": type_str,
+         "message": message,
+-        "timestamp": chrono::Utc::now().to_rfc3339(),
++        "timestamp": event_time.to_rfc3339(),
+     })
+     .to_string()
+ }
+ 
++/// The Gotify `/message` endpoint for a configured base URL. The Gotify token
++/// belongs in `gotify_token` (sent as `X-Gotify-Key`, redacted from `GET
++/// /api/config`), never in the URL -- `gotify_url` is NOT redacted, so a
++/// `?token=...` here would leak via the config API. Any query/fragment is
++/// therefore dropped and `/message` is appended to the base path.
++pub(crate) fn gotify_message_url(base_url: &str) -> String {
++    let base = base_url.split(['?', '#']).next().unwrap_or(base_url);
++    format!("{}/message", base.trim_end_matches('/'))
++}
++
+ /// Gotify message payload (title, message, priority 0-10) for a notification
+ /// type. See <https://gotify.net/api-docs#/message/createMessage>.
+-fn gotify_body(notification_type: &NotificationType, message: &str) -> String {
++pub(crate) fn gotify_body(notification_type: &NotificationType, message: &str) -> String {
+     let (title, priority) = match notification_type {
+         NotificationType::Warning => ("Rayhunter alert", 8),
+         NotificationType::LowBattery => ("Rayhunter: low battery", 5),
+@@ -135,7 +153,9 @@ fn gotify_body(notification_type: &NotificationType, message: &str) -> String {
+ /// tagged notification instead of a bare line. A generic webhook receiver
+ /// ignores unknown headers, so this stays harmless off ntfy.
+ /// See <https://docs.ntfy.sh/publish/>.
+-fn ntfy_headers_for(notification_type: &NotificationType) -> [(&'static str, &'static str); 3] {
++pub(crate) fn ntfy_headers_for(
++    notification_type: &NotificationType,
++) -> [(&'static str, &'static str); 3] {
+     let (title, priority, tags) = match notification_type {
+         NotificationType::Warning => ("Rayhunter alert", "high", "rotating_light,warning"),
+         NotificationType::LowBattery => ("Rayhunter: low battery", "default", "battery,warning"),
+@@ -159,7 +179,21 @@ pub async fn send_notification(
+         .body(message)
+         .timeout(Duration::from_secs(timeout));
+     for (name, value) in headers {
+-        request = request.header(*name, *value);
++        // Mark credential headers sensitive so reqwest keeps them out of any
++        // internal logging/propagation.
++        let is_credential =
++            name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-gotify-key");
++        match reqwest::header::HeaderValue::from_str(value) {
++            Ok(mut hv) => {
++                if is_credential {
++                    hv.set_sensitive(true);
++                }
++                request = request.header(*name, hv);
++            }
++            // A value with invalid header bytes (e.g. a stray newline) is dropped
++            // rather than sent; reqwest would reject the whole request otherwise.
++            Err(_) => continue,
++        }
+     }
+     // Strip the URL from any transport error: the destination (e.g. a private
+     // ntfy topic) is a secret and must not reach the daemon log.
+@@ -184,7 +218,7 @@ pub fn run_notification_worker(
+     gotify_token: Option<String>,
+ ) {
+     task_tracker.spawn(async move {
+-        // Collect the configured sinks (ntfy and/or a generic webhook).
++        // Collect the configured sinks (ntfy, a generic webhook and/or Gotify).
+         let mut sink_urls: HashMap<SinkKind, String> = HashMap::new();
+         if let Some(url) = notification_service.url.take()
+             && !url.is_empty()
+@@ -208,7 +242,14 @@ pub fn run_notification_worker(
+             return;
+         }
+ 
+-        let http_client = match crate::http_client::client() {
++        // A notification sink must not follow redirects: reqwest strips
++        // `Authorization` on a cross-origin 30x but NOT a custom credential
++        // header like `X-Gotify-Key`, so a redirecting proxy or a captive portal
++        // on `http://` over cellular could harvest the token.
++        let http_client = match crate::http_client::builder()
++            .redirect(reqwest::redirect::Policy::none())
++            .build()
++        {
+             Ok(client) => client,
+             Err(err) => {
+                 error!("failed to create notification HTTP client: {err}");
+@@ -229,11 +270,13 @@ pub fn run_notification_worker(
+                         if !enabled_notifications.contains(&notification.notification_type) {
+                             continue;
+                         }
++                        let event_time = Utc::now();
+                         for sink in sink_urls.keys().copied() {
+                             let status = statuses
+                                 .entry((notification.notification_type.clone(), sink))
+                                 .or_insert_with(|| NotificationStatus {
+                                     message: String::new(),
++                                    event_time,
+                                     needs_sending: true,
+                                     last_sent: None,
+                                     last_attempt: None,
+@@ -247,6 +290,7 @@ pub fn run_notification_worker(
+                                 continue;
+                             }
+                             status.message = notification.message.clone();
++                            status.event_time = event_time;
+                             status.needs_sending = true;
+                         }
+                     }
+@@ -255,8 +299,16 @@ pub fn run_notification_worker(
+                 }
+             }
+ 
+-            // Attempt to send pending notifications.
+-            for ((notification_type, sink), status) in statuses.iter_mut() {
++            // Build the set of sends that are due (owning everything needed), so
++            // the send itself holds no borrow of `statuses`.
++            struct PendingSend {
++                key: (NotificationType, SinkKind),
++                url: String,
++                body: String,
++                headers: Vec<(&'static str, String)>,
++            }
++            let mut pending: Vec<PendingSend> = Vec::new();
++            for ((notification_type, sink), status) in statuses.iter() {
+                 if !status.needs_sending {
+                     continue;
+                 }
+@@ -270,56 +322,82 @@ pub fn run_notification_worker(
+                     }
+                 }
+ 
+-                let base_url = &sink_urls[sink];
+-                let presentation = ntfy_headers_for(notification_type);
+-                let gotify_endpoint;
+-                let body;
+-                let mut headers: Vec<(&str, &str)> = Vec::new();
+-                let post_url: &str = match sink {
++                let Some(base_url) = sink_urls.get(sink) else {
++                    continue;
++                };
++                let mut headers: Vec<(&'static str, String)> = Vec::new();
++                let (url, body) = match sink {
+                     SinkKind::Ntfy => {
+-                        body = status.message.clone();
+-                        if let Some(auth) = &ntfy_auth {
+-                            headers.push(("Authorization", auth.as_str()));
++                        if let Some(auth) = &ntfy_auth
++                            && !auth.is_empty()
++                        {
++                            headers.push(("Authorization", auth.clone()));
+                         }
+                         if ntfy_headers {
+-                            for &(name, value) in &presentation {
+-                                headers.push((name, value));
++                            for (name, value) in ntfy_headers_for(notification_type) {
++                                headers.push((name, value.to_string()));
+                             }
+                         }
+-                        base_url
++                        (base_url.clone(), status.message.clone())
+                     }
+                     SinkKind::Webhook => {
+-                        body = webhook_body(notification_type, &status.message);
+-                        headers.push(("Content-Type", "application/json"));
+-                        base_url
++                        headers.push(("Content-Type", "application/json".to_string()));
++                        (
++                            base_url.clone(),
++                            webhook_body(notification_type, &status.message, status.event_time),
++                        )
+                     }
+                     SinkKind::Gotify => {
+-                        body = gotify_body(notification_type, &status.message);
+-                        headers.push(("Content-Type", "application/json"));
+-                        if let Some(token) = &gotify_token {
+-                            headers.push(("X-Gotify-Key", token.as_str()));
++                        headers.push(("Content-Type", "application/json".to_string()));
++                        if let Some(token) = &gotify_token
++                            && !token.is_empty()
++                        {
++                            headers.push(("X-Gotify-Key", token.clone()));
+                         }
+-                        gotify_endpoint = format!("{}/message", base_url.trim_end_matches('/'));
+-                        &gotify_endpoint
++                        (
++                            gotify_message_url(base_url),
++                            gotify_body(notification_type, &status.message),
++                        )
+                     }
+                 };
+-
+-                match send_notification(
+-                    &http_client,
+-                    post_url,
++                pending.push(PendingSend {
++                    key: (notification_type.clone(), *sink),
++                    url,
+                     body,
+-                    notification_service.timeout,
+-                    &headers,
+-                )
+-                .await
+-                {
++                    headers,
++                });
++            }
++
++            // Send all due notifications concurrently, so a slow or hung sink
++            // cannot delay delivery to the healthy ones (head-of-line blocking).
++            let timeout = notification_service.timeout;
++            let mut set = tokio::task::JoinSet::new();
++            for p in pending {
++                let client = http_client.clone();
++                set.spawn(async move {
++                    let header_refs: Vec<(&str, &str)> =
++                        p.headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
++                    let result =
++                        send_notification(&client, &p.url, p.body.clone(), timeout, &header_refs)
++                            .await;
++                    (p.key, result)
++                });
++            }
++            while let Some(joined) = set.join_next().await {
++                let Ok((key, result)) = joined else {
++                    continue;
++                };
++                let Some(status) = statuses.get_mut(&key) else {
++                    continue;
++                };
++                match result {
+                     Ok(()) => {
+                         status.last_sent = Some(Instant::now());
+                         status.failed_since_last_success = 0;
+                         status.needs_sending = false;
+                     }
+                     Err(e) => {
+-                        error!("Failed to send {sink:?} notification: {e}");
++                        error!("Failed to send {:?} notification: {e}", key.1);
+                         status.failed_since_last_success += 1;
+                         status.last_attempt = Some(Instant::now());
+                     }
+@@ -820,4 +898,94 @@ mod tests {
+ 
+         cleanup_worker(notification_sender, task_tracker).await;
+     }
++
++    #[test]
++    fn webhook_body_carries_no_identifier_fields() {
++        let body = webhook_body(&NotificationType::Warning, "heuristic X", Utc::now());
++        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
++        let obj = v.as_object().unwrap();
++        // Exactly the intended keys, and none that could hold a subscriber identifier.
++        assert_eq!(obj.len(), 4);
++        for k in ["source", "type", "message", "timestamp"] {
++            assert!(obj.contains_key(k), "missing {k}");
++        }
++        for forbidden in ["imsi", "imei", "guti", "tmsi", "msisdn", "iccid"] {
++            assert!(!obj.contains_key(forbidden), "payload has {forbidden}");
++        }
++    }
++
++    #[test]
++    fn gotify_message_url_appends_message_and_drops_query() {
++        assert_eq!(
++            gotify_message_url("https://g.example"),
++            "https://g.example/message"
++        );
++        assert_eq!(
++            gotify_message_url("https://g.example/"),
++            "https://g.example/message"
++        );
++        // A stray query/fragment is dropped -- the token must go in gotify_token
++        // (redacted), not the unredacted gotify_url.
++        assert_eq!(
++            gotify_message_url("https://g.example/?t=x"),
++            "https://g.example/message"
++        );
++        assert_eq!(
++            gotify_message_url("https://g.example#f"),
++            "https://g.example/message"
++        );
++    }
++
++    #[test]
++    fn gotify_body_priority_and_title_by_type() {
++        for (nt, pri, title) in [
++            (NotificationType::Warning, 8, "Rayhunter alert"),
++            (NotificationType::LowBattery, 5, "Rayhunter: low battery"),
++            (NotificationType::Update, 2, "Rayhunter: update available"),
++        ] {
++            let v: serde_json::Value = serde_json::from_str(&gotify_body(&nt, "m")).unwrap();
++            assert_eq!(v["priority"], pri);
++            assert_eq!(v["title"], title);
++        }
++    }
++
++    #[test]
++    fn ntfy_headers_for_maps_each_type() {
++        assert_eq!(
++            ntfy_headers_for(&NotificationType::Warning),
++            [
++                ("Title", "Rayhunter alert"),
++                ("Priority", "high"),
++                ("Tags", "rotating_light,warning"),
++            ]
++        );
++        assert_eq!(
++            ntfy_headers_for(&NotificationType::LowBattery)[1],
++            ("Priority", "default")
++        );
++        assert_eq!(
++            ntfy_headers_for(&NotificationType::Update)[1],
++            ("Priority", "low")
++        );
++    }
++
++    #[tokio::test]
++    async fn send_notification_strips_url_from_error() {
++        crate::crypto_provider::install_default();
++        let http_client = crate::http_client::client().unwrap();
++        // Nothing listens on :1, so the request fails; the error must not carry
++        // the destination (a private ntfy topic is itself a secret).
++        let err = send_notification(
++            &http_client,
++            "http://127.0.0.1:1/secret-topic",
++            "m".to_string(),
++            2,
++            &[],
++        )
++        .await
++        .unwrap_err();
++        let msg = format!("{err}");
++        assert!(!msg.contains("secret-topic"), "error leaked the url: {msg}");
++        assert!(!msg.contains("127.0.0.1"), "error leaked the host: {msg}");
++    }
+ }
+diff --git a/daemon/src/server.rs b/daemon/src/server.rs
+index a3976d1..142c75d 100644
+--- a/daemon/src/server.rs
++++ b/daemon/src/server.rs
+@@ -278,39 +278,71 @@ pub async fn set_config(
+ pub async fn test_notification(
+     State(state): State<Arc<ServerState>>,
+ ) -> Result<(StatusCode, String), (StatusCode, String)> {
+-    let url = state.config.ntfy_url.as_ref().ok_or((
+-        StatusCode::BAD_REQUEST,
+-        "No notification URL configured".to_string(),
+-    ))?;
++    use crate::notifications::{
++        NotificationType, gotify_body, gotify_message_url, ntfy_headers_for, webhook_body,
++    };
+ 
+-    if url.is_empty() {
+-        return Err((
+-            StatusCode::BAD_REQUEST,
+-            "Notification URL is empty".to_string(),
+-        ));
+-    }
++    let cfg = &state.config;
++    let message = "Test notification from Rayhunter".to_string();
+ 
+-    let http_client = crate::http_client::client().map_err(|err| {
++    // Build the test request for the FIRST configured sink (ntfy, then webhook,
++    // then Gotify), so a webhook-only or Gotify-only setup can still be tested,
++    // and so the test exercises the same headers/body a real notification uses.
++    let (url, body, headers): (String, String, Vec<(&str, String)>) = if let Some(url) =
++        cfg.ntfy_url.as_deref().filter(|u| !u.is_empty())
++    {
++        let mut h: Vec<(&str, String)> = Vec::new();
++        if let Some(auth) = cfg.ntfy_auth.as_deref().filter(|a| !a.is_empty()) {
++            h.push(("Authorization", auth.to_string()));
++        }
++        if cfg.ntfy_headers {
++            for (n, v) in ntfy_headers_for(&NotificationType::Warning) {
++                h.push((n, v.to_string()));
++            }
++        }
++        (url.to_string(), message, h)
++    } else if let Some(url) = cfg.webhook_url.as_deref().filter(|u| !u.is_empty()) {
+         (
+-            StatusCode::INTERNAL_SERVER_ERROR,
+-            format!("failed to create HTTP client: {err}"),
++            url.to_string(),
++            webhook_body(&NotificationType::Warning, &message, chrono::Utc::now()),
++            vec![("Content-Type", "application/json".to_string())],
+         )
+-    })?;
+-    let message = "Test notification from Rayhunter".to_string();
++    } else if let Some(url) = cfg.gotify_url.as_deref().filter(|u| !u.is_empty()) {
++        let mut h: Vec<(&str, String)> = vec![("Content-Type", "application/json".to_string())];
++        if let Some(token) = cfg.gotify_token.as_deref().filter(|t| !t.is_empty()) {
++            h.push(("X-Gotify-Key", token.to_string()));
++        }
++        (
++            gotify_message_url(url),
++            gotify_body(&NotificationType::Warning, &message),
++            h,
++        )
++    } else {
++        return Err((
++            StatusCode::BAD_REQUEST,
++            "No notification sink configured (set ntfy_url, webhook_url or gotify_url)".to_string(),
++        ));
++    };
+ 
+-    // Include the configured Authorization header so the test reaches a
+-    // protected ntfy endpoint, just like a real notification does.
+-    let mut headers: Vec<(&str, &str)> = Vec::new();
+-    if let Some(auth) = &state.config.ntfy_auth {
+-        headers.push(("Authorization", auth.as_str()));
+-    }
++    // Same redirect-disabled client the worker uses, so a credential header is
++    // never forwarded across a redirect.
++    let http_client = crate::http_client::builder()
++        .redirect(reqwest::redirect::Policy::none())
++        .build()
++        .map_err(|err| {
++            (
++                StatusCode::INTERNAL_SERVER_ERROR,
++                format!("failed to create HTTP client: {err}"),
++            )
++        })?;
+ 
++    let header_refs: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
+     crate::notifications::send_notification(
+         &http_client,
+-        url,
+-        message,
++        &url,
++        body,
+         DEFAULT_NOTIFICATION_TIMEOUT,
+-        &headers,
++        &header_refs,
+     )
+     .await
+     .map(|()| {
+@@ -712,7 +744,7 @@ mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn test_get_config_redacts_ntfy_auth() {
++    async fn test_get_config_redacts_secrets() {
+         let (_temp_dir, store_lock) = create_test_qmdl_store().await;
+         let config = Config {
+             ntfy_auth: Some("Bearer tk_secret".to_string()),
+@@ -751,7 +783,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn resolve_ntfy_auth_preserves_on_unchanged_url() {
++    fn resolve_endpoint_secret_preserves_on_unchanged_url() {
+         let url = Some("https://ntfy.sh/t");
+         assert_eq!(
+             resolve_endpoint_secret(None, url, Some("Bearer x"), url),
+@@ -760,7 +792,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn resolve_ntfy_auth_drops_secret_when_url_changes() {
++    fn resolve_endpoint_secret_drops_secret_when_url_changes() {
+         // The config API is unauthenticated: a write that repoints ntfy_url must
+         // NOT carry the stored credential to the new endpoint.
+         assert_eq!(
+@@ -775,7 +807,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn resolve_ntfy_auth_empty_string_clears() {
++    fn resolve_endpoint_secret_empty_string_clears() {
+         let url = Some("https://ntfy.sh/t");
+         assert_eq!(
+             resolve_endpoint_secret(Some(String::new()), url, Some("Bearer x"), url),
+@@ -784,7 +816,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn resolve_ntfy_auth_new_value_is_used() {
++    fn resolve_endpoint_secret_new_value_is_used() {
+         let url = Some("https://ntfy.sh/t");
+         assert_eq!(
+             resolve_endpoint_secret(Some("Bearer new".to_string()), url, Some("Bearer old"), url),
+diff --git a/dist/config.toml.in b/dist/config.toml.in
+index dc45382..2dbe889 100644
+--- a/dist/config.toml.in
++++ b/dist/config.toml.in
+@@ -43,7 +43,8 @@ key_input_mode = 0
+ # from GET /api/config.
+ # gotify_url = "https://gotify.example.com"
+ # gotify_token = "A-your-app-token"
+-# What notification types to enable. Does nothing if the above ntfy_url is not set.
++# What notification types to enable. Does nothing unless at least one sink
++# (ntfy_url, webhook_url or gotify_url) is configured above.
+ enabled_notifications = ["Warning", "LowBattery"]
+ 
+ # If true, Rayhunter will periodically check GitHub for new releases and show
+-- 
+2.56.1
+

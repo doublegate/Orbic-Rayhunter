@@ -1,8 +1,8 @@
-From 18d7c630b6b41c5c42a2d3cd389c1f107f2d368e Mon Sep 17 00:00:00 2001
+From f2e9e6b740b907dd0c9ff9b37e858434ed0ff6cd Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 22:57:12 -0500
-Subject: [PATCH] [UPSTREAM] notifications: optional ntfy Title/Priority/Tags
- headers
+Subject: [PATCH 1/5] [UPSTREAM] notifications: optional ntfy
+ Title/Priority/Tags headers
 
 Add a `ntfy_headers` config flag (default false). When enabled, the
 notification worker sets ntfy's Title, Priority and Tags HTTP headers
