@@ -17,8 +17,20 @@
   `{title, message, priority}` to `<gotify_url>/message` with an `X-Gotify-Key` header. `gotify_token`
   redacted + preserved like `ntfy_auth`.
 
-These are `patches/0001-0004` on the pinned upstream v0.13.0 daemon, validated on upstream's own gates
-(`cargo fmt`, `clippy -D warnings`, 88 daemon tests, `daemon/web` check + tests). MQTT (T-OR-048) and a
+### Security / hardening (patch 0005, PR #16 review follow-up)
+
+- Notification HTTP client **disables redirects** (`reqwest::redirect::Policy::none()`): reqwest
+  strips `Authorization` on a cross-origin 30x but not a custom `X-Gotify-Key`, so a redirecting
+  proxy/captive portal could otherwise harvest the Gotify token. Credential header values are marked
+  sensitive.
+- `gotify_message_url` **drops any query/fragment** so a `?token=` cannot leak through the unredacted
+  `gotify_url` in `GET /api/config` (the token belongs in the redacted `gotify_token`).
+- Empty-string secrets no longer send a blank header; webhook payload `timestamp` is the detection
+  time, not the retry time; sinks are **delivered concurrently** per tick so a hung sink cannot block
+  the others; `test_notification` supports a webhook-only or Gotify-only setup.
+
+These are `patches/0001-0005` on the pinned upstream v0.13.0 daemon, validated on upstream's own gates
+(`cargo fmt`, `clippy -D warnings`, 98 daemon tests, `daemon/web` check + tests). MQTT (T-OR-048) and a
 persistent retry queue (T-OR-050) are deferred. On-device validation is batched with the analyzers phase.
 
 ## [1.1.1] - 2026-11-25
