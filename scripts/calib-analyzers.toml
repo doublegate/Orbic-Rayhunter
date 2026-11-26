@@ -1,0 +1,26 @@
+# T-OR-061 calibration analyzer selection for `rayhunter-check --config`.
+#
+# rayhunter-check otherwise runs AnalyzerConfig::default(), which leaves the
+# v1.2.0 detectors off, so offline re-analysis of archived QMDL cannot exercise
+# them. This fixture turns the three under calibration ON so their false-positive
+# rate can be measured over real captures (see docs/ANALYZERS.md, "Field
+# calibration"). It is NOT a device config -- the shipped device config
+# (device/config/config.orbic.toml) keeps them off until calibration is done.
+#
+# Only the [analyzers] table is read; rayhunter-check ignores every other key, so
+# a full device config.toml also works as --config.
+
+[analyzers]
+imsi_requested = true
+connection_redirect_2g_downgrade = true
+lte_sib6_and_7_downgrade = true
+null_cipher = true
+nas_null_cipher = true
+incomplete_sib = true
+diagnostic_analyzer = true
+test_analyzer = false
+no_nas_messages = false
+# The three v1.2.0 detectors under calibration (off in the shipped config):
+nas_reject_identity = true
+auth_failure = true
+null_integrity = true

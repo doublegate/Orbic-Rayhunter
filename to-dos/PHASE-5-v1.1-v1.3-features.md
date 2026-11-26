@@ -135,14 +135,14 @@ Verification:
 - [~] T-OR-061: device session STARTED 2026-11-26 -- patched daemon (patches 0001-0009) installed;
       all 3 detectors enabled on-device and live in the capture pipeline. Calibration tooling landed
       (`scripts/calib-run.sh` + `scripts/calib-snapshot.py`, from the daemon's analysis NDJSON).
-      Initial offline baseline (via `rayhunter-check` with a **local, uncommitted** patch enabling the
-      default-off detectors -- the committed check runs only default-on analyzers until T-OR-113):
-      0 firings over ~600k messages of real Verizon traffic (5 Attach Rejects seen, all cause #7 --
-      correctly not flagged). Treat as indicative pending T-OR-113 / the live-NDJSON soak. Soak continues.
+      Reproducible offline baseline via `rayhunter-check --config scripts/calib-analyzers.toml`
+      (T-OR-113, patch 0010): 0 firings over ~614k messages of real Verizon traffic, every message
+      re-scored with the detectors enabled (5 Attach Rejects seen, all cause #7 -- correctly not
+      flagged). Soak continues to widen the sample.
 - [ ] T-OR-061: negative baselines (days of normal use on Verizon; AT&T and T-Mobile SIMs if
       available); false-positive rate per analyzer; choose severities; decide default on/off
-- [ ] T-OR-113: `rayhunter-check --config`/`--all-analyzers` so archived QMDL can be re-scored with
-      default-off detectors (the offline calibration path); the live daemon already runs them
+- [x] T-OR-113: `rayhunter-check --config <file>` loads a config's `[analyzers]` so archived QMDL
+      can be re-scored with default-off detectors (patch 0010) -- the reproducible calibration path
 - [ ] T-OR-061: ask EFF whether Devilray profiles can be run against candidates 1-6
 - [ ] T-OR-110: write the `pycrate-rs` EPS mobile-identity parsing against the real DIAG captures
       taken here (ground-truth IMSI/IMEI/GUTI bytes), then build T-OR-054 and the T-OR-108
