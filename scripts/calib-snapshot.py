@@ -76,6 +76,7 @@ def analyze(doc: object) -> dict | None:
     covered = {k: KEY_FROM_NAME[k] in analyzer_names for k in DET_KEYS}
 
     total_messages = 0
+    skipped_messages = 0
     declared_warnings = 0
     counted_warnings = 0
     per = {k: 0 for k in DET_KEYS}
@@ -87,15 +88,19 @@ def analyze(doc: object) -> dict | None:
         if not isinstance(r, dict):
             return None  # fail closed on a malformed report entry
         tm = r.get("total_messages")
+        sk = r.get("skipped")
         wn = r.get("warnings")
         events = r.get("events")
         if (
             not isinstance(tm, int)
+            or not isinstance(sk, int)
             or not isinstance(wn, int)
             or not isinstance(events, list)
+            or not (0 <= sk <= tm)
         ):
             return None
         total_messages += tm
+        skipped_messages += sk
         declared_warnings += wn
         fname = Path(str(r.get("file_path", "?"))).name
         for e in events:
@@ -123,6 +128,8 @@ def analyze(doc: object) -> dict | None:
     return {
         "covered": covered,
         "total_messages": total_messages,
+        "skipped_messages": skipped_messages,
+        "analyzed_messages": total_messages - skipped_messages,
         "declared_warnings": declared_warnings,
         "counted_warnings": counted_warnings,
         "per": per,
@@ -141,7 +148,10 @@ def render(r: dict, out=sys.stdout) -> int:
     p("T-OR-061 CALIBRATION SNAPSHOT (rayhunter-check report)")
     p("=" * 72)
     p(f"recordings     : {r['n_reports']}")
-    p(f"messages       : {r['total_messages']:,} analyzed")
+    p(
+        f"messages       : {r['analyzed_messages']:,} analyzed "
+        f"({r['skipped_messages']:,} skipped of {r['total_messages']:,} total -- excluded)"
+    )
     p(
         f"warnings       : {r['declared_warnings']} declared "
         f"({sum(r['per'].values())} from the 3 detectors, {r['other_warnings']} from upstream analyzers)"
@@ -163,10 +173,10 @@ def render(r: dict, out=sys.stdout) -> int:
         return 2
 
     any_covered = any(r["covered"].values())
-    if not any_covered or r["total_messages"] == 0:
+    if not any_covered or r["analyzed_messages"] == 0:
         p("NO CALIBRATION COVERAGE: the 3 detectors were not enabled for this run")
         p("(pass --config scripts/calib-analyzers.toml to rayhunter-check), or no")
-        p("messages were analyzed. No false-positive evidence to report.")
+        p("messages were actually analyzed (all skipped). No evidence to report.")
         p("=" * 72)
         p("verdict: NO COVERAGE")
         return 2
@@ -177,9 +187,9 @@ def render(r: dict, out=sys.stdout) -> int:
             p(f"  {key:22} :  not enabled for this run")
             continue
         n = r["per"][key]
-        rate = n / r["total_messages"] * 100_000
+        rate = n / r["analyzed_messages"] * 100_000
         p(
-            f"  {key:22} : {n:4d} firings over {r['total_messages']:,} msgs  ({rate:.3f} per 100k)"
+            f"  {key:22} : {n:4d} firings over {r['analyzed_messages']:,} msgs  ({rate:.3f} per 100k)"
         )
     if r["samples"]:
         p("-" * 72)
@@ -202,7 +212,7 @@ def render(r: dict, out=sys.stdout) -> int:
         )
         return 1
     p(
-        f"verdict: CLEAN (0 FP over {covered_n}/3 covered detectors, {r['total_messages']:,} msgs)"
+        f"verdict: CLEAN (0 FP over {covered_n}/3 covered detectors, {r['analyzed_messages']:,} analyzed msgs)"
     )
     return 0
 
@@ -240,9 +250,10 @@ def selftest() -> int:
             "event": {"event_type": sev, "message": msg},
         }
 
-    def rep(total, warnings, events, fp="a.qmdl"):
+    def rep(total, warnings, events, skipped=0, fp="a.qmdl"):
         return {
             "total_messages": total,
+            "skipped": skipped,
             "warnings": warnings,
             "events": events,
             "file_path": fp,
@@ -300,6 +311,37 @@ def selftest() -> int:
     r = valid({"metadata": {"analyzers": names}, "reports": []})
     check("zero messages -> render exits 2", render(r, out=null) == 2)
 
+    # all messages skipped -> analyzed == 0 -> fail closed, not a clean verdict
+    r = valid(
+        {"metadata": {"analyzers": names}, "reports": [rep(1000, 0, [], skipped=1000)]}
+    )
+    check("all skipped -> render exits 2 (NO COVERAGE)", render(r, out=null) == 2)
+
+    # skipped excluded from the denominator (analyzed = total - skipped)
+    r = valid(
+        {"metadata": {"analyzers": names}, "reports": [rep(1000, 0, [], skipped=400)]}
+    )
+    check("analyzed = total - skipped", r["analyzed_messages"] == 600)
+    check(
+        "skipped > total -> None",
+        analyze(
+            {"metadata": {"analyzers": names}, "reports": [rep(10, 0, [], skipped=11)]}
+        )
+        is None,
+    )
+    check(
+        "non-int skipped -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [
+                    {"total_messages": 10, "skipped": None, "warnings": 0, "events": []}
+                ],
+            }
+        )
+        is None,
+    )
+
     # schema violations -> analyze returns None (fail closed)
     check("non-dict doc -> None", analyze([1, 2, 3]) is None)
     check(
@@ -311,7 +353,9 @@ def selftest() -> int:
         analyze(
             {
                 "metadata": {"analyzers": names},
-                "reports": [{"total_messages": 1, "warnings": 0, "events": 7}],
+                "reports": [
+                    {"total_messages": 1, "skipped": 0, "warnings": 0, "events": 7}
+                ],
             }
         )
         is None,
@@ -321,7 +365,9 @@ def selftest() -> int:
         analyze(
             {
                 "metadata": {"analyzers": names},
-                "reports": [{"total_messages": None, "warnings": 0, "events": []}],
+                "reports": [
+                    {"total_messages": None, "skipped": 0, "warnings": 0, "events": []}
+                ],
             }
         )
         is None,
