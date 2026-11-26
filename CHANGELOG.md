@@ -30,7 +30,7 @@
   the retry time; sinks are **delivered concurrently** per tick so a hung sink cannot block the
   others; `POST /api/test-notification` now tests every configured sink and reports per-sink results.
 - Review follow-up refinements: a single `redirect_safe_client()` the worker and `test_notification`
-  both use (so no caller can re-enable redirects); whitespace-only `webhook_url` cleared like the
+  both use (the no-redirect policy lives in one place); whitespace-only `webhook_url` cleared like the
   other secrets; a slash-/query-only `gotify_url` that normalizes to empty is skipped; the
   `gotify_url` normalize-and-resolve logic is one tested `resolve_gotify` helper.
 - **`orx-cli` hardening** (`orx alert set`): `validate_ntfy_url` rejects embedded `user:pass@`
@@ -41,7 +41,7 @@
   name and removes the partial temp on error; `.gitignore` ignores `orx-config-before-*.json`.
 
 These are `patches/0001-0005` on the pinned upstream v0.13.0 daemon, validated on upstream's own gates
-(`cargo fmt`, `clippy -D warnings`, 118 tests from `cargo test -p rayhunter-daemon`, `daemon/web`
+(`cargo fmt`, `clippy -D warnings`, 120 tests from `cargo test -p rayhunter-daemon`, `daemon/web`
 check + tests). MQTT (T-OR-048) and a
 persistent retry queue (T-OR-050) are deferred. On-device validation is batched with the analyzers phase.
 

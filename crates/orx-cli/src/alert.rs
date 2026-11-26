@@ -127,17 +127,21 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
     if url.len() > 2048 {
         return Err("ntfy_url is too long (max 2048 chars)".to_string());
     }
-    if url.chars().any(|c| c.is_control() || c == ' ') {
-        return Err("ntfy_url must not contain spaces or control characters".to_string());
+    if url.chars().any(|c| c.is_control() || c == ' ' || c == '\\') {
+        // Reject '\' outright: WHATWG treats it as a path delimiter but RFC 3986
+        // does not, and non-WHATWG proxies/log consumers may parse it
+        // differently, so any backslash is a parser-differential risk.
+        return Err(
+            "ntfy_url must not contain spaces, control characters or backslashes".to_string(),
+        );
     }
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .ok_or_else(|| "ntfy_url must start with http:// or https://".to_string())?;
-    // The authority is everything before the first '/', '?', '#' or '\' (WHATWG
-    // URL parsers, including reqwest, treat '\' as a path delimiter for http(s),
-    // so it must not be accepted as part of the host).
-    let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or("");
+    // The authority is everything before the first '/', '?' or '#' (any '\' was
+    // already rejected above).
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     // Reject embedded userinfo (user:pass@host): credentials belong in the
     // config, not the URL, and a userinfo URL would be printed verbatim by
     // `orx alert set`, leaking the secret to stdout/logs.
@@ -528,11 +532,10 @@ mod tests {
         assert!(validate_ntfy_url("https://ntfy.sh:+8080/topic").is_err());
         // A bracketed host that is not a valid IPv6 literal.
         assert!(validate_ntfy_url("http://[not-ipv6]/topic").is_err());
-        // We split the authority on '\' too (reqwest/WHATWG treat it as a path
-        // delimiter), so a LEADING '\' leaves an empty host -> rejected. This is
-        // fail-closed: WHATWG itself ignores the leading '\' and would parse the
-        // host as evil.com, which is exactly what we refuse to accept here.
+        // Any backslash is rejected outright (RFC 3986 vs WHATWG differential),
+        // whether before or after the host.
         assert!(validate_ntfy_url("https://\\evil.com/topic").is_err());
+        assert!(validate_ntfy_url("https://ntfy.sh\\topic").is_err());
     }
 
     #[test]
@@ -540,9 +543,6 @@ mod tests {
         assert!(validate_ntfy_url("https://ntfy.sh:8080/topic").is_ok());
         assert!(validate_ntfy_url("http://[::1]:8080/topic").is_ok());
         assert!(validate_ntfy_url("http://[2001:db8::1]/topic").is_ok());
-        // A '\' AFTER the host just starts the path, so the host (ntfy.sh) is
-        // valid and the URL is accepted.
-        assert!(validate_ntfy_url("https://ntfy.sh\\topic").is_ok());
     }
 
     #[test]

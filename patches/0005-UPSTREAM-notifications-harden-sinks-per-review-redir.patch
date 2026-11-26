@@ -1,4 +1,4 @@
-From 09e44ba14b54c7777f663a3fc856561f2c52fd96 Mon Sep 17 00:00:00 2001
+From 3bc544b24fee37ab86e45a89e9215ecde559a05b Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 00:24:06 -0500
 Subject: [PATCH] [UPSTREAM] notifications: harden sinks per review (redirects,
@@ -41,13 +41,13 @@ Hardening of the notification sinks (0001-0004) after the Antigravity review:
 Ref: Orbic-Rayhunter T-OR-045..049 (PR #16/#17 review follow-up).
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- daemon/src/notifications.rs | 417 ++++++++++++++++++++++++++++++++----
- daemon/src/server.rs        | 312 +++++++++++++++++++++++----
+ daemon/src/notifications.rs | 424 ++++++++++++++++++++++++++++++++----
+ daemon/src/server.rs        | 330 ++++++++++++++++++++++++----
  dist/config.toml.in         |   3 +-
- 3 files changed, 648 insertions(+), 84 deletions(-)
+ 3 files changed, 669 insertions(+), 88 deletions(-)
 
 diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
-index 387c47d..f798f67 100644
+index 387c47d..e1858a0 100644
 --- a/daemon/src/notifications.rs
 +++ b/daemon/src/notifications.rs
 @@ -4,6 +4,7 @@ use std::{
@@ -91,7 +91,7 @@ index 387c47d..f798f67 100644
      let type_str = match notification_type {
          NotificationType::Warning => "Warning",
          NotificationType::LowBattery => "LowBattery",
-@@ -114,14 +125,36 @@ fn webhook_body(notification_type: &NotificationType, message: &str) -> String {
+@@ -114,14 +125,38 @@ fn webhook_body(notification_type: &NotificationType, message: &str) -> String {
          "source": "rayhunter",
          "type": type_str,
          "message": message,
@@ -110,8 +110,10 @@ index 387c47d..f798f67 100644
 +    url.split(['?', '#'])
 +        .next()
 +        .unwrap_or(url)
-+        .trim()
-+        .trim_end_matches('/')
++        // Trim trailing slashes AND whitespace together (so "/  /" and
++        // "https://g /" both collapse correctly), then any leading whitespace.
++        .trim_end_matches(|c: char| c == '/' || c.is_whitespace())
++        .trim_start()
 +        .to_string()
 +}
 +
@@ -130,7 +132,7 @@ index 387c47d..f798f67 100644
      let (title, priority) = match notification_type {
          NotificationType::Warning => ("Rayhunter alert", 8),
          NotificationType::LowBattery => ("Rayhunter: low battery", 5),
-@@ -135,7 +168,9 @@ fn gotify_body(notification_type: &NotificationType, message: &str) -> String {
+@@ -135,7 +170,9 @@ fn gotify_body(notification_type: &NotificationType, message: &str) -> String {
  /// tagged notification instead of a bare line. A generic webhook receiver
  /// ignores unknown headers, so this stays harmless off ntfy.
  /// See <https://docs.ntfy.sh/publish/>.
@@ -141,15 +143,16 @@ index 387c47d..f798f67 100644
      let (title, priority, tags) = match notification_type {
          NotificationType::Warning => ("Rayhunter alert", "high", "rotating_light,warning"),
          NotificationType::LowBattery => ("Rayhunter: low battery", "default", "battery,warning"),
-@@ -144,6 +179,17 @@ fn ntfy_headers_for(notification_type: &NotificationType) -> [(&'static str, &'s
+@@ -144,6 +181,18 @@ fn ntfy_headers_for(notification_type: &NotificationType) -> [(&'static str, &'s
      [("Title", title), ("Priority", priority), ("Tags", tags)]
  }
  
 +/// The HTTP client every notification sender must use. It NEVER follows
 +/// redirects: reqwest strips `Authorization` on a cross-origin 30x but not a
 +/// custom credential header like `X-Gotify-Key`, so following a redirect could
-+/// leak the token to a redirect target. Build the client here (not
-+/// [`crate::http_client::client`]) so no caller silently re-enables redirects.
++/// leak the token to a redirect target. Notification callers build the client
++/// here (not [`crate::http_client::client`]) so the no-redirect policy lives in
++/// one place rather than being re-specified (or forgotten) at each call site.
 +pub(crate) fn redirect_safe_client() -> reqwest::Result<reqwest::Client> {
 +    crate::http_client::builder()
 +        .redirect(reqwest::redirect::Policy::none())
@@ -159,7 +162,7 @@ index 387c47d..f798f67 100644
  /// Sends a notification message to the specified URL, applying each of
  /// `headers` as an HTTP header (empty for a plain POST, the historical
  /// behavior).
-@@ -159,7 +205,18 @@ pub async fn send_notification(
+@@ -159,7 +208,18 @@ pub async fn send_notification(
          .body(message)
          .timeout(Duration::from_secs(timeout));
      for (name, value) in headers {
@@ -179,7 +182,7 @@ index 387c47d..f798f67 100644
      }
      // Strip the URL from any transport error: the destination (e.g. a private
      // ntfy topic) is a secret and must not reach the daemon log.
-@@ -184,7 +241,7 @@ pub fn run_notification_worker(
+@@ -184,20 +244,20 @@ pub fn run_notification_worker(
      gotify_token: Option<String>,
  ) {
      task_tracker.spawn(async move {
@@ -187,8 +190,15 @@ index 387c47d..f798f67 100644
 +        // Collect the configured sinks (ntfy, a generic webhook and/or Gotify).
          let mut sink_urls: HashMap<SinkKind, String> = HashMap::new();
          if let Some(url) = notification_service.url.take()
-             && !url.is_empty()
-@@ -197,7 +254,7 @@ pub fn run_notification_worker(
+-            && !url.is_empty()
++            && !url.trim().is_empty()
+         {
+             sink_urls.insert(SinkKind::Ntfy, url);
+         }
+         if let Some(url) = notification_service.webhook_url.take()
+-            && !url.is_empty()
++            && !url.trim().is_empty()
+         {
              sink_urls.insert(SinkKind::Webhook, url);
          }
          if let Some(url) = notification_service.gotify_url.take()
@@ -197,7 +207,7 @@ index 387c47d..f798f67 100644
          {
              sink_urls.insert(SinkKind::Gotify, url);
          }
-@@ -208,7 +265,7 @@ pub fn run_notification_worker(
+@@ -208,7 +268,7 @@ pub fn run_notification_worker(
              return;
          }
  
@@ -206,7 +216,7 @@ index 387c47d..f798f67 100644
              Ok(client) => client,
              Err(err) => {
                  error!("failed to create notification HTTP client: {err}");
-@@ -229,11 +286,13 @@ pub fn run_notification_worker(
+@@ -229,11 +289,13 @@ pub fn run_notification_worker(
                          if !enabled_notifications.contains(&notification.notification_type) {
                              continue;
                          }
@@ -220,7 +230,7 @@ index 387c47d..f798f67 100644
                                      needs_sending: true,
                                      last_sent: None,
                                      last_attempt: None,
-@@ -247,6 +306,7 @@ pub fn run_notification_worker(
+@@ -247,6 +309,7 @@ pub fn run_notification_worker(
                                  continue;
                              }
                              status.message = notification.message.clone();
@@ -228,7 +238,7 @@ index 387c47d..f798f67 100644
                              status.needs_sending = true;
                          }
                      }
-@@ -255,8 +315,16 @@ pub fn run_notification_worker(
+@@ -255,8 +318,16 @@ pub fn run_notification_worker(
                  }
              }
  
@@ -247,7 +257,7 @@ index 387c47d..f798f67 100644
                  if !status.needs_sending {
                      continue;
                  }
-@@ -270,56 +338,95 @@ pub fn run_notification_worker(
+@@ -270,56 +341,95 @@ pub fn run_notification_worker(
                      }
                  }
  
@@ -374,7 +384,7 @@ index 387c47d..f798f67 100644
                          status.failed_since_last_success += 1;
                          status.last_attempt = Some(Instant::now());
                      }
-@@ -568,6 +675,50 @@ mod tests {
+@@ -568,6 +678,50 @@ mod tests {
          cleanup_worker(notification_sender, task_tracker).await;
      }
  
@@ -425,7 +435,7 @@ index 387c47d..f798f67 100644
      #[tokio::test]
      async fn test_notification_worker_sends_webhook_json() {
          let (received_messages, received_headers, url) = setup_test_server().await;
-@@ -820,4 +971,188 @@ mod tests {
+@@ -820,4 +974,188 @@ mod tests {
  
          cleanup_worker(notification_sender, task_tracker).await;
      }
@@ -615,7 +625,7 @@ index 387c47d..f798f67 100644
 +    }
  }
 diff --git a/daemon/src/server.rs b/daemon/src/server.rs
-index a3976d1..4580f41 100644
+index a3976d1..636ae8a 100644
 --- a/daemon/src/server.rs
 +++ b/daemon/src/server.rs
 @@ -155,6 +155,12 @@ pub async fn get_config(
@@ -719,11 +729,11 @@ index a3976d1..4580f41 100644
 +        NotificationType, gotify_base_url, gotify_body, gotify_message_url, ntfy_headers_for,
 +        redirect_safe_client, webhook_body,
 +    };
- 
--    if url.is_empty() {
++
 +    let cfg = &state.config;
 +    let message = "Test notification from Rayhunter".to_string();
-+
+ 
+-    if url.is_empty() {
 +    // One test request per CONFIGURED sink (each with the same headers/body a
 +    // real notification uses), so a webhook-only or Gotify-only setup is tested,
 +    // and a multi-sink setup tests every sink rather than just ntfy.
@@ -734,7 +744,7 @@ index a3976d1..4580f41 100644
 +        headers: Vec<(&'static str, String)>,
 +    }
 +    let mut sinks: Vec<TestSink> = Vec::new();
-+    if let Some(url) = cfg.ntfy_url.as_deref().filter(|u| !u.is_empty()) {
++    if let Some(url) = cfg.ntfy_url.as_deref().filter(|u| !u.trim().is_empty()) {
 +        let mut h: Vec<(&'static str, String)> = Vec::new();
 +        if let Some(auth) = cfg.ntfy_auth.as_deref().filter(|a| !a.trim().is_empty()) {
 +            h.push(("Authorization", auth.to_string()));
@@ -751,7 +761,7 @@ index a3976d1..4580f41 100644
 +            headers: h,
 +        });
 +    }
-+    if let Some(url) = cfg.webhook_url.as_deref().filter(|u| !u.is_empty()) {
++    if let Some(url) = cfg.webhook_url.as_deref().filter(|u| !u.trim().is_empty()) {
 +        sinks.push(TestSink {
 +            name: "webhook",
 +            url: url.to_string(),
@@ -800,6 +810,18 @@ index a3976d1..4580f41 100644
 -    let mut headers: Vec<(&str, &str)> = Vec::new();
 -    if let Some(auth) = &state.config.ntfy_auth {
 -        headers.push(("Authorization", auth.as_str()));
+-    }
+-
+-    crate::notifications::send_notification(
+-        &http_client,
+-        url,
+-        message,
+-        DEFAULT_NOTIFICATION_TIMEOUT,
+-        &headers,
+-    )
+-    .await
+-    .map(|()| {
+-        (
 +    // Send to every configured sink concurrently (matching the worker).
 +    let mut set = tokio::task::JoinSet::new();
 +    for s in sinks {
@@ -824,18 +846,8 @@ index a3976d1..4580f41 100644
 +            .map_err(|e| format!("{e}"));
 +            (name, result)
 +        });
-     }
- 
--    crate::notifications::send_notification(
--        &http_client,
--        url,
--        message,
--        DEFAULT_NOTIFICATION_TIMEOUT,
--        &headers,
--    )
--    .await
--    .map(|()| {
--        (
++    }
++
 +    let mut ok: Vec<&'static str> = Vec::new();
 +    let mut failed: Vec<String> = Vec::new();
 +    while let Some(joined) = set.join_next().await {
@@ -889,7 +901,7 @@ index a3976d1..4580f41 100644
          let (_temp_dir, store_lock) = create_test_qmdl_store().await;
          let config = Config {
              ntfy_auth: Some("Bearer tk_secret".to_string()),
-@@ -737,6 +868,76 @@ mod tests {
+@@ -737,6 +868,90 @@ mod tests {
          );
      }
  
@@ -939,6 +951,20 @@ index a3976d1..4580f41 100644
 +    }
 +
 +    #[test]
++    fn resolve_gotify_empty_overwrite_drops_stored_url_and_token() {
++        // Overwriting a CONFIGURED gotify_url with "/" (normalizes to None) drops
++        // both the URL and the stored token -- there is no endpoint to send to.
++        let (url, token) = resolve_gotify(
++            Some("/".to_string()),              // incoming normalizes to None
++            None,                               // token redacted on the GET
++            Some("https://gotify.example.com"), // previously stored URL
++            Some("A-app-token"),                // previously stored token
++        );
++        assert_eq!(url, None);
++        assert_eq!(token, None, "clearing the URL must drop the stored token");
++    }
++
++    #[test]
 +    fn resolve_gotify_drops_token_on_real_url_change() {
 +        // Repointing the URL to a different host must NOT carry the stored token
 +        // (the config API is unauthenticated).
@@ -966,7 +992,7 @@ index a3976d1..4580f41 100644
      #[test]
      fn resolve_secret_preserves_clears_replaces() {
          // None -> keep the stored value
-@@ -751,7 +952,7 @@ mod tests {
+@@ -751,7 +966,7 @@ mod tests {
      }
  
      #[test]
@@ -975,7 +1001,7 @@ index a3976d1..4580f41 100644
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
              resolve_endpoint_secret(None, url, Some("Bearer x"), url),
-@@ -760,7 +961,7 @@ mod tests {
+@@ -760,7 +975,7 @@ mod tests {
      }
  
      #[test]
@@ -984,7 +1010,7 @@ index a3976d1..4580f41 100644
          // The config API is unauthenticated: a write that repoints ntfy_url must
          // NOT carry the stored credential to the new endpoint.
          assert_eq!(
-@@ -775,16 +976,43 @@ mod tests {
+@@ -775,16 +990,43 @@ mod tests {
      }
  
      #[test]
