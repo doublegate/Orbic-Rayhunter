@@ -1,8 +1,25 @@
 ## [Unreleased]
 
-### Added
+### Added (toward v1.2.0 — daemon notification sinks, `[UPSTREAM]` patches)
 
-- (nothing yet)
+- **ntfy header enrichment** (T-OR-045, patch 0001): opt-in `ntfy_headers` sends ntfy
+  `Title`/`Priority`/`Tags` derived from the notification type; default-off keeps today's plain POST.
+- **ntfy endpoint auth** (T-OR-046, patch 0002): optional `ntfy_auth` Authorization header
+  (Bearer/Basic) for a protected topic. Secret: redacted from `GET /api/config`, preserved across a
+  config round-trip that omits it, and dropped if `ntfy_url` changes (so the unauthenticated config
+  API cannot repoint the URL and harvest the token).
+- **Generic webhook sink** (T-OR-047, patch 0003): optional `webhook_url` receives a JSON body
+  `{source, type, message, timestamp}` with no subscriber identifiers, independently of ntfy. The
+  notification worker now delivers to multiple sinks, each debounced/retried independently.
+  `webhook_url` is treated as a secret (it may embed a token): redacted + preserved. Transport
+  errors are URL-stripped before logging so a private ntfy topic cannot leak into the daemon log.
+- **Gotify sink** (T-OR-049, patch 0004): optional `gotify_url`/`gotify_token` POST Gotify JSON
+  `{title, message, priority}` to `<gotify_url>/message` with an `X-Gotify-Key` header. `gotify_token`
+  redacted + preserved like `ntfy_auth`.
+
+These are `patches/0001-0004` on the pinned upstream v0.13.0 daemon, validated on upstream's own gates
+(`cargo fmt`, `clippy -D warnings`, 88 daemon tests, `daemon/web` check + tests). MQTT (T-OR-048) and a
+persistent retry queue (T-OR-050) are deferred. On-device validation is batched with the analyzers phase.
 
 ## [1.1.1] - 2026-11-25
 
