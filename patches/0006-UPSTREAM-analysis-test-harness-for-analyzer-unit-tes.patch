@@ -1,4 +1,4 @@
-From da29df3a651af0ed2314b65e44fbed14bde60a31 Mon Sep 17 00:00:00 2001
+From 0f9546c4eefbbf55dc9cc3851f8c263c0a804bb9 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 02:06:39 -0500
 Subject: [PATCH] [UPSTREAM] analysis: test harness for analyzer unit tests
@@ -21,9 +21,9 @@ on-device captures exist.
 Ref: Orbic-Rayhunter T-OR-051 (analyzer phase foundation).
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- lib/src/analysis/mod.rs       |  2 +
- lib/src/analysis/test_util.rs | 96 +++++++++++++++++++++++++++++++++++
- 2 files changed, 98 insertions(+)
+ lib/src/analysis/mod.rs       |   2 +
+ lib/src/analysis/test_util.rs | 113 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 115 insertions(+)
  create mode 100644 lib/src/analysis/test_util.rs
 
 diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
@@ -39,15 +39,15 @@ index b520c1f..9a5d10f 100644
  pub mod util;
 diff --git a/lib/src/analysis/test_util.rs b/lib/src/analysis/test_util.rs
 new file mode 100644
-index 0000000..22c132e
+index 0000000..bb4efc2
 --- /dev/null
 +++ b/lib/src/analysis/test_util.rs
-@@ -0,0 +1,96 @@
-+//! Shared test helpers for analyzer unit tests -- the analyzer test harness
-+//! (T-OR-051). Provides synthetic information-element builders and an
-+//! event-collection helper so each analyzer's tests do not re-roll raw GSMTAP
-+//! payloads or re-implement the run-and-collect loop. Compiled only under
-+//! `cfg(test)`; the per-analyzer vector builders grow here as analyzers land.
+@@ -0,0 +1,113 @@
++//! Shared test helpers for analyzer unit tests: synthetic information-element
++//! builders and an event-collection helper so each analyzer's tests do not
++//! re-roll raw GSMTAP payloads or re-implement the run-and-collect loop.
++//! Compiled only under `cfg(test)`; the per-analyzer vector builders grow here
++//! as analyzers land.
 +
 +use chrono::{DateTime, FixedOffset, TimeDelta};
 +
@@ -63,27 +63,35 @@ index 0000000..22c132e
 +
 +/// Build a plain (unciphered) LTE NAS [`InformationElement`] from a raw NAS
 +/// payload. The first octet carries the security-header-type and protocol
-+/// discriminator, the second the message type, then the message body.
-+pub(crate) fn nas_plain(payload: Vec<u8>) -> InformationElement {
++/// discriminator, the second the message type, then the message body. Takes a
++/// borrowed slice so call sites avoid `vec![...]`; uplink/downlink direction and
++/// security-protected NAS variants are added here when a detector first needs
++/// them (the current detectors only need plain downlink NAS).
++pub(crate) fn nas_plain(payload: &[u8]) -> InformationElement {
 +    InformationElement::try_from(&GsmtapMessage {
 +        header: GsmtapHeader::new(GsmtapType::LteNas(LteNasSubtype::Plain)),
-+        payload,
++        payload: payload.to_vec(),
 +    })
 +    .expect("valid synthetic NAS information element")
 +}
 +
-+/// Run `analyzer` over a sequence of `(information element, timestamp)` pairs
-+/// and collect every [`Event`] it emits, so a test can golden-compare the
-+/// result. Each element's index is passed as its `packet_num`.
++/// Run `analyzer` over a sequence of `(information element, timestamp)` pairs and
++/// collect every [`Event`] it emits, each paired with the 0-based index of the
++/// element that produced it. Returning the index (rather than a bare
++/// `Vec<Event>`) lets a test assert WHICH packet fired, which matters for a
++/// stateful multi-packet analyzer that must only fire on a specific element in a
++/// sequence. The index is also passed to the analyzer as its `packet_num`.
 +pub(crate) fn collect_events(
 +    analyzer: &mut dyn Analyzer,
 +    elements: &[(InformationElement, DateTime<FixedOffset>)],
-+) -> Vec<Event> {
++) -> Vec<(usize, Event)> {
 +    elements
 +        .iter()
 +        .enumerate()
 +        .filter_map(|(packet_num, (ie, ts))| {
-+            analyzer.analyze_information_element(ie, packet_num, *ts)
++            analyzer
++                .analyze_information_element(ie, packet_num, *ts)
++                .map(|event| (packet_num, event))
 +        })
 +        .collect()
 +}
@@ -92,6 +100,7 @@ index 0000000..22c132e
 +mod tests {
 +    use super::*;
 +    use crate::analysis::analyzer::EventType;
++    use crate::analysis::information_element::LteInformationElement;
 +    use std::borrow::Cow;
 +
 +    /// A trivial analyzer that emits one `Low` event per information element,
@@ -122,21 +131,29 @@ index 0000000..22c132e
 +    }
 +
 +    #[test]
-+    fn nas_plain_parses_as_an_information_element() {
-+        // A minimal NAS payload must parse into an information element.
-+        let _ie = nas_plain(vec![0x07, 0x55, 0x01]);
++    fn nas_plain_builds_an_lte_nas_information_element() {
++        // A minimal NAS payload parses specifically into an LTE NAS element
++        // (not just "some information element").
++        let ie = nas_plain(&[0x07, 0x55, 0x01]);
++        assert!(
++            matches!(&ie, InformationElement::LTE(lte) if matches!(lte.as_ref(), LteInformationElement::NAS(_))),
++            "nas_plain must produce an LTE NAS information element"
++        );
 +    }
 +
 +    #[test]
-+    fn collect_events_gathers_one_event_per_element() {
++    fn collect_events_pairs_each_event_with_its_packet_index() {
 +        let mut analyzer = EveryElementAnalyzer;
 +        let elements = vec![
-+            (nas_plain(vec![0x07, 0x55, 0x01]), packet_time(0)),
-+            (nas_plain(vec![0x07, 0x55, 0x01]), packet_time(1)),
++            (nas_plain(&[0x07, 0x55, 0x01]), packet_time(0)),
++            (nas_plain(&[0x07, 0x55, 0x01]), packet_time(1)),
 +        ];
 +        let events = collect_events(&mut analyzer, &elements);
++        // One event per element, each tagged with the index that produced it.
 +        assert_eq!(events.len(), 2);
-+        assert!(events.iter().all(|e| e.event_type == EventType::Low));
++        assert_eq!(events[0].0, 0);
++        assert_eq!(events[1].0, 1);
++        assert!(events.iter().all(|(_, e)| e.event_type == EventType::Low));
 +    }
 +}
 -- 

@@ -50,7 +50,8 @@ A golden vector is a DIAG input plus the expected analyzer output. Policy:
    The harness is T-OR-051 (`[UPSTREAM]` patch 0006, the `#[cfg(test)] analysis::test_util` module):
    `nas_plain(payload)` builds a plain LTE NAS `InformationElement`, `packet_time(secs)` gives
    deterministic timestamps, and `collect_events(analyzer, &[(ie, ts)])` runs an analyzer over a
-   sequence and returns its `Event`s for an inline golden comparison. Per-detector named vector
+   sequence and returns `(packet_index, Event)` pairs for an inline golden comparison (the index lets
+   a test assert which packet fired, for stateful multi-packet detectors). Per-detector named vector
    builders are added to `test_util` as each analyzer lands; the capture scrubber (step 3) is
    deferred until on-device captures exist (T-OR-061).
 2. **Location.** Vectors that test upstream analyzers live inside the `[UPSTREAM]` patch, following
