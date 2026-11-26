@@ -1,6 +1,6 @@
-From 121ac4c8889c4b116fcea44d5741c2801adc54e6 Mon Sep 17 00:00:00 2001
+From 39ca9d01b2eea7be7efb214833269b2c42756c43 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
-Date: Thu, 26 Nov 2026 13:16:45 -0500
+Date: Thu, 26 Nov 2026 13:28:39 -0500
 Subject: [PATCH] [UPSTREAM] check: --config to select analyzers; attribute
  each event to its analyzer
 
@@ -8,14 +8,16 @@ rayhunter-check hardcoded AnalyzerConfig::default(), so offline re-analysis of a
 capture ran only the default-on analyzers and could not exercise any detector
 that is off by default (the v1.2.0 NAS detectors, or a future one). Add a
 --config <file> flag that loads the [analyzers] table from a rayhunter config
-(unknown keys ignored, so a full device config.toml works), threaded into the
-pcap and qmdl analysis paths and the report metadata; without it the defaults
-are unchanged.
+(unknown top-level keys ignored, so a full device config.toml works), threaded
+into the pcap and qmdl analysis paths and the report metadata; without it the
+defaults are unchanged. Loading returns a Result -- a missing/unreadable file or
+a file without an [analyzers] table fails closed with a clean error and exit 2,
+never a panic and never a silent fall back to the defaults.
 
 Also record the producing analyzer's name on each event in the JSON report
 (AnalysisRow::events is indexed by analyzer, so process_row labels each event by
 position). This lets a consumer attribute a firing exactly, without matching on
-message text, which the calibration snapshot relies on.
+message text.
 
 This makes false-positive calibration reproducible from committed code: a
 capture can be re-scored with the detectors enabled (T-OR-113). Adds a toml
@@ -24,8 +26,8 @@ dependency to the check crate (already in the workspace lockfile via the daemon)
  Cargo.lock        |   1 +
  check/Cargo.toml  |   1 +
  check/src/json.rs |   1 +
- check/src/main.rs | 116 +++++++++++++++++++++++++++++++++++++---------
- 4 files changed, 97 insertions(+), 22 deletions(-)
+ check/src/main.rs | 130 ++++++++++++++++++++++++++++++++++++++--------
+ 4 files changed, 111 insertions(+), 22 deletions(-)
 
 diff --git a/Cargo.lock b/Cargo.lock
 index 627b379..c20d9bb 100644
@@ -61,7 +63,7 @@ index 5ad0cd9..847d2c9 100644
          });
          report
 diff --git a/check/src/main.rs b/check/src/main.rs
-index cee1933..405ffff 100644
+index cee1933..94c3429 100644
 --- a/check/src/main.rs
 +++ b/check/src/main.rs
 @@ -33,6 +33,14 @@ struct Args {
@@ -127,7 +129,7 @@ index cee1933..405ffff 100644
          }
      }
  
-@@ -113,31 +133,69 @@ mod tests {
+@@ -113,31 +133,77 @@ mod tests {
      #[test]
      fn process_row_records_skip_reason_and_event() {
          let mut report = Report::new("test");
@@ -169,20 +171,28 @@ index cee1933..405ffff 100644
 +/// analyzer that is off by default, so offline re-analysis cannot exercise them
 +/// (T-OR-113). Unknown keys in the file are ignored, so a full device
 +/// `config.toml` works as-is.
-+fn load_analyzer_config(path: Option<&std::path::Path>) -> AnalyzerConfig {
++fn load_analyzer_config(path: Option<&std::path::Path>) -> Result<AnalyzerConfig, String> {
 +    let Some(path) = path else {
-+        return AnalyzerConfig::default();
++        return Ok(AnalyzerConfig::default());
 +    };
++    // No #[serde(default)] on `analyzers`: a --config that lacks an [analyzers]
++    // table must fail closed, not silently fall back to the defaults (the very
++    // default-only behavior this flag exists to avoid). Individual analyzer keys
++    // still default via AnalyzerConfig's own #[serde(default)]. Unknown top-level
++    // keys are ignored, so a full device config.toml works as --config.
 +    #[derive(Deserialize)]
 +    struct ConfigFile {
-+        #[serde(default)]
 +        analyzers: AnalyzerConfig,
      }
 +    let text = std::fs::read_to_string(path)
-+        .unwrap_or_else(|e| panic!("failed to read --config {}: {e}", path.display()));
-+    let parsed: ConfigFile = toml::from_str(&text)
-+        .unwrap_or_else(|e| panic!("failed to parse --config {}: {e}", path.display()));
-+    parsed.analyzers
++        .map_err(|e| format!("cannot read --config {}: {e}", path.display()))?;
++    let parsed: ConfigFile = toml::from_str(&text).map_err(|e| {
++        format!(
++            "cannot parse --config {} (it must contain an [analyzers] table): {e}",
++            path.display()
++        )
++    })?;
++    Ok(parsed.analyzers)
 +}
 +
 +/// The ordered analyzer names for a harness. `AnalysisRow::events` is indexed by
@@ -209,7 +219,7 @@ index cee1933..405ffff 100644
      let pcap_file = &mut File::open(&pcap_path).await.expect("failed to open file");
      let mut pcap_reader = PcapNgReader::new(pcap_file)
          .await
-@@ -151,7 +209,7 @@ async fn analyze_pcap(
+@@ -151,7 +217,7 @@ async fn analyze_pcap(
                  continue;
              }
          };
@@ -218,7 +228,7 @@ index cee1933..405ffff 100644
      }
      report.print_summary(show_skipped);
      if let Some(writer) = json_writer {
-@@ -165,10 +223,11 @@ async fn analyze_pcap(
+@@ -165,10 +231,11 @@ async fn analyze_pcap(
  async fn analyze_qmdl(
      qmdl_path: &str,
      show_skipped: bool,
@@ -232,7 +242,7 @@ index cee1933..405ffff 100644
      let qmdl_file = &mut File::open(&qmdl_path).await.expect("failed to open file");
      let mut qmdl_reader = QmdlMessageReader::new(qmdl_file)
          .await
-@@ -179,7 +238,7 @@ async fn analyze_qmdl(
+@@ -179,7 +246,7 @@ async fn analyze_qmdl(
          .await
          .expect("failed to get message")
      {
@@ -241,17 +251,23 @@ index cee1933..405ffff 100644
      }
      report.print_summary(show_skipped);
      if let Some(writer) = json_writer {
-@@ -233,7 +292,8 @@ async fn main() {
+@@ -233,7 +300,14 @@ async fn main() {
      };
      rayhunter::init_logging(level);
  
 -    let harness = Harness::new_with_config(&AnalyzerConfig::default(), &DeviceMetadata::default());
-+    let analyzer_config = load_analyzer_config(args.config.as_deref());
++    let analyzer_config = match load_analyzer_config(args.config.as_deref()) {
++        Ok(config) => config,
++        Err(e) => {
++            error!("{e}");
++            std::process::exit(2);
++        }
++    };
 +    let harness = Harness::new_with_config(&analyzer_config, &DeviceMetadata::default());
      let metadata = harness.get_metadata();
      info!("Analyzers:");
      for analyzer in &metadata.analyzers {
-@@ -271,14 +331,26 @@ async fn main() {
+@@ -271,14 +345,26 @@ async fn main() {
          let path_str = path.to_str().unwrap();
          if name_str.ends_with(".qmdl") || name_str.ends_with(".qmdl.gz") {
              info!("**** Beginning analysis of {name_str}");
