@@ -46,6 +46,7 @@ KEY_FROM_NAME = {v: k for k, v in DETECTOR_NAMES.items()}
 DET_KEYS = ("nas_reject_identity", "auth_failure", "null_integrity")
 
 WARN_SEVERITIES = {"Low", "Medium", "High"}
+VALID_SEVERITIES = WARN_SEVERITIES | {"Informational"}
 
 
 def _fail(msg: str) -> int:
@@ -68,17 +69,19 @@ def analyze(doc: object) -> dict | None:
     analyzers = md.get("analyzers")
     if not isinstance(analyzers, list):
         return None
-    analyzer_names = {
-        a["name"]
-        for a in analyzers
-        if isinstance(a, dict) and isinstance(a.get("name"), str)
-    }
+    # Fail closed on any malformed analyzer entry rather than filtering it out
+    # (a filtered entry would shift nothing here, but a missing name is a sign of
+    # a report we do not understand).
+    analyzer_names: set[str] = set()
+    for a in analyzers:
+        if not isinstance(a, dict) or not isinstance(a.get("name"), str):
+            return None
+        analyzer_names.add(a["name"])
     covered = {k: KEY_FROM_NAME[k] in analyzer_names for k in DET_KEYS}
 
     total_messages = 0
     skipped_messages = 0
     declared_warnings = 0
-    counted_warnings = 0
     per = {k: 0 for k in DET_KEYS}
     other_warnings = 0
     samples: list[str] = []
@@ -103,27 +106,36 @@ def analyze(doc: object) -> dict | None:
         skipped_messages += sk
         declared_warnings += wn
         fname = Path(str(r.get("file_path", "?"))).name
+        rec_warnings = 0
         for e in events:
             if not isinstance(e, dict):
                 return None
             ev = e.get("event")
             if not isinstance(ev, dict):
                 return None
-            if ev.get("event_type") not in WARN_SEVERITIES:
+            sev = ev.get("event_type")
+            if sev not in VALID_SEVERITIES:
+                return None  # unknown severity -> do not assume Informational
+            if sev not in WARN_SEVERITIES:
                 continue  # Informational events are not firings
-            counted_warnings += 1
+            rec_warnings += 1
             name = e.get("analyzer")
+            if not isinstance(name, str) or name not in analyzer_names:
+                return None  # a warning we cannot attribute -> fail closed
             msg = str(ev.get("message", ""))
-            key = DETECTOR_NAMES.get(name) if isinstance(name, str) else None
+            key = DETECTOR_NAMES.get(name)
             if key is not None:
                 per[key] += 1
                 ts = e.get("timestamp", "?")
-                samples.append(
-                    f"{fname} @ {ts}  {key} [{ev.get('event_type')}]: {msg[:80]}"
-                )
+                samples.append(f"{fname} @ {ts}  {key} [{sev}]: {msg[:80]}")
             else:
                 other_warnings += 1
                 unmatched.append(f"{fname}  [{name}] {msg[:80]}")
+        # Per-recording cross-check: the warning events must account for exactly
+        # this recording's declared warnings (a global total could net out a
+        # surplus in one recording against a deficit in another).
+        if rec_warnings != wn:
+            return None
 
     return {
         "covered": covered,
@@ -131,7 +143,6 @@ def analyze(doc: object) -> dict | None:
         "skipped_messages": skipped_messages,
         "analyzed_messages": total_messages - skipped_messages,
         "declared_warnings": declared_warnings,
-        "counted_warnings": counted_warnings,
         "per": per,
         "other_warnings": other_warnings,
         "samples": samples,
@@ -158,20 +169,9 @@ def render(r: dict, out=sys.stdout) -> int:
     )
     p("-" * 72)
 
-    # Fail closed: the events we counted must account for every declared warning,
-    # otherwise the report is incomplete and a CLEAN verdict cannot be trusted.
-    if r["counted_warnings"] != r["declared_warnings"]:
-        p(
-            f"WARNING-COUNT MISMATCH: recordings declare {r['declared_warnings']} warnings but the"
-        )
-        p(
-            f"event list contains {r['counted_warnings']}. The report is incomplete; refusing to"
-        )
-        p("report a calibration result.")
-        p("=" * 72)
-        p("verdict: INCOMPLETE REPORT")
-        return 2
-
+    # analyze() has already failed closed (returned None -> exit 2) on any
+    # per-recording warning-count mismatch or schema violation, so a result here
+    # is internally consistent: declared warnings == detector firings + other.
     any_covered = any(r["covered"].values())
     if not any_covered or r["analyzed_messages"] == 0:
         p("NO CALIBRATION COVERAGE: the 3 detectors were not enabled for this run")
@@ -241,6 +241,7 @@ def selftest() -> int:
         {"name": "NAS Reject with identity-forcing cause", "version": 0},
         {"name": "Authentication failure or reject", "version": 0},
         {"name": "Null integrity (EIA0) requested", "version": 0},
+        {"name": "Null Cipher", "version": 1},
     ]
 
     def ev(analyzer, sev, msg):
@@ -297,10 +298,77 @@ def selftest() -> int:
     )
     check("firing render exits 1", render(r, out=null) == 1)
 
-    # WARNING-COUNT MISMATCH: declares a warning with no event -> fail closed
-    doc = {"metadata": {"analyzers": names}, "reports": [rep(1000, 1, [])]}
-    r = valid(doc)
-    check("warning declared but no event -> exits 2", render(r, out=null) == 2)
+    # per-recording warning-count mismatch (declares a warning with no event) -> None
+    check(
+        "warning declared but no event -> None",
+        analyze({"metadata": {"analyzers": names}, "reports": [rep(1000, 1, [])]})
+        is None,
+    )
+    # a warning event whose analyzer is unknown / missing -> fail closed
+    check(
+        "warning with unknown analyzer -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [rep(10, 1, [ev("Some Renamed Analyzer", "High", "x")])],
+            }
+        )
+        is None,
+    )
+    check(
+        "warning with missing analyzer field -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [
+                    rep(
+                        10,
+                        1,
+                        [
+                            {
+                                "timestamp": "t",
+                                "event": {"event_type": "High", "message": "x"},
+                            }
+                        ],
+                    )
+                ],
+            }
+        )
+        is None,
+    )
+    # unknown severity string -> fail closed (not silently treated as informational)
+    check(
+        "unknown event_type -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [rep(10, 0, [ev("Null Cipher", "Critical", "x")])],
+            }
+        )
+        is None,
+    )
+    # malformed analyzer entry in metadata -> fail closed
+    check(
+        "malformed analyzer entry -> None",
+        analyze(
+            {"metadata": {"analyzers": [{"version": 1}]}, "reports": [rep(10, 0, [])]}
+        )
+        is None,
+    )
+    # per-recording check is not netted across recordings
+    check(
+        "cross-recording net-out -> None",
+        analyze(
+            {
+                "metadata": {"analyzers": names},
+                "reports": [
+                    rep(10, 1, [], fp="a"),
+                    rep(10, 0, [ev("Null Cipher", "High", "x")], fp="b"),
+                ],
+            }
+        )
+        is None,
+    )
 
     # detectors not enabled -> no coverage
     doc = {"metadata": {"analyzers": [names[0]]}, "reports": [rep(1000, 0, [])]}
