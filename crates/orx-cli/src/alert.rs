@@ -151,6 +151,10 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
             .find(']')
             .ok_or_else(|| "ntfy_url has an unterminated IPv6 host".to_string())?;
         let host = &after_open[..close];
+        // A bracketed host must be a real IPv6 literal (rejects "[not-ipv6]").
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err("ntfy_url has an invalid IPv6 host".to_string());
+        }
         let tail = &after_open[close + 1..];
         let port = match tail {
             "" => None,
@@ -171,10 +175,12 @@ pub fn validate_ntfy_url(url: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("ntfy_url has no host".to_string());
     }
-    // A port, if present, must parse as a non-zero u16 (rejects empty, non-digit,
-    // out-of-range, a stray second ':', and port 0).
+    // A port, if present, must be all ASCII digits (rejects a leading '+'/'-'
+    // that u16::parse would otherwise accept) and parse as a non-zero u16
+    // (rejects empty, non-digit, out-of-range, a stray second ':', and port 0).
     if let Some(port) = port
-        && !matches!(port.parse::<u16>(), Ok(p) if p > 0)
+        && (!port.bytes().all(|b| b.is_ascii_digit())
+            || !matches!(port.parse::<u16>(), Ok(p) if p > 0))
     {
         return Err("ntfy_url has an invalid port".to_string());
     }
@@ -516,6 +522,10 @@ mod tests {
         // A second ':' in a non-bracketed authority (and unbracketed IPv6).
         assert!(validate_ntfy_url("https://a:b:8080/topic").is_err());
         assert!(validate_ntfy_url("http://::1/topic").is_err());
+        // A leading sign in the port (u16::parse would accept "+8080").
+        assert!(validate_ntfy_url("https://ntfy.sh:+8080/topic").is_err());
+        // A bracketed host that is not a valid IPv6 literal.
+        assert!(validate_ntfy_url("http://[not-ipv6]/topic").is_err());
     }
 
     #[test]

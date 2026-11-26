@@ -156,6 +156,9 @@ Hardening (patch 0005) changes delivery behavior, so note:
   `GET /api/config` returns it without a query, so a token must go in `gotify_token` (redacted), not
   the URL.
 - **`POST /api/test-notification`** sends a test to every configured sink and reports per-sink
-  results (it no longer tests only ntfy).
+  results (it no longer tests only ntfy). The test uses the `Warning` notification type (webhook
+  `type: "Warning"`, Gotify priority 8, ntfy high priority), so a receiver whose rules key on the
+  `Warning` type/priority will treat a connectivity test like a live alert -- distinguish it by the
+  message body (`"Test notification from Rayhunter"`).
 
 MQTT (T-OR-048) and a persistent retry queue (T-OR-050) are deferred past v1.2.0.

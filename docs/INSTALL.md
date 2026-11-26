@@ -396,7 +396,7 @@ Finally **close the `:24` shell** to restore the hardened posture, and VERIFY it
 # lack pkill or match its own command line, and its xargs may lack -r, so
 # collect the matching PIDs (unquoted, so each is a separate kill argument) and
 # kill them only when the list is non-empty:
-pids=$(ps | awk '/[n]c -ll -p 24/ {print $1}'); [ -n "$pids" ] && kill $pids
+pids=$(ps | awk '/[n]c -ll -p 24/ {print $1}'); if [ -n "$pids" ]; then kill $pids; fi
 ```
 
 Then confirm from the host that it is gone — `orx check` must report `root shell port 24 closed`

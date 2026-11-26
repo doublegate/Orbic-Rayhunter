@@ -1,4 +1,4 @@
-From a02ac394076085939ec3f2aacafa6ae7d0576262 Mon Sep 17 00:00:00 2001
+From 26abac90f489dbfbcd647b1d30d79fb4cf233703 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 00:24:06 -0500
 Subject: [PATCH] [UPSTREAM] notifications: harden sinks per review (redirects,
@@ -10,44 +10,44 @@ Hardening of the notification sinks (0001-0004) after the Antigravity review:
   (reqwest::redirect::Policy::none()). reqwest strips Authorization on a
   cross-origin 30x but NOT a custom credential header like X-Gotify-Key, so a
   redirecting proxy / captive portal could otherwise harvest the Gotify token.
-  Credential header values are also marked sensitive. send_notification still
-  treats a 3xx as a delivery failure (regression test added).
+  Credential header values are also marked sensitive. send_notification treats a
+  3xx as a delivery failure (regression test).
 - BLOCKING: an invalid header value (e.g. a stray newline in a credential) now
   FAILS CLOSED with NotificationError::InvalidHeader (naming the header, not the
-  value) rather than being silently dropped and the request sent unauthenticated.
+  value) rather than being dropped and the request sent unauthenticated. A
+  whitespace-only secret (trim().is_empty()) is treated as unset.
 - Gotify token must go in gotify_token (X-Gotify-Key, redacted). gotify_base_url
-  strips any query/fragment from gotify_url, and get_config applies the same
-  stripping to the gotify_url it returns, so a ?token= wrongly placed in the URL
-  is neither sent to a redirect target nor echoed by the unauthenticated config
-  API.
-- Empty-string secrets (ntfy_auth="" / gotify_token="") no longer send a blank
-  header.
+  strips any query/fragment (and trailing slash) from gotify_url; get_config
+  returns the normalized form, and set_config normalizes BOTH the incoming and
+  stored gotify_url before resolving the token, so a ?token= cannot leak via the
+  config API and a benign GET->POST round-trip does not drop gotify_token.
 - Webhook payload timestamp is the notification's receipt time, not the retry
-  time after a backhaul outage (NotificationStatus.event_time).
-- Sinks are delivered concurrently per tick (JoinSet), so a slow/hung sink no
-  longer blocks delivery to the healthy ones (head-of-line blocking). A join
-  error is logged rather than silently swallowed.
-- POST /api/test-notification sends a test to EVERY configured sink
-  concurrently and reports per-sink results (was: ntfy only), applying
-  ntfy_headers, using the same redirect-disabled client.
-- Tests: send_notification strips the URL from a transport error and fails
-  closed on an invalid header; a 3xx is rejected without following; webhook
-  payload has no subscriber-identifier fields; LowBattery/Update header and
-  priority mappings; gotify_base_url / gotify_message_url.
-- Nitpicks: sink_urls.get() (no panicking index); sink-collect comment includes
-  Gotify; stale enabled_notifications config comment; resolve_endpoint_secret_*
-  / redacts_secrets test names.
+  time (NotificationStatus.event_time).
+- Sinks are delivered concurrently per tick (JoinSet): a slow/hung sink no
+  longer blocks delivery to healthy ones within a tick (cross-tick decoupling is
+  a documented follow-up). A join error is logged, not swallowed.
+- POST /api/test-notification sends to EVERY configured sink concurrently and
+  reports per-sink results (succeeded and failed), applying ntfy_headers, using
+  the redirect-disabled client.
+- Tests: URL stripped from a transport error; fail-closed on an invalid header;
+  3xx rejected without following; no subscriber-identifier fields in the webhook
+  payload; LowBattery/Update header+priority maps; gotify_base_url; get_config
+  gotify_url normalization; trailing-slash round-trip keeps gotify_token;
+  test-notification requires a sink.
+- Nitpicks: sink_urls.get(); Gotify in the sink comment; stale config comment;
+  resolve_endpoint_secret_* / redacts_secrets test names; no p.body clone; log
+  join errors.
 
 Ref: Orbic-Rayhunter T-OR-045..049 (PR #16/#17 review follow-up).
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- daemon/src/notifications.rs | 354 ++++++++++++++++++++++++++++++++----
- daemon/src/server.rs        | 164 ++++++++++++-----
+ daemon/src/notifications.rs | 358 ++++++++++++++++++++++++++++++++----
+ daemon/src/server.rs        | 240 +++++++++++++++++++-----
  dist/config.toml.in         |   3 +-
- 3 files changed, 439 insertions(+), 82 deletions(-)
+ 3 files changed, 518 insertions(+), 83 deletions(-)
 
 diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
-index 387c47d..f679fab 100644
+index 387c47d..ac255b9 100644
 --- a/daemon/src/notifications.rs
 +++ b/daemon/src/notifications.rs
 @@ -4,6 +4,7 @@ use std::{
@@ -224,7 +224,7 @@ index 387c47d..f679fab 100644
                  if !status.needs_sending {
                      continue;
                  }
-@@ -270,56 +331,91 @@ pub fn run_notification_worker(
+@@ -270,56 +331,95 @@ pub fn run_notification_worker(
                      }
                  }
  
@@ -244,7 +244,7 @@ index 387c47d..f679fab 100644
 -                        if let Some(auth) = &ntfy_auth {
 -                            headers.push(("Authorization", auth.as_str()));
 +                        if let Some(auth) = &ntfy_auth
-+                            && !auth.is_empty()
++                            && !auth.trim().is_empty()
 +                        {
 +                            headers.push(("Authorization", auth.clone()));
                          }
@@ -275,7 +275,7 @@ index 387c47d..f679fab 100644
 -                            headers.push(("X-Gotify-Key", token.as_str()));
 +                        headers.push(("Content-Type", "application/json".to_string()));
 +                        if let Some(token) = &gotify_token
-+                            && !token.is_empty()
++                            && !token.trim().is_empty()
 +                        {
 +                            headers.push(("X-Gotify-Key", token.clone()));
                          }
@@ -305,7 +305,11 @@ index 387c47d..f679fab 100644
 +            }
 +
 +            // Send all due notifications concurrently, so a slow or hung sink
-+            // cannot delay delivery to the healthy ones (head-of-line blocking).
++            // cannot delay delivery to the healthy ones WITHIN a tick (head-of-
++            // line blocking). A cross-tick delay remains: the loop waits here for
++            // the slowest send (bounded by `timeout`) before reading new
++            // notifications. Fully decoupling send from receive needs detached
++            // tasks with a shared status map -- deferred (the timeout bounds it).
 +            let timeout = notification_service.timeout;
 +            let mut set = tokio::task::JoinSet::new();
 +            for p in pending {
@@ -347,7 +351,7 @@ index 387c47d..f679fab 100644
                          status.failed_since_last_success += 1;
                          status.last_attempt = Some(Instant::now());
                      }
-@@ -820,4 +916,182 @@ mod tests {
+@@ -820,4 +920,182 @@ mod tests {
  
          cleanup_worker(notification_sender, task_tracker).await;
      }
@@ -531,7 +535,7 @@ index 387c47d..f679fab 100644
 +    }
  }
 diff --git a/daemon/src/server.rs b/daemon/src/server.rs
-index a3976d1..faf79ba 100644
+index a3976d1..2d2f2ae 100644
 --- a/daemon/src/server.rs
 +++ b/daemon/src/server.rs
 @@ -155,6 +155,12 @@ pub async fn get_config(
@@ -547,7 +551,36 @@ index a3976d1..faf79ba 100644
      Ok(Json(config))
  }
  
-@@ -278,53 +284,129 @@ pub async fn set_config(
+@@ -216,6 +222,19 @@ pub async fn set_config(
+         config.gps_fixed_latitude = None;
+         config.gps_fixed_longitude = None;
+     }
++    // Normalize gotify_url to its base (strip query/fragment + trailing slash),
++    // the same form get_config returns, on BOTH the incoming and stored side.
++    // Otherwise a benign GET -> POST round-trip -- where GET already returned the
++    // normalized URL -- would look like a URL change to resolve_endpoint_secret
++    // and silently drop the stored gotify_token.
++    if let Some(url) = config.gotify_url.as_deref() {
++        config.gotify_url = Some(crate::notifications::gotify_base_url(url));
++    }
++    let stored_gotify_base = state
++        .config
++        .gotify_url
++        .as_deref()
++        .map(crate::notifications::gotify_base_url);
+     config.ntfy_auth = resolve_endpoint_secret(
+         config.ntfy_auth.clone(),
+         config.ntfy_url.as_deref(),
+@@ -226,7 +245,7 @@ pub async fn set_config(
+         config.gotify_token.clone(),
+         config.gotify_url.as_deref(),
+         state.config.gotify_token.as_deref(),
+-        state.config.gotify_url.as_deref(),
++        stored_gotify_base.as_deref(),
+     );
+     // webhook_url is redacted from GET (it may embed a credential), so a
+     // round-trip that omits it must keep the stored value.
+@@ -278,53 +297,139 @@ pub async fn set_config(
  pub async fn test_notification(
      State(state): State<Arc<ServerState>>,
  ) -> Result<(StatusCode, String), (StatusCode, String)> {
@@ -558,11 +591,11 @@ index a3976d1..faf79ba 100644
 +    use crate::notifications::{
 +        NotificationType, gotify_body, gotify_message_url, ntfy_headers_for, webhook_body,
 +    };
- 
--    if url.is_empty() {
++
 +    let cfg = &state.config;
 +    let message = "Test notification from Rayhunter".to_string();
-+
+ 
+-    if url.is_empty() {
 +    // One test request per CONFIGURED sink (each with the same headers/body a
 +    // real notification uses), so a webhook-only or Gotify-only setup is tested,
 +    // and a multi-sink setup tests every sink rather than just ntfy.
@@ -575,7 +608,7 @@ index a3976d1..faf79ba 100644
 +    let mut sinks: Vec<TestSink> = Vec::new();
 +    if let Some(url) = cfg.ntfy_url.as_deref().filter(|u| !u.is_empty()) {
 +        let mut h: Vec<(&'static str, String)> = Vec::new();
-+        if let Some(auth) = cfg.ntfy_auth.as_deref().filter(|a| !a.is_empty()) {
++        if let Some(auth) = cfg.ntfy_auth.as_deref().filter(|a| !a.trim().is_empty()) {
 +            h.push(("Authorization", auth.to_string()));
 +        }
 +        if cfg.ntfy_headers {
@@ -601,7 +634,7 @@ index a3976d1..faf79ba 100644
 +    if let Some(url) = cfg.gotify_url.as_deref().filter(|u| !u.is_empty()) {
 +        let mut h: Vec<(&'static str, String)> =
 +            vec![("Content-Type", "application/json".to_string())];
-+        if let Some(token) = cfg.gotify_token.as_deref().filter(|t| !t.is_empty()) {
++        if let Some(token) = cfg.gotify_token.as_deref().filter(|t| !t.trim().is_empty()) {
 +            h.push(("X-Gotify-Key", token.to_string()));
 +        }
 +        sinks.push(TestSink {
@@ -637,12 +670,7 @@ index a3976d1..faf79ba 100644
 +                format!("failed to create HTTP client: {err}"),
 +            )
 +        })?;
- 
--    // Include the configured Authorization header so the test reaches a
--    // protected ntfy endpoint, just like a real notification does.
--    let mut headers: Vec<(&str, &str)> = Vec::new();
--    if let Some(auth) = &state.config.ntfy_auth {
--        headers.push(("Authorization", auth.as_str()));
++
 +    // Send to every configured sink concurrently (matching the worker).
 +    let mut set = tokio::task::JoinSet::new();
 +    for s in sinks {
@@ -667,6 +695,21 @@ index a3976d1..faf79ba 100644
 +            .map_err(|e| format!("{e}"));
 +            (name, result)
 +        });
++    }
+ 
+-    // Include the configured Authorization header so the test reaches a
+-    // protected ntfy endpoint, just like a real notification does.
+-    let mut headers: Vec<(&str, &str)> = Vec::new();
+-    if let Some(auth) = &state.config.ntfy_auth {
+-        headers.push(("Authorization", auth.as_str()));
++    let mut ok: Vec<&'static str> = Vec::new();
++    let mut failed: Vec<String> = Vec::new();
++    while let Some(joined) = set.join_next().await {
++        match joined {
++            Ok((name, Ok(()))) => ok.push(name),
++            Ok((name, Err(e))) => failed.push(format!("{name}: {e}")),
++            Err(e) => failed.push(format!("task: {e}")),
++        }
      }
  
 -    crate::notifications::send_notification(
@@ -679,18 +722,9 @@ index a3976d1..faf79ba 100644
 -    .await
 -    .map(|()| {
 -        (
-+    let mut ok: Vec<&'static str> = Vec::new();
-+    let mut failed: Vec<String> = Vec::new();
-+    while let Some(joined) = set.join_next().await {
-+        match joined {
-+            Ok((name, Ok(()))) => ok.push(name),
-+            Ok((name, Err(e))) => failed.push(format!("{name}: {e}")),
-+            Err(e) => failed.push(format!("task: {e}")),
-+        }
-+    }
-+
++    ok.sort_unstable();
++    failed.sort();
 +    if failed.is_empty() {
-+        ok.sort_unstable();
 +        Ok((
              StatusCode::OK,
 -            "Test notification sent successfully".to_string(),
@@ -701,19 +735,28 @@ index a3976d1..faf79ba 100644
 +            format!("Test notification sent to: {}", ok.join(", ")),
 +        ))
 +    } else {
-+        failed.sort();
++        // Report BOTH outcomes so a partial failure still names the sinks that
++        // did succeed (per-sink results, as documented).
++        let succeeded = if ok.is_empty() {
++            String::new()
++        } else {
++            format!("; succeeded: {}", ok.join(", "))
++        };
 +        Err((
              StatusCode::INTERNAL_SERVER_ERROR,
 -            format!("Failed to send test notification: {e}"),
 -        )
 -    })
-+            format!("Test notification failed for: {}", failed.join("; ")),
++            format!(
++                "Test notification failed for: {}{succeeded}",
++                failed.join("; ")
++            ),
 +        ))
 +    }
  }
  
  /// Response for GET /api/time
-@@ -712,7 +794,7 @@ mod tests {
+@@ -712,7 +817,7 @@ mod tests {
      }
  
      #[tokio::test]
@@ -722,7 +765,65 @@ index a3976d1..faf79ba 100644
          let (_temp_dir, store_lock) = create_test_qmdl_store().await;
          let config = Config {
              ntfy_auth: Some("Bearer tk_secret".to_string()),
-@@ -751,7 +833,7 @@ mod tests {
+@@ -737,6 +842,57 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn get_config_normalizes_gotify_url() {
++        let (_temp_dir, store_lock) = create_test_qmdl_store().await;
++        let config = Config {
++            gotify_url: Some("https://gotify.example.com/?token=leak".to_string()),
++            ..Config::default()
++        };
++        let state = create_test_server_state_with_config(store_lock, config);
++        let Json(returned) = get_config(State(state)).await.unwrap();
++        // The query (which could hold a token) and trailing slash are stripped,
++        // so the unauthenticated config API never echoes a URL-embedded secret.
++        assert_eq!(
++            returned.gotify_url.as_deref(),
++            Some("https://gotify.example.com")
++        );
++    }
++
++    #[test]
++    fn gotify_token_survives_trailing_slash_roundtrip() {
++        use crate::notifications::gotify_base_url;
++        // set_config normalizes the incoming AND stored gotify_url the same way
++        // get_config does, so a GET (normalized base URL, token redacted to None)
++        // POSTed straight back is NOT seen as a URL change -- the stored
++        // gotify_token is preserved rather than silently dropped.
++        let stored_url = "https://gotify.example.com/"; // stored with a trailing slash
++        let incoming_url = gotify_base_url(stored_url); // the form GET returned
++        let token = resolve_endpoint_secret(
++            None, // the client re-POSTs the redacted (None) token
++            Some(gotify_base_url(&incoming_url).as_str()),
++            Some("A-app-token"), // stored token
++            Some(gotify_base_url(stored_url).as_str()),
++        );
++        assert_eq!(
++            token.as_deref(),
++            Some("A-app-token"),
++            "gotify_token must survive a trailing-slash GET->POST round-trip"
++        );
++    }
++
++    #[tokio::test]
++    async fn test_notification_requires_a_configured_sink() {
++        let (_temp_dir, store_lock) = create_test_qmdl_store().await;
++        let state = create_test_server_state_with_config(store_lock, Config::default());
++        let err = test_notification(State(state)).await.unwrap_err();
++        assert_eq!(
++            err.0,
++            StatusCode::BAD_REQUEST,
++            "no configured sink must be a 400"
++        );
++    }
++
+     #[test]
+     fn resolve_secret_preserves_clears_replaces() {
+         // None -> keep the stored value
+@@ -751,7 +907,7 @@ mod tests {
      }
  
      #[test]
@@ -731,7 +832,7 @@ index a3976d1..faf79ba 100644
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
              resolve_endpoint_secret(None, url, Some("Bearer x"), url),
-@@ -760,7 +842,7 @@ mod tests {
+@@ -760,7 +916,7 @@ mod tests {
      }
  
      #[test]
@@ -740,7 +841,7 @@ index a3976d1..faf79ba 100644
          // The config API is unauthenticated: a write that repoints ntfy_url must
          // NOT carry the stored credential to the new endpoint.
          assert_eq!(
-@@ -775,7 +857,7 @@ mod tests {
+@@ -775,7 +931,7 @@ mod tests {
      }
  
      #[test]
@@ -749,7 +850,7 @@ index a3976d1..faf79ba 100644
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
              resolve_endpoint_secret(Some(String::new()), url, Some("Bearer x"), url),
-@@ -784,7 +866,7 @@ mod tests {
+@@ -784,7 +940,7 @@ mod tests {
      }
  
      #[test]

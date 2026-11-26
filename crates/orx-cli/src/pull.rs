@@ -639,12 +639,15 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     // fails closed if the name is pre-created) and mode 0600 (the data may be
     // sensitive -- e.g. a config snapshot with a private topic URL).
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    // Cap the embedded name (on a char boundary) so the temp filename stays well
+    // under NAME_MAX (255 bytes) even for a long target name.
+    let short: String = name.chars().take(48).collect();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    let tmp = path.with_file_name(format!(".{name}.{}.{seq}.{nonce}.tmp", std::process::id()));
+    let tmp = path.with_file_name(format!(".{short}.{}.{seq}.{nonce}.tmp", std::process::id()));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -700,6 +703,30 @@ mod tests {
         assert!(!safe_name("a/b"));
         assert!(!safe_name("../etc"));
         assert!(!safe_name("a b"));
+    }
+
+    #[test]
+    fn write_atomic_writes_mode_0600_and_leaves_no_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp();
+        let target = dir.join("secret-snapshot.json");
+        write_atomic(&target, b"topic-secret").unwrap();
+        // Restrictive perms (the data may be sensitive) and exact content.
+        let meta = std::fs::metadata(&target).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&target).unwrap(), b"topic-secret");
+        // No temp file is left behind on success.
+        let leftover: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "leftover temp files: {leftover:?}");
+        // A second write (unique temp name) overwrites atomically, no EEXIST.
+        write_atomic(&target, b"second").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"second");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
