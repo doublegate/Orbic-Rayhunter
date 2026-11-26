@@ -1,0 +1,511 @@
+From af7871182bfd3d26ef9bb1c9d384fbd5c6e09a0a Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Wed, 25 Nov 2026 23:20:11 -0500
+Subject: [PATCH] [UPSTREAM] notifications: generic webhook sink (JSON, no
+ identifiers)
+
+Add an optional `webhook_url`. When set, each notification is POSTed there as
+a JSON body `{source, type, message, timestamp}` (Content-Type:
+application/json), independently of `ntfy_url`. The payload deliberately
+carries no subscriber identifiers (IMSI/IMEI/GUTI) -- only the event type and
+the same human-readable message ntfy receives.
+
+Generalizes the notification worker from a single destination to a set of
+sinks (ntfy, webhook), each tracked and retried independently by
+(notification type, sink): one sink being down no longer re-sends to a healthy
+one. ntfy behavior is unchanged when `webhook_url` is unset.
+
+Tests: webhook JSON body + Content-Type, and both-sinks delivery (ntfy gets
+plain text, webhook gets JSON, each once).
+
+Ref: Orbic-Rayhunter T-OR-047.
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ daemon/src/config.rs               |   5 +
+ daemon/src/main.rs                 |   3 +-
+ daemon/src/notifications.rs        | 299 +++++++++++++++++++++--------
+ daemon/web/src/lib/utils.svelte.ts |   1 +
+ dist/config.toml.in                |   4 +
+ 5 files changed, 228 insertions(+), 84 deletions(-)
+
+diff --git a/daemon/src/config.rs b/daemon/src/config.rs
+index 71bdfec..0f7eda3 100644
+--- a/daemon/src/config.rs
++++ b/daemon/src/config.rs
+@@ -85,6 +85,10 @@ pub struct Config {
+     /// topic or a reverse-proxied endpoint. Secret: redacted from `GET
+     /// /api/config` and preserved across a config write that omits it.
+     pub ntfy_auth: Option<String>,
++    /// Optional generic webhook URL. When set, each notification is also POSTed
++    /// here as a JSON body (type, message, timestamp; no subscriber
++    /// identifiers), independently of `ntfy_url`.
++    pub webhook_url: Option<String>,
+     /// Vector containing the types of enabled notifications
+     pub enabled_notifications: Vec<NotificationType>,
+     /// Whether Rayhunter should periodically check GitHub for new releases
+@@ -166,6 +170,7 @@ impl Default for Config {
+             ntfy_url: None,
+             ntfy_headers: false,
+             ntfy_auth: None,
++            webhook_url: None,
+             enabled_notifications: vec![NotificationType::Warning, NotificationType::LowBattery],
+             auto_check_updates: true,
+             clock_sync_mode: ClockSyncMode::Prompt,
+diff --git a/daemon/src/main.rs b/daemon/src/main.rs
+index 6b7ccba..478df7b 100644
+--- a/daemon/src/main.rs
++++ b/daemon/src/main.rs
+@@ -220,7 +220,8 @@ async fn run_with_config(
+     // signaled to stop.
+     let _shutdown_guard = shutdown_token.clone().drop_guard();
+ 
+-    let notification_service = NotificationService::new(config.ntfy_url.clone());
++    let notification_service =
++        NotificationService::new(config.ntfy_url.clone(), config.webhook_url.clone());
+     let update_status_lock = Arc::new(RwLock::new(UpdateStatus::default()));
+ 
+     if !config.debug_mode {
+diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
+index 1e078dc..009a6da 100644
+--- a/daemon/src/notifications.rs
++++ b/daemon/src/notifications.rs
+@@ -57,18 +57,30 @@ struct NotificationStatus {
+     failed_since_last_success: u32,
+ }
+ 
++/// A notification delivery destination. Each sink retries independently.
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++enum SinkKind {
++    /// ntfy (or an ntfy-compatible endpoint): plain-text body, optional
++    /// Title/Priority/Tags and Authorization headers.
++    Ntfy,
++    /// Generic webhook: a JSON body, no identifiers.
++    Webhook,
++}
++
+ pub struct NotificationService {
+     url: Option<String>,
++    webhook_url: Option<String>,
+     timeout: u64,
+     tx: mpsc::Sender<Notification>,
+     rx: mpsc::Receiver<Notification>,
+ }
+ 
+ impl NotificationService {
+-    pub fn new(url: Option<String>) -> Self {
++    pub fn new(url: Option<String>, webhook_url: Option<String>) -> Self {
+         let (tx, rx) = mpsc::channel(10);
+         Self {
+             url,
++            webhook_url,
+             timeout: DEFAULT_NOTIFICATION_TIMEOUT,
+             tx,
+             rx,
+@@ -80,6 +92,24 @@ impl NotificationService {
+     }
+ }
+ 
++/// JSON payload for the generic webhook sink. Deliberately carries no
++/// subscriber identifiers (IMSI/IMEI/GUTI) -- only the event type, the
++/// human-readable message (the same text ntfy receives) and a timestamp.
++fn webhook_body(notification_type: &NotificationType, message: &str) -> String {
++    let type_str = match notification_type {
++        NotificationType::Warning => "Warning",
++        NotificationType::LowBattery => "LowBattery",
++        NotificationType::Update => "Update",
++    };
++    serde_json::json!({
++        "source": "rayhunter",
++        "type": type_str,
++        "message": message,
++        "timestamp": chrono::Utc::now().to_rfc3339(),
++    })
++    .to_string()
++}
++
+ /// ntfy presentation headers (Title, Priority, Tags) derived from a
+ /// notification type, so an ntfy client renders a titled, prioritized,
+ /// tagged notification instead of a bare line. A generic webhook receiver
+@@ -128,114 +158,132 @@ pub fn run_notification_worker(
+     ntfy_auth: Option<String>,
+ ) {
+     task_tracker.spawn(async move {
+-        if let Some(url) = notification_service.url
++        // Collect the configured sinks (ntfy and/or a generic webhook).
++        let mut sink_urls: HashMap<SinkKind, String> = HashMap::new();
++        if let Some(url) = notification_service.url.take()
+             && !url.is_empty()
+         {
+-            let mut notification_statuses = HashMap::new();
+-            let http_client = match crate::http_client::client() {
+-                Ok(client) => client,
+-                Err(err) => {
+-                    error!("failed to create notification HTTP client: {err}");
+-                    return;
+-                }
+-            };
++            sink_urls.insert(SinkKind::Ntfy, url);
++        }
++        if let Some(url) = notification_service.webhook_url.take()
++            && !url.is_empty()
++        {
++            sink_urls.insert(SinkKind::Webhook, url);
++        }
+ 
+-            loop {
+-                // Get any notifications since the last time we checked
+-                loop {
+-                    match notification_service.rx.try_recv() {
+-                        Ok(notification) => {
+-                            if !enabled_notifications.contains(&notification.notification_type) {
+-                                continue;
+-                            }
++        // With no destination configured, drain and discard notifications.
++        if sink_urls.is_empty() {
++            while notification_service.rx.recv().await.is_some() {}
++            return;
++        }
++
++        let http_client = match crate::http_client::client() {
++            Ok(client) => client,
++            Err(err) => {
++                error!("failed to create notification HTTP client: {err}");
++                return;
++            }
++        };
+ 
+-                            let status = notification_statuses
+-                                .entry(notification.notification_type)
++        // Delivery state per (notification type, sink): each sink debounces and
++        // retries independently.
++        let mut statuses: HashMap<(NotificationType, SinkKind), NotificationStatus> =
++            HashMap::new();
++
++        loop {
++            // Get any notifications since the last time we checked.
++            loop {
++                match notification_service.rx.try_recv() {
++                    Ok(notification) => {
++                        if !enabled_notifications.contains(&notification.notification_type) {
++                            continue;
++                        }
++                        for sink in sink_urls.keys().copied() {
++                            let status = statuses
++                                .entry((notification.notification_type.clone(), sink))
+                                 .or_insert_with(|| NotificationStatus {
+-                                    message: "".to_string(),
++                                    message: String::new(),
+                                     needs_sending: true,
+                                     last_sent: None,
+                                     last_attempt: None,
+                                     failed_since_last_success: 0,
+                                 });
+-                            // Ignore if we're in the debounce period
++                            // Ignore if we're in the debounce period.
+                             if let Some(debounce) = notification.debounce
+                                 && let Some(last_sent) = status.last_sent
+                                 && last_sent.elapsed() < debounce
+                             {
+                                 continue;
+                             }
+-                            status.message = notification.message;
++                            status.message = notification.message.clone();
+                             status.needs_sending = true;
+                         }
+-                        Err(TryRecvError::Empty) => {
+-                            break;
+-                        }
+-                        Err(TryRecvError::Disconnected) => {
+-                            return;
+-                        }
+                     }
++                    Err(TryRecvError::Empty) => break,
++                    Err(TryRecvError::Disconnected) => return,
++                }
++            }
++
++            // Attempt to send pending notifications.
++            for ((notification_type, sink), status) in statuses.iter_mut() {
++                if !status.needs_sending {
++                    continue;
+                 }
+ 
+-                // Attempt to send pending notifications
+-                for (notification_type, notification) in notification_statuses.iter_mut() {
+-                    if !notification.needs_sending {
++                // Backoff retries, up to a maximum of 256 seconds.
++                if let Some(last_attempt) = status.last_attempt {
++                    let min_wait_time =
++                        Duration::from_secs(2u64.pow(min(status.failed_since_last_success, 8)));
++                    if last_attempt.elapsed() < min_wait_time {
+                         continue;
+                     }
++                }
+ 
+-                    // Backoff retries, up to a maximum of 256 seconds.
+-                    if let Some(last_attempt) = notification.last_attempt {
+-                        let min_wait_time = Duration::from_secs(
+-                            2u64.pow(min(notification.failed_since_last_success, 8)),
+-                        );
+-                        if last_attempt.elapsed() < min_wait_time {
+-                            continue;
++                let url = &sink_urls[sink];
++                let presentation = ntfy_headers_for(notification_type);
++                let body;
++                let mut headers: Vec<(&str, &str)> = Vec::new();
++                match sink {
++                    SinkKind::Ntfy => {
++                        body = status.message.clone();
++                        if let Some(auth) = &ntfy_auth {
++                            headers.push(("Authorization", auth.as_str()));
+                         }
+-                    }
+-
+-                    let mut headers: Vec<(&str, &str)> = Vec::new();
+-                    if let Some(auth) = &ntfy_auth {
+-                        headers.push(("Authorization", auth.as_str()));
+-                    }
+-                    let presentation = ntfy_headers_for(notification_type);
+-                    if ntfy_headers {
+-                        for &(name, value) in &presentation {
+-                            headers.push((name, value));
++                        if ntfy_headers {
++                            for &(name, value) in &presentation {
++                                headers.push((name, value));
++                            }
+                         }
+                     }
+-
+-                    match send_notification(
+-                        &http_client,
+-                        &url,
+-                        notification.message.clone(),
+-                        notification_service.timeout,
+-                        &headers,
+-                    )
+-                    .await
+-                    {
+-                        Ok(()) => {
+-                            notification.last_sent = Some(Instant::now());
+-                            notification.failed_since_last_success = 0;
+-                            notification.needs_sending = false;
+-                        }
+-                        Err(e) => {
+-                            error!("Failed to send notification: {e}");
+-                            notification.failed_since_last_success += 1;
+-                            notification.last_attempt = Some(Instant::now());
+-                        }
++                    SinkKind::Webhook => {
++                        body = webhook_body(notification_type, &status.message);
++                        headers.push(("Content-Type", "application/json"));
+                     }
+                 }
+ 
+-                tokio::time::sleep(Duration::from_secs(2)).await;
+-            }
+-        }
+-        // If there's no url to send to we'll just discard the notifications
+-        else {
+-            loop {
+-                if notification_service.rx.recv().await.is_none() {
+-                    break;
++                match send_notification(
++                    &http_client,
++                    url,
++                    body,
++                    notification_service.timeout,
++                    &headers,
++                )
++                .await
++                {
++                    Ok(()) => {
++                        status.last_sent = Some(Instant::now());
++                        status.failed_since_last_success = 0;
++                        status.needs_sending = false;
++                    }
++                    Err(e) => {
++                        error!("Failed to send {sink:?} notification: {e}");
++                        status.failed_since_last_success += 1;
++                        status.last_attempt = Some(Instant::now());
++                    }
+                 }
+             }
++
++            tokio::time::sleep(Duration::from_secs(2)).await;
+         }
+     });
+ }
+@@ -350,7 +398,7 @@ mod tests {
+         let (received_messages, received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url));
++        let notification_service = NotificationService::new(Some(url), None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -394,7 +442,7 @@ mod tests {
+         let (received_messages, received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url));
++        let notification_service = NotificationService::new(Some(url), None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -436,7 +484,7 @@ mod tests {
+         let (received_messages, received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url));
++        let notification_service = NotificationService::new(Some(url), None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -472,12 +520,97 @@ mod tests {
+         cleanup_worker(notification_sender, task_tracker).await;
+     }
+ 
++    #[tokio::test]
++    async fn test_notification_worker_sends_webhook_json() {
++        let (received_messages, received_headers, url) = setup_test_server().await;
++
++        let task_tracker = TaskTracker::new();
++        let notification_service = NotificationService::new(None, Some(url));
++        let notification_sender = notification_service.new_handler();
++
++        run_notification_worker(
++            &task_tracker,
++            notification_service,
++            vec![NotificationType::Warning],
++            false,
++            None,
++        );
++
++        notification_sender
++            .send(Notification::new(
++                NotificationType::Warning,
++                "heuristic X".to_string(),
++                None,
++            ))
++            .await
++            .unwrap();
++
++        tokio::time::sleep(Duration::from_secs(3)).await;
++
++        let messages = received_messages.lock().await;
++        assert_eq!(messages.len(), 1);
++        let v: serde_json::Value = serde_json::from_str(&messages[0]).unwrap();
++        assert_eq!(v["source"], "rayhunter");
++        assert_eq!(v["type"], "Warning");
++        assert_eq!(v["message"], "heuristic X");
++        assert!(v["timestamp"].is_string());
++        drop(messages);
++
++        let headers = received_headers.lock().await;
++        assert_eq!(headers[0].get("content-type").unwrap(), "application/json");
++        drop(headers);
++
++        cleanup_worker(notification_sender, task_tracker).await;
++    }
++
++    #[tokio::test]
++    async fn test_notification_worker_delivers_to_both_sinks() {
++        let (ntfy_messages, _ntfy_headers, ntfy_url) = setup_test_server().await;
++        let (webhook_messages, _webhook_headers, webhook_url) = setup_test_server().await;
++
++        let task_tracker = TaskTracker::new();
++        let notification_service = NotificationService::new(Some(ntfy_url), Some(webhook_url));
++        let notification_sender = notification_service.new_handler();
++
++        run_notification_worker(
++            &task_tracker,
++            notification_service,
++            vec![NotificationType::Warning],
++            false,
++            None,
++        );
++
++        notification_sender
++            .send(Notification::new(
++                NotificationType::Warning,
++                "both sinks".to_string(),
++                None,
++            ))
++            .await
++            .unwrap();
++
++        tokio::time::sleep(Duration::from_secs(3)).await;
++
++        // ntfy gets the plain text; the webhook gets JSON. Each delivered once.
++        let ntfy = ntfy_messages.lock().await;
++        assert_eq!(ntfy.as_slice(), ["both sinks".to_string()]);
++        drop(ntfy);
++
++        let webhook = webhook_messages.lock().await;
++        assert_eq!(webhook.len(), 1);
++        let v: serde_json::Value = serde_json::from_str(&webhook[0]).unwrap();
++        assert_eq!(v["message"], "both sinks");
++        drop(webhook);
++
++        cleanup_worker(notification_sender, task_tracker).await;
++    }
++
+     #[tokio::test]
+     async fn test_notification_worker_filters_disabled_types() {
+         let (received_messages, _received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url));
++        let notification_service = NotificationService::new(Some(url), None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -521,7 +654,7 @@ mod tests {
+         let (received_messages, _received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(Some(url));
++        let notification_service = NotificationService::new(Some(url), None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+@@ -565,7 +698,7 @@ mod tests {
+     #[tokio::test]
+     async fn test_notification_worker_with_no_url() {
+         let task_tracker = TaskTracker::new();
+-        let notification_service = NotificationService::new(None);
++        let notification_service = NotificationService::new(None, None);
+         let notification_sender = notification_service.new_handler();
+ 
+         run_notification_worker(
+diff --git a/daemon/web/src/lib/utils.svelte.ts b/daemon/web/src/lib/utils.svelte.ts
+index 0228f46..c808139 100644
+--- a/daemon/web/src/lib/utils.svelte.ts
++++ b/daemon/web/src/lib/utils.svelte.ts
+@@ -61,6 +61,7 @@ export interface Config {
+     ntfy_url: string | null;
+     ntfy_headers: boolean;
+     ntfy_auth: string | null;
++    webhook_url: string | null;
+     enabled_notifications: enabled_notifications[];
+     auto_check_updates: boolean;
+     clock_sync_mode: ClockSyncMode;
+diff --git a/dist/config.toml.in b/dist/config.toml.in
+index 262a866..f336c86 100644
+--- a/dist/config.toml.in
++++ b/dist/config.toml.in
+@@ -32,6 +32,10 @@ key_input_mode = 0
+ # Optional Authorization header for a protected ntfy topic or proxied endpoint,
+ # e.g. "Bearer tk_..." or "Basic <base64>". Secret: redacted from GET /api/config.
+ # ntfy_auth = "Bearer tk_..."
++# Optional generic webhook. When set, each notification is also POSTed here as a
++# JSON body {source, type, message, timestamp} with no subscriber identifiers,
++# independently of ntfy_url.
++# webhook_url = "https://example.com/hooks/rayhunter"
+ # What notification types to enable. Does nothing if the above ntfy_url is not set.
+ enabled_notifications = ["Warning", "LowBattery"]
+ 
+-- 
+2.56.1
+
