@@ -41,7 +41,7 @@
   name and removes the partial temp on error; `.gitignore` ignores `orx-config-before-*.json`.
 
 These are `patches/0001-0005` on the pinned upstream v0.13.0 daemon, validated on upstream's own gates
-(`cargo fmt`, `clippy -D warnings`, 116 tests from `cargo test -p rayhunter-daemon`, `daemon/web`
+(`cargo fmt`, `clippy -D warnings`, 118 tests from `cargo test -p rayhunter-daemon`, `daemon/web`
 check + tests). MQTT (T-OR-048) and a
 persistent retry queue (T-OR-050) are deferred. On-device validation is batched with the analyzers phase.
 

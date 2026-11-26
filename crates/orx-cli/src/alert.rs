@@ -528,7 +528,10 @@ mod tests {
         assert!(validate_ntfy_url("https://ntfy.sh:+8080/topic").is_err());
         // A bracketed host that is not a valid IPv6 literal.
         assert!(validate_ntfy_url("http://[not-ipv6]/topic").is_err());
-        // A backslash is a path delimiter (WHATWG), so the host is empty here.
+        // We split the authority on '\' too (reqwest/WHATWG treat it as a path
+        // delimiter), so a LEADING '\' leaves an empty host -> rejected. This is
+        // fail-closed: WHATWG itself ignores the leading '\' and would parse the
+        // host as evil.com, which is exactly what we refuse to accept here.
         assert!(validate_ntfy_url("https://\\evil.com/topic").is_err());
     }
 
@@ -537,6 +540,9 @@ mod tests {
         assert!(validate_ntfy_url("https://ntfy.sh:8080/topic").is_ok());
         assert!(validate_ntfy_url("http://[::1]:8080/topic").is_ok());
         assert!(validate_ntfy_url("http://[2001:db8::1]/topic").is_ok());
+        // A '\' AFTER the host just starts the path, so the host (ntfy.sh) is
+        // valid and the URL is accepted.
+        assert!(validate_ntfy_url("https://ntfy.sh\\topic").is_ok());
     }
 
     #[test]
