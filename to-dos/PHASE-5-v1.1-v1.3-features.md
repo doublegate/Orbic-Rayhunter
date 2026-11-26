@@ -101,12 +101,15 @@ scripts/apply-patches.sh
 > captures in the T-OR-061 device session. This is the off-device detector boundary: the
 > NAS-decodable tranche (T-OR-051/052/053/055) is done; the rest needs the device.
 
-- [ ] T-OR-112: RRC golden-vector harness -- extend `test_util` with PCCH/DL-DCCH/SIB builders
-      (wrap bytes -> `LteInformationElement` via `lte_rrc` decode), seeded from T-OR-061 captures
+- [x] T-OR-112: RRC golden-vector harness (patch 0011) -- `test_util` `lte_rrc`/`bcch_dl_sch`/
+      `dl_dcch` builders wrap raw RRC octets through the live `lte_rrc` decode path, seeded with
+      identifier-free T-OR-061 vectors (BCCH-DL-SCH SystemInformation + DL-DCCH DLInformationTransfer;
+      real PCCH paging carries an S-TMSI so T-OR-056 builds synthetic paging via `lte_rrc(PCCH, ..)`)
 - [ ] T-OR-056: IMSI paging analyzer; IMSI read from the SIM via AT and held only as a salted
-      in-memory hash -- **blocked on T-OR-112** (PCCH = RRC) and the device IMSI (AT, T-OR-061)
+      in-memory hash -- harness ready (T-OR-112); still needs the detector impl + the device IMSI
+      (AT, T-OR-061) and a synthetic paging vector with a test identity
 - [ ] T-OR-057: dedicated-priority and sunset-RAT downgrade, SIB8; MCC policy table as config --
-      **blocked on T-OR-112** (RRC)
+      harness ready (T-OR-112); needs the detector impl + SIB vectors (SIB1/SIB6/7/8 are safe)
 - [ ] T-OR-058: measurement plumbing (new `InformationElement` input for ML1 and RACH TA);
       upstream issue opened before the patch
 - [ ] T-OR-059: recording-scoped cell identity consistency

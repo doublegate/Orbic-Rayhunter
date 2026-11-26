@@ -3,7 +3,7 @@
 Single source of truth for the current state of Orbic-Rayhunter. Other files point here instead
 of restating status. Updated at every sprint and phase boundary.
 
-- Last updated: 2026-11-26 (v1.2.0 WIP -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity detectors, patches 0001-0010; T-OR-054 blocked on parser; T-OR-061 device session started -- patched build installed, detectors live, calibration tooling + rayhunter-check --config (T-OR-113, patch 0010) -> reproducible 0-FP baseline over ~614k real messages)
+- Last updated: 2026-11-26 (v1.2.0 WIP -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity detectors, patches 0001-0011; T-OR-054 blocked on parser; T-OR-061 device session started -- patched daemon installed (patches 0001-0009), detectors live; host tooling adds rayhunter-check --config (T-OR-113, patch 0010) + RRC golden-vector harness (T-OR-112, patch 0011); reproducible 0-FP baseline over ~614k real messages, but these captures are RRC-heavy with sparse NAS so the NAS detectors need a NAS-rich capture to calibrate meaningfully)
 - Version: 1.1.1 (`Cargo.toml` `workspace.package.version = "1.1.1"`)
 - Upstream pin: EFForg/rayhunter v0.13.0 (cd462a1)
 - Target: Orbic RC400L, `ORB400L_V1.2.0_BVZRT`
@@ -56,7 +56,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 113 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-051, T-OR-052, T-OR-053, T-OR-055, T-OR-106, T-OR-107, T-OR-113 (v1.2.0 sinks 045/046/047/049 + analyzer harness 051 + detectors 052/053/055 + check --config 113 done at patch level, on-device validation/calibration pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, T-OR-054 BLOCKED on T-OR-110 parser work, T-OR-056/057 blocked on T-OR-112 RRC vectors, analyzers T-OR-058..064, T-OR-052 precision follow-ups T-OR-108, T-OR-053 stateful follow-up T-OR-109, pycrate mobile-identity parsing T-OR-110, T-OR-055 RRC/emergency follow-up T-OR-111, RRC test-vector harness T-OR-112, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
+| Tickets | 113 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-051, T-OR-052, T-OR-053, T-OR-055, T-OR-106, T-OR-107, T-OR-112, T-OR-113 (v1.2.0 sinks 045/046/047/049 + analyzer harness 051 + detectors 052/053/055 + check --config 113 + RRC harness 112 done at patch level, on-device validation/calibration pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, T-OR-054 BLOCKED on T-OR-110 parser work, T-OR-056/057 now have the T-OR-112 RRC harness but need detector impl + device IMSI (056), analyzers T-OR-058..064, T-OR-052 precision follow-ups T-OR-108, T-OR-053 stateful follow-up T-OR-109, pycrate mobile-identity parsing T-OR-110, T-OR-055 RRC/emergency follow-up T-OR-111, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
 | Patches in series | 9 (`[UPSTREAM]` notification sinks 0001-0004 + review hardening 0005 + analyzer test harness 0006 + NAS Reject detector 0007 + auth-failure detector 0008 + null-integrity detector 0009, T-OR-045/046/047/049/051/052/053/055) | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 136 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
@@ -106,17 +106,20 @@ v1.2.0 analyzer phase: the off-device, NAS-decodable detector tranche is complet
 detectors landed on `main`, patches 0006-0009, all OFF by default; check `--config` patch 0010). The **T-OR-061 device session
 is in progress** (user present):
 
-- DONE: patched daemon (patches 0001-0010) built and installed on the device over a verified
+- DONE: patched daemon (patches 0001-0009) built and installed on the device over a verified
   checksummed backup; all 3 detectors enabled on-device and live in the capture pipeline.
 - DONE: calibration tooling (`scripts/calib-run.sh`, `scripts/calib-snapshot.py`,
   `scripts/calib-analyzers.toml`) + `rayhunter-check --config` (T-OR-113, patch 0010) -> a
   **reproducible** baseline from committed code: 0 detector firings over ~614k messages of real
   Verizon traffic (every message re-scored offline with the detectors enabled; real per-message
   denominator). Continue the soak to widen the sample.
-- Remaining: continue the false-positive soak and decide each detector's default on/off; write
-  T-OR-110 (mobile-identity parsing) against real identity IEs to unblock T-OR-054; seed T-OR-112
-  (RRC golden vectors) to unblock T-OR-056/057; verify the T-OR-055 EIA0 rejection path; read the
-  device IMSI (AT) for T-OR-056.
+- DONE: RRC golden-vector harness (T-OR-112, patch 0011) seeded from the RRC-rich captures --
+  unblocks the RRC detectors T-OR-056/057 and the RRC half of T-OR-111.
+- Remaining: get a NAS-rich capture (force re-attaches: reboot / radio cycle) so the NAS detectors
+  can be calibrated and the T-OR-055 EIA0 path verified -- the current captures are RRC-heavy with
+  only Attach Request/Reject NAS; write T-OR-110 (mobile-identity parsing) to unblock T-OR-054,
+  validated against real identity IEs from that NAS capture; build T-OR-056/057 on the T-OR-112
+  harness; read the device IMSI (AT) for T-OR-056; decide each detector's default on/off.
 - Then the v1.2.0 release ceremony (tag + GitHub release + on-device install validated).
 
 ## Readiness checklist (v0.1.0)

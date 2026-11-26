@@ -11,3 +11,4 @@
 0008-UPSTREAM-analysis-authentication-failure-reject-dete.patch
 0009-UPSTREAM-analysis-null-integrity-EIA0-detector.patch
 0010-UPSTREAM-check-config-to-select-analyzers.patch
+0011-UPSTREAM-analysis-RRC-golden-vector-test-harness.patch
