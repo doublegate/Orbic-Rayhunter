@@ -49,15 +49,15 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | OTA block | applied & reboot-persistent (oma_dm/dmclient/mdm-daemon disabled) | T-OR-018 | reversible; undo manifest in backups/ |
 | Rayhunter on device | **our reproducible build installed & validated** (reboot-persistent, capturing; device-side SHA-256 verified at install) | T-OR-022, T-OR-036 | replaced upstream v0.13.0 on 2026-11-23 |
 | `orx` ops: doctor/backup/verify/install/uninstall/pull-logs/check/purge/rescue/alert | present (zero-dep, 136 tests, backup-gated) | T-OR-032..T-OR-036, T-OR-037 (check), T-OR-038 (pull-logs), T-OR-039, T-OR-040 (purge), T-OR-041 (rescue), T-OR-044 (alert status/test), T-OR-107 (alert set) | rescue is read-only (destructive `--apply` = T-OR-041b); retention policy (T-OR-040b) remains |
-| New analyzers | harness (patch 0006, T-OR-051) + first detector landed (patch 0007, T-OR-052 unauthenticated NAS Reject); T-OR-053+ not yet started | T-OR-051..T-OR-064 | detectors ship OFF by default; enabling needs T-OR-061 on-device FP calibration |
+| New analyzers | harness (patch 0006, T-OR-051) + first detector landed (patch 0007, T-OR-052 NAS Reject identity-forcing); T-OR-053+ not yet started | T-OR-051..T-OR-064 | detectors ship OFF by default; enabling needs T-OR-061 on-device FP calibration |
 
 ## Metrics snapshot
 
 | Metric | Value | Source |
 |---|---|---|
 | Commits | see `git rev-list --count main` (a count here drifts with every merge) | `git log` |
-| Tickets | 107 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-051, T-OR-052, T-OR-106, T-OR-107 (v1.2.0 sinks 045/046/047/049 + analyzer harness 051 + NAS-Reject detector 052 done at patch level, on-device validation/calibration pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, analyzers T-OR-053..064, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
-| Patches in series | 7 (`[UPSTREAM]` notification sinks 0001-0004 + review hardening 0005 + analyzer test harness 0006 + unauthenticated NAS Reject detector 0007, T-OR-045/046/047/049/051/052) | `patches/series` |
+| Tickets | 108 minted; done: T-OR-001..T-OR-022, T-OR-030, T-OR-032..T-OR-041, T-OR-044, T-OR-045, T-OR-046, T-OR-047, T-OR-049, T-OR-051, T-OR-052, T-OR-106, T-OR-107 (v1.2.0 sinks 045/046/047/049 + analyzer harness 051 + NAS-Reject detector 052 done at patch level, on-device validation/calibration pending; 0x11EB-empirical part of T-OR-019, MQTT T-OR-048, queue T-OR-050, analyzers T-OR-053..064, T-OR-052 precision follow-ups T-OR-108, rescue delete T-OR-041b, retention T-OR-040b open) | [ROADMAP.md](ROADMAP.md) |
+| Patches in series | 7 (`[UPSTREAM]` notification sinks 0001-0004 + review hardening 0005 + analyzer test harness 0006 + NAS Reject identity-forcing detector 0007, T-OR-045/046/047/049/051/052) | `patches/series` |
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 136 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |

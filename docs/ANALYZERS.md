@@ -103,7 +103,8 @@ integrity-unprotected (the NAS security-header type is not preserved through the
 and confirming an IMSI re-attach followed (the EPS mobile identity in an Attach Request is an empty
 generated struct in the current `pycrate-rs`). The broader cause tiers (USIM-invalidating #3/#6/#7,
 DoS/roaming #11-#15/#22/#42) stay with the informational diagnostic analyzer. Folding the broader
-causes in, and adding the two confirmations once the parser supports them, is post-calibration work.
+causes in, and adding the two confirmations once the parser supports them, is tracked as T-OR-108
+(the `epsid` parsing it needs overlaps T-OR-054; the integrity-protection check overlaps T-OR-061).
 
 The remaining proposed config keys are placeholders until the upstream PR discussion settles names.
 The test harness all of these depend on is T-OR-051; severity calibration is T-OR-061. EFF has been

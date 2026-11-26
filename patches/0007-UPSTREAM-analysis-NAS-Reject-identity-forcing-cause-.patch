@@ -1,4 +1,4 @@
-From d4663f18ff13fec644fde9ddbc234e9f367942ae Mon Sep 17 00:00:00 2001
+From bc327139a8a817417cb4748171a9608cf17796b3 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 02:43:01 -0500
 Subject: [PATCH] [UPSTREAM] analysis: NAS Reject (identity-forcing cause)
@@ -38,9 +38,9 @@ Signed-off-by: DoubleGate <parobek@gmail.com>
  dist/config.toml.in            |   5 +
  lib/src/analysis/analyzer.rs   |  48 +++++++-
  lib/src/analysis/mod.rs        |   1 +
- lib/src/analysis/nas_reject.rs | 207 +++++++++++++++++++++++++++++++++
+ lib/src/analysis/nas_reject.rs | 204 +++++++++++++++++++++++++++++++++
  lib/src/analysis/test_util.rs  |  10 ++
- 5 files changed, 269 insertions(+), 2 deletions(-)
+ 5 files changed, 266 insertions(+), 2 deletions(-)
  create mode 100644 lib/src/analysis/nas_reject.rs
 
 diff --git a/dist/config.toml.in b/dist/config.toml.in
@@ -157,10 +157,10 @@ index 9a5d10f..87445a0 100644
  pub mod priority_2g_downgrade;
 diff --git a/lib/src/analysis/nas_reject.rs b/lib/src/analysis/nas_reject.rs
 new file mode 100644
-index 0000000..71f74f0
+index 0000000..c8fa88d
 --- /dev/null
 +++ b/lib/src/analysis/nas_reject.rs
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,204 @@
 +//! Flags a NAS Reject (Attach, Tracking Area Update or Service Reject) carrying
 +//! EMM cause #9 "UE identity cannot be derived by the network" or #10
 +//! "implicitly detached". Cause #9 tells the UE to delete its GUTI and re-attach
@@ -208,15 +208,9 @@ index 0000000..71f74f0
 +        match $cause {
 +            $enum::UEIdentityCannotBeDerivedByTheNetwork => Some((
 +                EventType::Medium,
-+                "EMM cause #9 (UE identity cannot be derived by the network): the UE must delete its \
-+                 GUTI and re-attach with its IMSI, exposing it -- Devilray's most reliable \
-+                 single-cell IMSI-catching cause",
++                "#9 (UE identity cannot be derived by the network)",
 +            )),
-+            $enum::ImplicitlyDetached => Some((
-+                EventType::Low,
-+                "EMM cause #10 (implicitly detached): the UE re-attaches, but -- unlike #9 -- is not \
-+                 required to discard its GUTI, so IMSI exposure is not guaranteed; a weaker signal",
-+            )),
++            $enum::ImplicitlyDetached => Some((EventType::Low, "#10 (implicitly detached)")),
 +            _ => None,
 +        }
 +    };
@@ -226,15 +220,12 @@ index 0000000..71f74f0
 +
 +impl NasRejectAnalyzer {
 +    fn event(reject: &str, classification: Option<(EventType, &str)>) -> Option<Event> {
-+        let (severity, detail) = classification?;
++        let (severity, cause) = classification?;
++        // Concise per-event message (for NDJSON and size-limited notification
++        // sinks); the mechanism, severities and caveats are in get_description().
 +        Some(Event {
 +            event_type: severity,
-+            message: format!(
-+                "{reject} with {detail}. A false base station that cannot authenticate the UE can \
-+                 use such a reject to force identity re-exposure. Benign causes also exist (MME \
-+                 restart, GUTI/MME-pool mismatch, idle-timer implicit detach), so corroborate \
-+                 before acting."
-+            ),
++            message: format!("{reject} with identity-forcing EMM cause {cause}"),
 +        })
 +    }
 +}
@@ -247,9 +238,15 @@ index 0000000..71f74f0
 +    fn get_description(&self) -> Cow<'_, str> {
 +        Cow::from(
 +            "Flags an Attach/TAU/Service Reject carrying EMM cause #9 ('UE identity cannot be \
-+             derived') or #10 ('implicitly detached') -- the NAS-Reject IMSI-catching path (the \
-+             identity-reveal blind spot the Identity-Request analyzer misses). Keys on the cause \
-+             alone; does not confirm the reject was unprotected or that an IMSI re-attach followed.",
++             derived by the network') or #10 ('implicitly detached') -- the NAS-Reject \
++             identity-reveal path the Identity-Request analyzer misses. On a TAU or Service Reject \
++             (TS 24.301 5.5.3.2.5 / 5.6.1.5) #9 forces the UE to delete its GUTI and re-attach with \
++             its IMSI, which a false base station that cannot authenticate the UE uses to force \
++             identity exposure (Devilray found #9 the most reliable single-cell IMSI-catching \
++             cause); #10 re-attaches without requiring GUTI deletion, so it is weaker and more \
++             often benign (lower severity). The detector keys on the cause alone: it does NOT \
++             confirm the reject was integrity-unprotected or that an IMSI re-attach followed. \
++             Benign causes exist (MME restart, GUTI/MME-pool mismatch, idle-timer implicit detach).",
 +        )
 +    }
 +
