@@ -1,0 +1,382 @@
+From 18d7c630b6b41c5c42a2d3cd389c1f107f2d368e Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Wed, 25 Nov 2026 22:57:12 -0500
+Subject: [PATCH] [UPSTREAM] notifications: optional ntfy Title/Priority/Tags
+ headers
+
+Add a `ntfy_headers` config flag (default false). When enabled, the
+notification worker sets ntfy's Title, Priority and Tags HTTP headers
+derived from the notification type, so an ntfy client renders a titled,
+prioritized, tagged notification instead of a bare line:
+
+  Warning    -> Title "Rayhunter alert",          Priority high,    Tags rotating_light,warning
+  LowBattery -> Title "Rayhunter: low battery",   Priority default, Tags battery,warning
+  Update     -> Title "Rayhunter: update available", Priority low,  Tags arrow_up
+
+When false (the default) the POST body is sent plain, unchanged from
+today, which keeps a generic webhook receiver working. A webhook that is
+not ntfy simply ignores the extra headers.
+
+Wires the flag through config.toml, the web config form and the config
+template, and covers both the enabled and plain paths with tests (the
+test server now captures request headers).
+
+Ref: Orbic-Rayhunter T-OR-045.
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ daemon/src/config.rs                          |   5 +
+ daemon/src/main.rs                            |   1 +
+ daemon/src/notifications.rs                   | 116 ++++++++++++++++--
+ daemon/src/server.rs                          |   1 +
+ .../web/src/lib/components/ConfigForm.svelte  |   7 ++
+ daemon/web/src/lib/utils.svelte.ts            |   1 +
+ dist/config.toml.in                           |   4 +
+ 7 files changed, 124 insertions(+), 11 deletions(-)
+
+diff --git a/daemon/src/config.rs b/daemon/src/config.rs
+index 947b003..eab2433 100644
+--- a/daemon/src/config.rs
++++ b/daemon/src/config.rs
+@@ -76,6 +76,10 @@ pub struct Config {
+     pub key_input_mode: KeyInputMode,
+     /// ntfy.sh URL
+     pub ntfy_url: Option<String>,
++    /// Enrich ntfy notifications with Title/Priority/Tags headers derived from
++    /// the notification type. When false, the POST body is sent plain (the
++    /// historical behavior), which suits a generic webhook receiver.
++    pub ntfy_headers: bool,
+     /// Vector containing the types of enabled notifications
+     pub enabled_notifications: Vec<NotificationType>,
+     /// Whether Rayhunter should periodically check GitHub for new releases
+@@ -155,6 +159,7 @@ impl Default for Config {
+             key_input_mode: KeyInputMode::Disabled,
+             analyzers: AnalyzerConfig::default(),
+             ntfy_url: None,
++            ntfy_headers: false,
+             enabled_notifications: vec![NotificationType::Warning, NotificationType::LowBattery],
+             auto_check_updates: true,
+             clock_sync_mode: ClockSyncMode::Prompt,
+diff --git a/daemon/src/main.rs b/daemon/src/main.rs
+index f12a221..c8b8b22 100644
+--- a/daemon/src/main.rs
++++ b/daemon/src/main.rs
+@@ -307,6 +307,7 @@ async fn run_with_config(
+         &task_tracker,
+         notification_service,
+         config.enabled_notifications.clone(),
++        config.ntfy_headers,
+     );
+ 
+     let wifi_status = Arc::new(RwLock::new(WifiStatus::default()));
+diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
+index 4419cc0..54c879f 100644
+--- a/daemon/src/notifications.rs
++++ b/daemon/src/notifications.rs
+@@ -80,19 +80,38 @@ impl NotificationService {
+     }
+ }
+ 
+-/// Sends a notification message to the specified URL.
++/// ntfy presentation headers (Title, Priority, Tags) derived from a
++/// notification type, so an ntfy client renders a titled, prioritized,
++/// tagged notification instead of a bare line. A generic webhook receiver
++/// ignores unknown headers, so this stays harmless off ntfy.
++/// See <https://docs.ntfy.sh/publish/>.
++fn ntfy_headers_for(notification_type: &NotificationType) -> [(&'static str, &'static str); 3] {
++    let (title, priority, tags) = match notification_type {
++        NotificationType::Warning => ("Rayhunter alert", "high", "rotating_light,warning"),
++        NotificationType::LowBattery => ("Rayhunter: low battery", "default", "battery,warning"),
++        NotificationType::Update => ("Rayhunter: update available", "low", "arrow_up"),
++    };
++    [("Title", title), ("Priority", priority), ("Tags", tags)]
++}
++
++/// Sends a notification message to the specified URL, applying each of
++/// `headers` as an HTTP header (empty for a plain POST, the historical
++/// behavior).
+ pub async fn send_notification(
+     http_client: &reqwest::Client,
+     url: &str,
+     message: String,
+     timeout: u64,
++    headers: &[(&str, &str)],
+ ) -> Result<(), NotificationError> {
+-    let response = http_client
++    let mut request = http_client
+         .post(url)
+         .body(message)
+-        .timeout(Duration::from_secs(timeout))
+-        .send()
+-        .await?;
++        .timeout(Duration::from_secs(timeout));
++    for (name, value) in headers {
++        request = request.header(*name, *value);
++    }
++    let response = request.send().await?;
+ 
+     if response.status().is_success() {
+         Ok(())
+@@ -105,6 +124,7 @@ pub fn run_notification_worker(
+     task_tracker: &TaskTracker,
+     mut notification_service: NotificationService,
+     enabled_notifications: Vec<NotificationType>,
++    ntfy_headers: bool,
+ ) {
+     task_tracker.spawn(async move {
+         if let Some(url) = notification_service.url
+@@ -157,7 +177,7 @@ pub fn run_notification_worker(
+                 }
+ 
+                 // Attempt to send pending notifications
+-                for notification in notification_statuses.values_mut() {
++                for (notification_type, notification) in notification_statuses.iter_mut() {
+                     if !notification.needs_sending {
+                         continue;
+                     }
+@@ -172,11 +192,20 @@ pub fn run_notification_worker(
+                         }
+                     }
+ 
++                    let header_arr;
++                    let headers: &[(&str, &str)] = if ntfy_headers {
++                        header_arr = ntfy_headers_for(notification_type);
++                        &header_arr
++                    } else {
++                        &[]
++                    };
++
+                     match send_notification(
+                         &http_client,
+                         &url,
+                         notification.message.clone(),
+                         notification_service.timeout,
++                        headers,
+                     )
+                     .await
+                     {
+@@ -218,23 +247,33 @@ mod tests {
+     #[derive(Clone)]
+     struct TestServerState {
+         received_messages: Arc<Mutex<Vec<String>>>,
++        received_headers: Arc<Mutex<Vec<axum::http::HeaderMap>>>,
+     }
+ 
+     async fn capture_notification(
+         State(state): State<TestServerState>,
++        headers: axum::http::HeaderMap,
+         body: Bytes,
+     ) -> &'static str {
++        state.received_headers.lock().await.push(headers);
+         let message = String::from_utf8_lossy(&body).to_string();
+         state.received_messages.lock().await.push(message);
+         "OK"
+     }
+ 
+-    async fn setup_test_server() -> (Arc<Mutex<Vec<String>>>, String) {
++    #[allow(clippy::type_complexity)]
++    async fn setup_test_server() -> (
++        Arc<Mutex<Vec<String>>>,
++        Arc<Mutex<Vec<axum::http::HeaderMap>>>,
++        String,
++    ) {
+         crate::crypto_provider::install_default();
+ 
+         let received_messages = Arc::new(Mutex::new(Vec::new()));
++        let received_headers = Arc::new(Mutex::new(Vec::new()));
+         let test_state = TestServerState {
+             received_messages: received_messages.clone(),
++            received_headers: received_headers.clone(),
+         };
+ 
+         let app = Router::new()
+@@ -251,7 +290,7 @@ mod tests {
+ 
+         tokio::time::sleep(Duration::from_millis(100)).await;
+ 
+-        (received_messages, url)
++        (received_messages, received_headers, url)
+     }
+ 
+     async fn setup_timeout_server(timeout: u64) -> String {
+@@ -289,6 +328,7 @@ mod tests {
+             &url,
+             "test warning message".to_string(),
+             timeout,
++            &[],
+         )
+         .await;
+ 
+@@ -303,7 +343,7 @@ mod tests {
+ 
+     #[tokio::test]
+     async fn test_notification_worker_sends_message() {
+-        let (received_messages, url) = setup_test_server().await;
++        let (received_messages, received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+         let notification_service = NotificationService::new(Some(url));
+@@ -313,6 +353,7 @@ mod tests {
+             &task_tracker,
+             notification_service,
+             vec![NotificationType::Warning],
++            false,
+         );
+ 
+         notification_sender
+@@ -331,12 +372,62 @@ mod tests {
+         assert_eq!(messages[0], "test warning message");
+         drop(messages);
+ 
++        // With ntfy_headers disabled (default), the POST is plain: no ntfy
++        // presentation headers are added.
++        let headers = received_headers.lock().await;
++        assert_eq!(headers.len(), 1);
++        assert!(headers[0].get("Title").is_none());
++        assert!(headers[0].get("Priority").is_none());
++        assert!(headers[0].get("Tags").is_none());
++        drop(headers);
++
++        cleanup_worker(notification_sender, task_tracker).await;
++    }
++
++    #[tokio::test]
++    async fn test_notification_worker_sets_ntfy_headers() {
++        let (received_messages, received_headers, url) = setup_test_server().await;
++
++        let task_tracker = TaskTracker::new();
++        let notification_service = NotificationService::new(Some(url));
++        let notification_sender = notification_service.new_handler();
++
++        run_notification_worker(
++            &task_tracker,
++            notification_service,
++            vec![NotificationType::Warning],
++            true, // ntfy_headers enabled
++        );
++
++        notification_sender
++            .send(Notification::new(
++                NotificationType::Warning,
++                "test warning".to_string(),
++                None,
++            ))
++            .await
++            .unwrap();
++
++        tokio::time::sleep(Duration::from_secs(3)).await;
++
++        let messages = received_messages.lock().await;
++        assert_eq!(messages.len(), 1);
++        assert_eq!(messages[0], "test warning");
++        drop(messages);
++
++        let headers = received_headers.lock().await;
++        assert_eq!(headers.len(), 1);
++        assert_eq!(headers[0].get("Title").unwrap(), "Rayhunter alert");
++        assert_eq!(headers[0].get("Priority").unwrap(), "high");
++        assert_eq!(headers[0].get("Tags").unwrap(), "rotating_light,warning");
++        drop(headers);
++
+         cleanup_worker(notification_sender, task_tracker).await;
+     }
+ 
+     #[tokio::test]
+     async fn test_notification_worker_filters_disabled_types() {
+-        let (received_messages, url) = setup_test_server().await;
++        let (received_messages, _received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+         let notification_service = NotificationService::new(Some(url));
+@@ -346,6 +437,7 @@ mod tests {
+             &task_tracker,
+             notification_service,
+             vec![NotificationType::Warning],
++            false,
+         );
+ 
+         notification_sender
+@@ -378,7 +470,7 @@ mod tests {
+ 
+     #[tokio::test]
+     async fn test_notification_worker_sends_enabled_types() {
+-        let (received_messages, url) = setup_test_server().await;
++        let (received_messages, _received_headers, url) = setup_test_server().await;
+ 
+         let task_tracker = TaskTracker::new();
+         let notification_service = NotificationService::new(Some(url));
+@@ -388,6 +480,7 @@ mod tests {
+             &task_tracker,
+             notification_service,
+             vec![NotificationType::Warning, NotificationType::LowBattery],
++            false,
+         );
+ 
+         notification_sender
+@@ -430,6 +523,7 @@ mod tests {
+             &task_tracker,
+             notification_service,
+             vec![NotificationType::Warning],
++            false,
+         );
+ 
+         notification_sender
+diff --git a/daemon/src/server.rs b/daemon/src/server.rs
+index 8a6ed5c..8c080f8 100644
+--- a/daemon/src/server.rs
++++ b/daemon/src/server.rs
+@@ -246,6 +246,7 @@ pub async fn test_notification(
+         url,
+         message,
+         DEFAULT_NOTIFICATION_TIMEOUT,
++        &[],
+     )
+     .await
+     .map(|()| {
+diff --git a/daemon/web/src/lib/components/ConfigForm.svelte b/daemon/web/src/lib/components/ConfigForm.svelte
+index 3add6fa..bba4199 100644
+--- a/daemon/web/src/lib/components/ConfigForm.svelte
++++ b/daemon/web/src/lib/components/ConfigForm.svelte
+@@ -325,6 +325,13 @@
+                             </div>
+                         </div>
+                     </ExpandableInput>
++
++                    <CheckboxField
++                        id="ntfy_headers"
++                        label="Enrich ntfy notifications with title, priority and tags"
++                        bind:checked={config.ntfy_headers}
++                        help="Adds ntfy Title/Priority/Tags headers derived from the notification type so an ntfy client shows a titled, prioritized notification. Leave off for a plain webhook receiver."
++                    />
+                 </div>
+ 
+                 <div class="border-t border-gray-200 pt-4 mt-6 space-y-3">
+diff --git a/daemon/web/src/lib/utils.svelte.ts b/daemon/web/src/lib/utils.svelte.ts
+index f5f1b50..251db14 100644
+--- a/daemon/web/src/lib/utils.svelte.ts
++++ b/daemon/web/src/lib/utils.svelte.ts
+@@ -59,6 +59,7 @@ export interface Config {
+     colorblind_mode: boolean;
+     key_input_mode: number;
+     ntfy_url: string | null;
++    ntfy_headers: boolean;
+     enabled_notifications: enabled_notifications[];
+     auto_check_updates: boolean;
+     clock_sync_mode: ClockSyncMode;
+diff --git a/dist/config.toml.in b/dist/config.toml.in
+index 5c0e451..b8c156e 100644
+--- a/dist/config.toml.in
++++ b/dist/config.toml.in
+@@ -25,6 +25,10 @@ key_input_mode = 0
+ 
+ # If set, attempts to send a notification to the url when a new warning is triggered
+ # ntfy_url = "https://ntfy.sh/your-topic"
++# Enrich ntfy notifications with Title/Priority/Tags headers from the notification
++# type (an ntfy client then shows a titled, prioritized notification). Leave false
++# for a plain webhook receiver.
++# ntfy_headers = false
+ # What notification types to enable. Does nothing if the above ntfy_url is not set.
+ enabled_notifications = ["Warning", "LowBattery"]
+ 
+-- 
+2.56.1
+

@@ -17,16 +17,18 @@ drive that path over `:8080`.
       via a faithful read-modify-write of `/api/config` (dry-run unless `--apply`; validated live
       with a full before/after config diff showing only `ntfy_url` changed).
 
-The daemon sink EXTENSIONS below are `[UPSTREAM]` and move to v1.2.0 (patch + firmware rebuild):
+The daemon sink EXTENSIONS below are `[UPSTREAM]` v1.2.0 patches (`patches/0001-0004`, host-validated
+on upstream's own gates; on-device validation batched with the analyzers phase):
 
-- [ ] T-OR-045: ntfy `Title`, `Priority`, `Tags` headers derived from severity and notification
-      type; absent config keeps today's plain POST
-- [ ] T-OR-046: optional auth header (bearer token or basic) for the notification endpoint
-- [ ] T-OR-047: webhook sink with a JSON body: severity, analyzer name and version, recording
-      name, timestamp; no identifiers
-- [ ] T-OR-048: MQTT sink, only after upstream agrees on the dependency cost for armv7
-- [ ] T-OR-049: Gotify sink
-- [ ] T-OR-050: persistent retry queue on `/data` with a size cap, replayed when backhaul returns
+- [x] T-OR-045 (patch 0001): ntfy `Title`, `Priority`, `Tags` headers from the notification type
+      (opt-in `ntfy_headers`); absent config keeps today's plain POST.
+- [x] T-OR-046 (patch 0002): optional `ntfy_auth` Authorization header (bearer/basic); secret,
+      redacted + preserved + dropped-on-url-change.
+- [x] T-OR-047 (patch 0003): generic `webhook_url` JSON sink `{source, type, message, timestamp}`,
+      no identifiers; multi-sink worker; webhook_url redacted, error URLs stripped from logs.
+- [ ] T-OR-048: MQTT sink -- DEFERRED past v1.2.0 (heavy armv7 dependency; needs upstream agreement).
+- [x] T-OR-049 (patch 0004): Gotify sink (`gotify_url`/`gotify_token`, X-Gotify-Key, priority by type).
+- [ ] T-OR-050: persistent retry queue on `/data` -- DEFERRED past v1.2.0 (overlaps v1.3.0 storage).
 
 Acceptance criteria: each sink tested against a local server in unit or integration tests; a
 payload test asserts no IMSI/IMEI/GUTI pattern; existing `ntfy_url` behavior byte-identical when

@@ -28,6 +28,11 @@ applies).
 | `colorblind_mode` | `false` | `false` | `false` | upstream default (green becomes blue when `true`) |
 | `key_input_mode` | `0` | `0` | **`1`** | double-tapping the power button starts a new recording; useful in the field without a browser |
 | `ntfy_url` | none | commented | commented | must be a private, unguessable topic; the URL is the only secret and the device needs internet (active SIM data or Wi-Fi client mode) |
+| `ntfy_headers` | `false` | commented | absent | v1.2.0 (patch 0001): `true` adds ntfy `Title`/`Priority`/`Tags` from the notification type; `false` keeps a plain POST (for a generic webhook receiver) |
+| `ntfy_auth` | none | commented | absent | v1.2.0 (patch 0002): `Authorization` header value (`Bearer ...`/`Basic ...`) for a protected ntfy endpoint. Secret: redacted from `GET /api/config`, dropped if `ntfy_url` changes |
+| `webhook_url` | none | commented | absent | v1.2.0 (patch 0003): generic webhook; receives JSON `{source,type,message,timestamp}` (no identifiers) in addition to ntfy. Secret (may embed a token): redacted from `GET /api/config` |
+| `gotify_url` | none | commented | absent | v1.2.0 (patch 0004): Gotify server base URL; the daemon POSTs to `<gotify_url>/message` |
+| `gotify_token` | none | commented | absent | v1.2.0 (patch 0004): Gotify application token (`X-Gotify-Key`). Secret: redacted from `GET /api/config`, dropped if `gotify_url` changes |
 | `enabled_notifications` | `["Warning","LowBattery"]` | same | same | `Update` omitted because update checks are off |
 | `auto_check_updates` | **`true`** | `false` | `false` | set explicitly: the code default and the template disagree, so an older or partial config would silently enable GitHub polling. Updates go through our release process |
 | `clock_sync_mode` | `2` | `2` | `2` | prompt on drift; offsets are in-memory only. 0 off, 1 autosync, 2 prompt |
@@ -120,5 +125,19 @@ directory) as `orx-config-before-<addr>-<epoch>.json`, verifies it reads back by
 reports its SHA-256; if that fails it aborts without touching the device. Re-POSTing that snapshot
 restores the config.
 
-The daemon's additional sink types (webhook auth/headers, MQTT, Gotify) and a persistent retry queue
-are `[UPSTREAM]` work scheduled for v1.2.0 (T-OR-045..050).
+### Notification sinks (v1.2.0, daemon patches)
+
+v1.2.0 extends the daemon's single-ntfy notifier into several independent sinks (`[UPSTREAM]`
+`patches/0001-0004`). Each is opt-in via the config keys above and off by default, so an absent key
+keeps the historical behavior:
+
+- **ntfy header enrichment** (`ntfy_headers`): titled/prioritized/tagged ntfy notifications.
+- **ntfy endpoint auth** (`ntfy_auth`): Bearer/Basic `Authorization` header for a protected topic.
+- **Generic webhook** (`webhook_url`): a JSON `{source, type, message, timestamp}` POST, no identifiers.
+- **Gotify** (`gotify_url` + `gotify_token`): Gotify `{title, message, priority}` to `<url>/message`.
+
+Secret keys (`ntfy_auth`, `gotify_token`, `webhook_url`) are redacted from `GET /api/config` and
+preserved across a config round-trip that omits them; a credential is dropped if its endpoint URL
+changes, so the unauthenticated config API cannot repoint a URL and harvest the stored secret.
+
+MQTT (T-OR-048) and a persistent retry queue (T-OR-050) are deferred past v1.2.0.

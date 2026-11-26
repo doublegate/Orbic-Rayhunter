@@ -172,15 +172,18 @@ existing path; the sink-type and queue extensions below (all `[UPSTREAM]`) move 
 |---|---|---|---|
 | T-OR-044 | `orx alert status`/`test`: surface the daemon's ntfy config and send a test via `:8080` (host-side enablement; `set` is T-OR-107/v1.1.1) | host | done (v1.1.0) |
 | T-OR-107 | `orx alert set --ntfy-url <url>\|--clear [--apply]`: write the daemon's `ntfy_url` via a faithful read-modify-write of `/api/config` (host-side; dry-run unless `--apply`) | host | done (v1.1.1) |
-| T-OR-045 | ntfy title, priority and tags headers mapped from event severity | [UPSTREAM] (v1.2.0) | open |
-| T-OR-046 | Notification endpoint authentication (bearer token or basic auth) | [UPSTREAM] | open |
-| T-OR-047 | Generic webhook sink with a JSON body (severity, analyzer, recording, timestamp; no identifiers) | [UPSTREAM] | open |
-| T-OR-048 | MQTT sink (discuss with upstream first; dependency weight on armv7) | [UPSTREAM] | open |
-| T-OR-049 | Gotify sink | [UPSTREAM] | open |
-| T-OR-050 | Persistent retry queue for notifications that survives loss of backhaul and daemon restart | [UPSTREAM] | open |
+| T-OR-045 | ntfy title, priority and tags headers mapped from event severity | [UPSTREAM] (v1.2.0) | done (patch 0001) |
+| T-OR-046 | Notification endpoint authentication (bearer token or basic auth) | [UPSTREAM] | done (patch 0002) |
+| T-OR-047 | Generic webhook sink with a JSON body (type, message, timestamp; no identifiers) | [UPSTREAM] | done (patch 0003) |
+| T-OR-048 | MQTT sink (discuss with upstream first; dependency weight on armv7) | [UPSTREAM] | deferred (post-v1.2.0) |
+| T-OR-049 | Gotify sink | [UPSTREAM] | done (patch 0004) |
+| T-OR-050 | Persistent retry queue for notifications that survives loss of backhaul and daemon restart | [UPSTREAM] | deferred (post-v1.2.0; overlaps v1.3.0 storage) |
 
 Exit criteria: each sink tested against a local test server; no IMSI/IMEI/GUTI in any payload;
-existing `ntfy_url` behavior unchanged when new keys are absent.
+existing `ntfy_url` behavior unchanged when new keys are absent. Status: the four scoped sinks
+(T-OR-045/046/047/049) are `patches/0001-0004`, host-validated on upstream's own gates; MQTT and the
+persistent queue are deferred by the 2026-11-25 scope decision. On-device validation is batched with
+the analyzers phase (firmware rebuild + reinstall).
 
 ## v1.2.0 Analyzers
 
