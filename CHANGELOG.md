@@ -63,6 +63,13 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   preserved through the decrypted-NAS log, and the Attach Request's EPS mobile identity is not decoded
   by the current parser. **Off by default**: #9/#10 also occur benignly (MME restart, GUTI/MME-pool
   mismatch, idle-timer implicit detach), so it needs T-OR-061 on-device false-positive calibration.
+- **Authentication failure / reject detector** (T-OR-053, `[UPSTREAM]` patch 0008, config key
+  `auth_failure`): flags a NAS Authentication Failure (EMM cause #20 MAC failure -> High, #21 synch
+  failure -> Medium, #26 -> Medium) or an Authentication Reject (-> High). A false base station with
+  no access to the subscriber's home keys cannot produce a valid AUTN, so the USIM rejects the
+  challenge (#20 is the direct signature, near-impossible benignly on a home network) or the network
+  rejects the response. Stateless. **Off by default**: #21 also fires on a genuine SQN resync or a
+  SIM swap, so it needs T-OR-061 calibration.
 
 ## [1.1.1] - 2026-11-25
 

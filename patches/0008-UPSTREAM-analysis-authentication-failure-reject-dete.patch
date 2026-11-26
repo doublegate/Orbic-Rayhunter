@@ -1,0 +1,298 @@
+From 3ec9b2d1f041ff182648ae7cfeee8fdce478bc64 Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Thu, 26 Nov 2026 03:28:51 -0500
+Subject: [PATCH] [UPSTREAM] analysis: authentication failure / reject detector
+
+Adds the `auth_failure` analyzer: it flags a NAS Authentication Failure (uplink,
+EMM cause #20 MAC failure -> High, #21 synch failure -> Medium, #26 non-EPS
+authentication unacceptable -> Medium) or an Authentication Reject (downlink ->
+High).
+
+A false base station with no access to the subscriber's home keys (HSS) cannot
+produce a valid authentication token (AUTN), so the USIM rejects the challenge --
+#20 (MAC failure) is the direct signature and is near-impossible on a home
+network without an attack or a broken SIM -- or the network rejects the UE's
+response. #21 can also be a genuine SQN resynchronisation or a SIM swap, so it is
+Medium. The analyzer is stateless and keys on the message/cause alone.
+
+Off by default (`AnalyzerConfig` default false) pending per-network calibration.
+
+Test harness: uses `analysis::test_util::emm_message`; tests cover #20 (High),
+#21/#26 (Medium), an ignored cause, Authentication Reject (High), and an
+unrelated EMM message, plus AnalyzerConfig default-off and Harness wiring in
+analyzer.rs.
+
+Ref: Orbic-Rayhunter T-OR-053; ref-docs/lte-imsi-catcher-detection.md 3.3.
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ dist/config.toml.in              |   4 +
+ lib/src/analysis/analyzer.rs     |  31 +++++++
+ lib/src/analysis/auth_failure.rs | 151 +++++++++++++++++++++++++++++++
+ lib/src/analysis/mod.rs          |   1 +
+ 4 files changed, 187 insertions(+)
+ create mode 100644 lib/src/analysis/auth_failure.rs
+
+diff --git a/dist/config.toml.in b/dist/config.toml.in
+index 4a1fc05..ea5a09a 100644
+--- a/dist/config.toml.in
++++ b/dist/config.toml.in
+@@ -117,3 +117,7 @@ no_nas_messages = false
+ # the reject was unprotected or that an IMSI re-attach followed). Off by default:
+ # #9/#10 also occur benignly, so this needs false-positive calibration first.
+ nas_reject_identity = false
++# Flags a NAS Authentication Failure (#20 MAC failure / #21 synch / #26) or an
++# Authentication Reject -- a false base station that cannot produce a valid AUTN.
++# Off by default: a genuine SQN resync or SIM swap can also trigger it.
++auth_failure = false
+diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
+index 8b09a7f..2c92326 100644
+--- a/lib/src/analysis/analyzer.rs
++++ b/lib/src/analysis/analyzer.rs
+@@ -11,6 +11,7 @@ use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, parser as gsmtap_pa
+ use crate::util::RuntimeMetadata;
+ 
+ use super::{
++    auth_failure::AuthFailureAnalyzer,
+     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
+     imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
+     information_element::InformationElement, nas_null_cipher::NasNullCipherAnalyzer,
+@@ -34,6 +35,7 @@ pub struct AnalyzerConfig {
+     pub imsi_requested: bool,
+     pub no_nas_messages: bool,
+     pub nas_reject_identity: bool,
++    pub auth_failure: bool,
+ }
+ 
+ impl Default for AnalyzerConfig {
+@@ -52,6 +54,9 @@ impl Default for AnalyzerConfig {
+             // GUTI/MME-pool mismatch, idle-timer implicit detach), so the
+             // severity needs per-network false-positive calibration before use.
+             nas_reject_identity: false,
++            // Off by default: #21 (synch failure) fires on a genuine SQN resync
++            // or a SIM swap, so the severity needs calibration first.
++            auth_failure: false,
+         }
+     }
+ }
+@@ -397,6 +402,10 @@ impl Harness {
+             harness.add_analyzer(Box::new(NasRejectAnalyzer))
+         }
+ 
++        if analyzer_config.auth_failure {
++            harness.add_analyzer(Box::new(AuthFailureAnalyzer))
++        }
++
+         if analyzer_config.diagnostic_analyzer {
+             harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
+         }
+@@ -595,11 +604,13 @@ mod tests {
+         // in-place config upgrade never silently enables an uncalibrated detector.
+         let config: AnalyzerConfig = serde_json::from_value(json!({})).unwrap();
+         assert!(!config.nas_reject_identity);
++        assert!(!config.auth_failure);
+         // A config that sets an existing key keeps the rest at their defaults.
+         let config: AnalyzerConfig =
+             serde_json::from_value(json!({ "imsi_requested": true })).unwrap();
+         assert!(config.imsi_requested);
+         assert!(!config.nas_reject_identity);
++        assert!(!config.auth_failure);
+     }
+ 
+     #[test]
+@@ -622,6 +633,26 @@ mod tests {
+         }));
+     }
+ 
++    #[test]
++    fn new_with_config_wires_auth_failure_only_when_enabled() {
++        let metadata = DeviceMetadata::default();
++        let has = |config: &AnalyzerConfig| {
++            Harness::new_with_config(config, &metadata)
++                .get_metadata()
++                .analyzers
++                .iter()
++                .any(|a| a.name.contains("Authentication"))
++        };
++        assert!(has(&AnalyzerConfig {
++            auth_failure: true,
++            ..Default::default()
++        }));
++        assert!(!has(&AnalyzerConfig {
++            auth_failure: false,
++            ..Default::default()
++        }));
++    }
++
+     #[test]
+     fn test_analysis_row_deserialize_old_format() {
+         let row: AnalysisRow = serde_json::from_value(json!({
+diff --git a/lib/src/analysis/auth_failure.rs b/lib/src/analysis/auth_failure.rs
+new file mode 100644
+index 0000000..3f5d559
+--- /dev/null
++++ b/lib/src/analysis/auth_failure.rs
+@@ -0,0 +1,151 @@
++//! Flags authentication failures and rejects that indicate the network could
++//! not run a valid EPS-AKA exchange -- the signature of a false base station
++//! that has no access to the subscriber's home keys (HSS) and therefore cannot
++//! produce a valid authentication token (AUTN).
++//!
++//! - The UE sends an `Authentication Failure` (uplink) when the AUTN it received
++//!   fails verification: EMM cause #20 (MAC failure -- the AUTN's integrity code
++//!   is wrong, i.e. a forged or invalid challenge), #21 (synch failure -- a
++//!   replayed/old vector, or a genuine SQN desynchronisation), or #26 (non-EPS
++//!   authentication unacceptable).
++//! - The network sends an `Authentication Reject` (downlink) when it cannot
++//!   validate the UE's response; on a home network with a valid USIM this should
++//!   not happen.
++//!
++//! #20 (MAC failure) on a home network is close to impossible without an attack
++//! or a broken SIM (High). #21 occurs legitimately after an SQN resync (followed
++//! immediately by a successful re-authentication) and on SIM swaps, so it is
++//! Medium. An `Authentication Reject` is High. Keys on the message/cause alone
++//! (no state). Causal and low false-positive, but off by default until
++//! calibrated, since a genuine resync or an unprovisioned/invalid SIM can fire
++//! it. See TS 24.301 5.4.2; the Devilray study and prior CSS literature.
++
++use std::borrow::Cow;
++
++use chrono::{DateTime, FixedOffset};
++use pycrate_rs::nas::NASMessage;
++use pycrate_rs::nas::emm::EMMMessage;
++use pycrate_rs::nas::generated::emm::emm_authentication_failure::EMMCauseEMMCause as AuthFailureCause;
++
++use super::analyzer::{Analyzer, Event, EventType};
++use super::information_element::{InformationElement, LteInformationElement};
++
++pub struct AuthFailureAnalyzer;
++
++impl Analyzer for AuthFailureAnalyzer {
++    fn get_name(&self) -> Cow<'_, str> {
++        Cow::from("Authentication failure or reject")
++    }
++
++    fn get_description(&self) -> Cow<'_, str> {
++        Cow::from(
++            "Flags a NAS Authentication Failure (EMM cause #20 MAC failure, #21 synch failure, or \
++             #26 non-EPS authentication unacceptable) or an Authentication Reject. A false base \
++             station with no access to the subscriber's home keys cannot produce a valid AUTN, so \
++             the USIM rejects the challenge (#20 especially) or the network rejects the response. \
++             #20 on a home network is near-impossible without an attack or a broken SIM (High); #21 \
++             can be a genuine SQN resync or a SIM swap (Medium); an Authentication Reject is High. \
++             Keys on the message/cause alone.",
++        )
++    }
++
++    fn get_version(&self) -> u32 {
++        0
++    }
++
++    fn analyze_information_element(
++        &mut self,
++        ie: &InformationElement,
++        _packet_num: usize,
++        _timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        let InformationElement::LTE(lte) = ie else {
++            return None;
++        };
++        let LteInformationElement::NAS(NASMessage::EMMMessage(emm)) = lte.as_ref() else {
++            return None;
++        };
++        match emm {
++            EMMMessage::EMMAuthenticationFailure(failure) => {
++                let (severity, cause) = match failure.emm_cause.inner {
++                    AuthFailureCause::MACFailure => (EventType::High, "#20 (MAC failure)"),
++                    AuthFailureCause::SynchFailure => (EventType::Medium, "#21 (synch failure)"),
++                    AuthFailureCause::NonEPSAuthenticationUnacceptable => (
++                        EventType::Medium,
++                        "#26 (non-EPS authentication unacceptable)",
++                    ),
++                    _ => return None,
++                };
++                Some(Event {
++                    event_type: severity,
++                    message: format!("Authentication Failure with EMM cause {cause}"),
++                })
++            }
++            EMMMessage::EMMAuthenticationReject(_) => Some(Event {
++                event_type: EventType::High,
++                message:
++                    "Authentication Reject: the network rejected the UE's authentication (a home \
++                     network with a valid USIM should not do this)"
++                        .to_string(),
++            }),
++            _ => None,
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::test_util::{collect_events, emm_message, packet_time};
++
++    // EMM message type identifiers (TS 24.301 table 9.8.1).
++    const AUTHENTICATION_REJECT: u8 = 84;
++    const AUTHENTICATION_FAILURE: u8 = 92;
++    // EMM cause values.
++    const CAUSE_MAC_FAILURE: u8 = 20;
++    const CAUSE_SYNCH_FAILURE: u8 = 21;
++    const CAUSE_NON_EPS_AUTH_UNACCEPTABLE: u8 = 26;
++    const CAUSE_CONGESTION: u8 = 22;
++
++    fn run(message_type: u8, body: &[u8]) -> Vec<(usize, Event)> {
++        let mut analyzer = AuthFailureAnalyzer;
++        collect_events(
++            &mut analyzer,
++            &[(emm_message(message_type, body), packet_time(0))],
++        )
++    }
++
++    #[test]
++    fn mac_failure_is_high() {
++        let events = run(AUTHENTICATION_FAILURE, &[CAUSE_MAC_FAILURE]);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::High);
++    }
++
++    #[test]
++    fn synch_and_non_eps_failures_are_medium() {
++        for cause in [CAUSE_SYNCH_FAILURE, CAUSE_NON_EPS_AUTH_UNACCEPTABLE] {
++            let events = run(AUTHENTICATION_FAILURE, &[cause]);
++            assert_eq!(events.len(), 1, "cause {cause}");
++            assert_eq!(events[0].1.event_type, EventType::Medium);
++        }
++    }
++
++    #[test]
++    fn other_failure_causes_are_ignored() {
++        assert!(run(AUTHENTICATION_FAILURE, &[CAUSE_CONGESTION]).is_empty());
++    }
++
++    #[test]
++    fn authentication_reject_is_high() {
++        let events = run(AUTHENTICATION_REJECT, &[]);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::High);
++    }
++
++    #[test]
++    fn unrelated_emm_message_is_ignored() {
++        // An Identity Request (type 85) is EMM but neither a failure nor a reject.
++        assert!(run(85, &[0x01]).is_empty());
++    }
++}
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index 87445a0..8475987 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -1,4 +1,5 @@
+ pub mod analyzer;
++pub mod auth_failure;
+ pub mod connection_redirect_downgrade;
+ pub mod diagnostic;
+ pub mod imsi_requested;
+-- 
+2.56.1
+
