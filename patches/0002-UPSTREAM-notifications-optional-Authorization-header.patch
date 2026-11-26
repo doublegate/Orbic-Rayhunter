@@ -1,4 +1,4 @@
-From 55a46aa4d3848a5c379121533807bb394fb9e9fb Mon Sep 17 00:00:00 2001
+From accb157d9f283fda9697fbdc98580448cec2f77a Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Wed, 25 Nov 2026 23:11:33 -0500
 Subject: [PATCH] [UPSTREAM] notifications: optional Authorization header for
@@ -18,16 +18,20 @@ explicit empty string clears it. This resolution is a pure, unit-tested
 helper (resolve_ntfy_auth) covering preserve / drop-on-url-change / clear /
 replace.
 
+The `/api/test-notification` endpoint also sends the configured `Authorization`
+header, so the web UI Test button (and `orx alert test`) reaches a protected
+endpoint just like a real notification.
+
 Ref: Orbic-Rayhunter T-OR-046.
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- daemon/src/config.rs               |  6 ++
- daemon/src/main.rs                 |  1 +
- daemon/src/notifications.rs        | 66 +++++++++++++++++---
- daemon/src/server.rs               | 96 +++++++++++++++++++++++++++++-
- daemon/web/src/lib/utils.svelte.ts |  1 +
- dist/config.toml.in                |  3 +
- 6 files changed, 164 insertions(+), 9 deletions(-)
+ daemon/src/config.rs               |   6 ++
+ daemon/src/main.rs                 |   1 +
+ daemon/src/notifications.rs        |  66 +++++++++++++++---
+ daemon/src/server.rs               | 105 ++++++++++++++++++++++++++++-
+ daemon/web/src/lib/utils.svelte.ts |   1 +
+ dist/config.toml.in                |   3 +
+ 6 files changed, 172 insertions(+), 10 deletions(-)
 
 diff --git a/daemon/src/config.rs b/daemon/src/config.rs
 index eab2433..71bdfec 100644
@@ -198,7 +202,7 @@ index 54c879f..1e078dc 100644
  
          notification_sender
 diff --git a/daemon/src/server.rs b/daemon/src/server.rs
-index 8c080f8..df802ab 100644
+index 8c080f8..bceb08e 100644
 --- a/daemon/src/server.rs
 +++ b/daemon/src/server.rs
 @@ -150,9 +150,32 @@ pub async fn get_config(
@@ -247,7 +251,28 @@ index 8c080f8..df802ab 100644
      let mut config_to_write = config.clone();
      config_to_write.wifi_ssid = None;
      config_to_write.wifi_password = None;
-@@ -599,6 +628,13 @@ mod tests {
+@@ -241,12 +270,19 @@ pub async fn test_notification(
+     })?;
+     let message = "Test notification from Rayhunter".to_string();
+ 
++    // Include the configured Authorization header so the test reaches a
++    // protected ntfy endpoint, just like a real notification does.
++    let mut headers: Vec<(&str, &str)> = Vec::new();
++    if let Some(auth) = &state.config.ntfy_auth {
++        headers.push(("Authorization", auth.as_str()));
++    }
++
+     crate::notifications::send_notification(
+         &http_client,
+         url,
+         message,
+         DEFAULT_NOTIFICATION_TIMEOUT,
+-        &[],
++        &headers,
+     )
+     .await
+     .map(|()| {
+@@ -599,6 +635,13 @@ mod tests {
  
      fn create_test_server_state(
          store_lock: Arc<RwLock<crate::qmdl_store::RecordingStore>>,
@@ -261,7 +286,7 @@ index 8c080f8..df802ab 100644
      ) -> Arc<ServerState> {
          let (tx, _rx) = tokio::sync::mpsc::channel(1);
          let (analysis_tx, _analysis_rx) = tokio::sync::mpsc::channel(1);
-@@ -610,7 +646,7 @@ mod tests {
+@@ -610,7 +653,7 @@ mod tests {
  
          Arc::new(ServerState {
              config_path: "/tmp/test_config.toml".to_string(),
@@ -270,7 +295,7 @@ index 8c080f8..df802ab 100644
              qmdl_store_lock: store_lock,
              diag_device_ctrl_sender: tx,
              analysis_status_lock: Arc::new(RwLock::new(analysis_status)),
-@@ -640,6 +676,64 @@ mod tests {
+@@ -640,6 +683,64 @@ mod tests {
          }
      }
  
