@@ -62,7 +62,8 @@ curl -X POST http://192.168.1.1:8080/api/test-notification
       noisy to ship. Not a live blind spot -- upstream `imsi_requested` already flags the request
       side. Build after T-OR-110, in the T-OR-061 device session.
 - [x] T-OR-055: EIA0 null-integrity analyzer -- NAS half landed (patch 0009, `null_integrity`:
-      NAS SMC EIA0 -> High). RRC-SMC-EIA0 and DRB-before-SMC parts deferred (need RRC vectors).
+      NAS SMC EIA0 -> High). RRC-SMC-EIA0 and DRB-before-SMC ("security never activated") parts
+      deferred to **T-OR-111** (need RRC/ASN.1 vectors in the harness).
 
 Acceptance criteria: each analyzer has its own version, config flag (default off), heuristics
 doc entry, and positive and negative golden vectors; timeouts use packet timestamps.

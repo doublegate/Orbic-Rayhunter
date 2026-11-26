@@ -1,4 +1,4 @@
-From 7e6d80f920ae392dc027d1ca0e297d38fb7e86bb Mon Sep 17 00:00:00 2001
+From a2ec61bbfe87671c7a9f78b02a2fc400df01f94e Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 04:12:59 -0500
 Subject: [PATCH] [UPSTREAM] analysis: null integrity (EIA0) detector
@@ -25,10 +25,10 @@ Ref: Orbic-Rayhunter T-OR-055; ref-docs/lte-imsi-catcher-detection.md 3.6.
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
  dist/config.toml.in                |   4 +
- lib/src/analysis/analyzer.rs       |  35 ++++++++-
+ lib/src/analysis/analyzer.rs       |  35 ++++++-
  lib/src/analysis/mod.rs            |   1 +
- lib/src/analysis/null_integrity.rs | 122 +++++++++++++++++++++++++++++
- 4 files changed, 160 insertions(+), 2 deletions(-)
+ lib/src/analysis/null_integrity.rs | 147 +++++++++++++++++++++++++++++
+ 4 files changed, 185 insertions(+), 2 deletions(-)
  create mode 100644 lib/src/analysis/null_integrity.rs
 
 diff --git a/dist/config.toml.in b/dist/config.toml.in
@@ -144,10 +144,10 @@ index 8475987..b23a60f 100644
  #[cfg(test)]
 diff --git a/lib/src/analysis/null_integrity.rs b/lib/src/analysis/null_integrity.rs
 new file mode 100644
-index 0000000..7dd501d
+index 0000000..313e2a3
 --- /dev/null
 +++ b/lib/src/analysis/null_integrity.rs
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,147 @@
 +//! Flags a NAS Security Mode Command that selects null integrity protection
 +//! (EIA0). EIA0 leaves NAS signalling with no integrity protection at all, so the
 +//! network cannot be authenticated and an attacker can forge or modify NAS
@@ -159,6 +159,14 @@ index 0000000..7dd501d
 +//! The companion `nas_null_cipher` analyzer covers the ciphering half (EEA0);
 +//! this one covers the integrity half (EIA0). High severity, but off by default
 +//! until calibrated, since a genuine emergency call legitimately uses EIA0.
++//!
++//! Scope: a Security Mode Command is always sent with security-header type 3
++//! (integrity protected with a new context, unciphered -- TS 24.301 4.4.4.3), but
++//! this `pycrate-rs` has no security-protected `NASMessage` variant, so it
++//! matches the unwrapped `NASMessage::EMMMessage` the Rayhunter DIAG pipeline
++//! delivers -- exactly as the companion `nas_null_cipher` analyzer does, which
++//! fires in practice, so the pipeline does deliver SMC unwrapped. On a raw feed
++//! that kept the wrapper the message would be skipped; confirm on-device (T-OR-061).
 +
 +use std::borrow::Cow;
 +
@@ -249,8 +257,25 @@ index 0000000..7dd501d
 +    }
 +
 +    #[test]
++    fn eia0_with_null_ciphering_is_high() {
++        // 0x00 = EEA0 ciphering + EIA0 integrity -- the realistic emergency /
++        // false-base-station case (both null).
++        let events = run(0x00);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::High);
++    }
++
++    #[test]
 +    fn real_integrity_algorithm_is_not_flagged() {
 +        assert!(run(0x33).is_empty()); // EEA3 ciphering, EIA3 integrity
++    }
++
++    #[test]
++    fn null_ciphering_with_real_integrity_is_not_flagged() {
++        // 0x02 = EEA0 ciphering (null) + EIA2 integrity (real). Guards against
++        // reading the ciphering nibble instead of the integrity nibble: this
++        // would wrongly flag if the analyzer keyed on ciph_algo.
++        assert!(run(0x02).is_empty());
 +    }
 +
 +    #[test]
