@@ -58,5 +58,6 @@ nas_reject_identity = false
 auth_failure = false
 # ORX: v1.2.0 T-OR-055 (patch 0009). NAS Security Mode Command selecting null
 # integrity (EIA0) -- NAS signalling unauthenticated, stronger than EEA0. Kept OFF
-# until T-OR-061 calibrates (EIA0 is legitimate for an emergency-services call).
+# until T-OR-061 calibrates (EIA0 is legitimate for an emergency-services call;
+# emergency-attach suppression is T-OR-111).
 null_integrity = false

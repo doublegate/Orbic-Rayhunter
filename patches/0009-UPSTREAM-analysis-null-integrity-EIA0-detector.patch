@@ -1,4 +1,4 @@
-From a2ec61bbfe87671c7a9f78b02a2fc400df01f94e Mon Sep 17 00:00:00 2001
+From 2629e279cd7d0284c4b40be1ff8ebfee111625a8 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 04:12:59 -0500
 Subject: [PATCH] [UPSTREAM] analysis: null integrity (EIA0) detector
@@ -27,8 +27,8 @@ Signed-off-by: DoubleGate <parobek@gmail.com>
  dist/config.toml.in                |   4 +
  lib/src/analysis/analyzer.rs       |  35 ++++++-
  lib/src/analysis/mod.rs            |   1 +
- lib/src/analysis/null_integrity.rs | 147 +++++++++++++++++++++++++++++
- 4 files changed, 185 insertions(+), 2 deletions(-)
+ lib/src/analysis/null_integrity.rs | 159 +++++++++++++++++++++++++++++
+ 4 files changed, 197 insertions(+), 2 deletions(-)
  create mode 100644 lib/src/analysis/null_integrity.rs
 
 diff --git a/dist/config.toml.in b/dist/config.toml.in
@@ -144,10 +144,10 @@ index 8475987..b23a60f 100644
  #[cfg(test)]
 diff --git a/lib/src/analysis/null_integrity.rs b/lib/src/analysis/null_integrity.rs
 new file mode 100644
-index 0000000..313e2a3
+index 0000000..95b1d6b
 --- /dev/null
 +++ b/lib/src/analysis/null_integrity.rs
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,159 @@
 +//! Flags a NAS Security Mode Command that selects null integrity protection
 +//! (EIA0). EIA0 leaves NAS signalling with no integrity protection at all, so the
 +//! network cannot be authenticated and an attacker can forge or modify NAS
@@ -161,12 +161,17 @@ index 0000000..313e2a3
 +//! until calibrated, since a genuine emergency call legitimately uses EIA0.
 +//!
 +//! Scope: a Security Mode Command is always sent with security-header type 3
-+//! (integrity protected with a new context, unciphered -- TS 24.301 4.4.4.3), but
-+//! this `pycrate-rs` has no security-protected `NASMessage` variant, so it
-+//! matches the unwrapped `NASMessage::EMMMessage` the Rayhunter DIAG pipeline
-+//! delivers -- exactly as the companion `nas_null_cipher` analyzer does, which
-+//! fires in practice, so the pipeline does deliver SMC unwrapped. On a raw feed
-+//! that kept the wrapper the message would be skipped; confirm on-device (T-OR-061).
++//! (integrity protected with a new context, unciphered -- TS 24.301 4.4.4.3), and
++//! this `pycrate-rs` has no security-protected `NASMessage` variant, so the
++//! analyzer matches the unwrapped `NASMessage::EMMMessage` the DIAG pipeline
++//! delivers (as the companion `nas_null_cipher` does). EIA0 is a special case,
++//! though: a UE must REJECT an EIA0 Security Mode Command on a non-emergency
++//! attach (TS 24.301 5.4.3.5). If the baseband rejects it before emitting the
++//! plain NAS log (0xB0E2) and logs only the header-wrapped PDU (0xB0EC, SHT 3),
++//! this analyzer would miss a real attack -- that `nas_null_cipher` sees EEA0
++//! (which arrives with a valid, accepted integrity algorithm) does NOT prove the
++//! EIA0 path reaches the plain log. The T-OR-061 device plan must verify this
++//! EIA0 rejection path specifically, not assume parity with the EEA0 case.
 +
 +use std::borrow::Cow;
 +
@@ -215,9 +220,16 @@ index 0000000..313e2a3
 +            && cmd.nas_sec_algo.inner.integ_algo
 +                == NASSecAlgoIntegAlgo::EPSIntegrityAlgorithmEIA0Null
 +        {
++            // Report the ciphering algorithm too: EEA0+EIA0 is the shape of a
++            // (plausibly emergency) null-security attach, whereas a non-null
++            // cipher with EIA0 is never valid even for emergency (TS 33.401
++            // 5.1.4.1), and it tells triage whether nas_null_cipher also fired.
 +            return Some(Event {
 +                event_type: EventType::High,
-+                message: "NAS Security Mode Command selected null integrity (EIA0)".to_string(),
++                message: format!(
++                    "NAS Security Mode Command selected null integrity (EIA0); ciphering = {:?}",
++                    cmd.nas_sec_algo.inner.ciph_algo
++                ),
 +            });
 +        }
 +        None
