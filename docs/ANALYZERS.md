@@ -82,7 +82,7 @@ commercial cell-site simulator, and upstreamability.
 
 | Rank | Ticket | Analyzer (proposed key) | Key observable | Data today? | Proposed severity | FP risk | Flag |
 |---|---|---|---|---|---|---|---|
-| 1 | T-OR-052 | Unauthenticated NAS Reject (`nas_reject_identity`) | Attach/TAU/Service Reject with cause #3/#6/#7/#9/#10/#11/#12/#13/#15/#22/#42 before any successful authentication, then IMSI attach | yes (NAS) | High for #9/#10 followed by IMSI attach on home PLMN; Medium #3/#6/#7; Low #11-#15/#22/#42 | low-medium | [UPSTREAM] |
+| 1 | T-OR-052 | **Landed** (patch 0007, key `unauthenticated_nas_reject`) | Attach/TAU/Service Reject with an identity-forcing cause (#9/#10) received before `Security Mode Complete` in the cycle | yes (NAS) | **High** when unprotected (before a security context); **Low** when after one (likely genuine failure) | low-medium | [UPSTREAM] |
 | 2 | T-OR-053 | Authentication failure / reject (`auth_failure`) | UE `AuthenticationFailure` #20/#21/#26; network `AuthenticationReject` | yes (NAS) | High #20; Medium #21 without immediate re-auth; High reject before success | low | [UPSTREAM] |
 | 3 | T-OR-054 | Own identity disclosure (`identity_disclosure`) | UE `IdentityResponse` with IMSI/IMEI; `AttachRequest` with IMSI-type identity; no authentication within T seconds | yes, `epsid` parsing gap | High on home PLMN without following auth; else Low | low | [UPSTREAM] (may need a `pycrate_rs` change) |
 | 4 | T-OR-055 | Null integrity and missing security (`null_integrity`) | RRC/NAS SMC with EIA0; DRB setup or measurement reconfiguration with no prior SMC | yes (RRC/NAS) | High EIA0 outside emergency; Medium no SMC | low / medium | [UPSTREAM] |
@@ -95,8 +95,15 @@ commercial cell-site simulator, and upstreamability.
 | 11 | T-OR-063 | Emergency-alert spoofing context (stretch) | PCCH etws/cmas indication plus SIB10-12 from an already flagged cell | yes | Low | low (conditional) | [UPSTREAM] (maybe) |
 | 12 | T-OR-064 | RRC Connection Reject DoS context (stretch) | `waitTime` at maximum, `deprioritisationReq` | yes | Informational | medium | [UPSTREAM] (maybe) |
 
-The proposed config keys are placeholders until the upstream PR discussion settles names. The
-test harness all of these depend on is T-OR-051; severity calibration is T-OR-061. EFF has been
+T-OR-052 landed deliberately narrowed to the two identity-forcing causes (#9 "UE identity cannot be
+derived", #10 "implicitly detached") that Devilray found reliable, keyed on whether a security
+context existed yet, rather than the broader cause list first proposed above -- precision first, to
+keep the default-off detector from crying wolf before T-OR-061 calibration. The broader
+cause tiers (#3/#6/#7 USIM-invalidating, #11-#15/#22/#42 DoS/roaming) stay with the informational
+diagnostic analyzer for now and can be folded in after calibration if they prove worthwhile.
+
+The remaining proposed config keys are placeholders until the upstream PR discussion settles names.
+The test harness all of these depend on is T-OR-051; severity calibration is T-OR-061. EFF has been
 given Devilray; asking whether its attack profiles can be run against candidates 1-6 before
 release is part of T-OR-061.
 

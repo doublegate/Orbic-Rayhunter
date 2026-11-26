@@ -54,6 +54,13 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   (T-OR-052+) build on. The per-detector named vector builders grow with each analyzer, and the
   capture scrubber (sanitizing a real QMDL for committed vectors) is deferred until on-device captures
   exist (T-OR-061). Validated on `cargo test -p rayhunter` (lib).
+- **Unauthenticated NAS Reject detector** (T-OR-052, `[UPSTREAM]` patch 0007, config key
+  `unauthenticated_nas_reject`): flags an Attach/TAU/Service Reject with an identity-forcing EMM cause
+  (#9 "UE identity cannot be derived" / #10 "implicitly detached") received before a security context
+  is established -- the NAS-Reject IMSI-catching path (the Devilray "identity reveal" blind spot that
+  the Identity-Request analyzer misses). **High** when unprotected, **Low** after a security context.
+  **Off by default**: enabling it needs T-OR-061 on-device false-positive calibration (roaming, MVNO
+  and congestion can carry these causes legitimately on US carriers).
 
 ## [1.1.1] - 2026-11-25
 
