@@ -1,4 +1,4 @@
-From 7002afecb8a4913b49acad21322e9f292e4a8993 Mon Sep 17 00:00:00 2001
+From 3bc544b24fee37ab86e45a89e9215ecde559a05b Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Thu, 26 Nov 2026 00:24:06 -0500
 Subject: [PATCH] [UPSTREAM] notifications: harden sinks per review (redirects,
@@ -41,13 +41,13 @@ Hardening of the notification sinks (0001-0004) after the Antigravity review:
 Ref: Orbic-Rayhunter T-OR-045..049 (PR #16/#17 review follow-up).
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- daemon/src/notifications.rs | 402 ++++++++++++++++++++++++++++++++----
- daemon/src/server.rs        | 250 ++++++++++++++++++----
+ daemon/src/notifications.rs | 424 ++++++++++++++++++++++++++++++++----
+ daemon/src/server.rs        | 330 ++++++++++++++++++++++++----
  dist/config.toml.in         |   3 +-
- 3 files changed, 571 insertions(+), 84 deletions(-)
+ 3 files changed, 669 insertions(+), 88 deletions(-)
 
 diff --git a/daemon/src/notifications.rs b/daemon/src/notifications.rs
-index 387c47d..1a85ae5 100644
+index 387c47d..e1858a0 100644
 --- a/daemon/src/notifications.rs
 +++ b/daemon/src/notifications.rs
 @@ -4,6 +4,7 @@ use std::{
@@ -91,7 +91,7 @@ index 387c47d..1a85ae5 100644
      let type_str = match notification_type {
          NotificationType::Warning => "Warning",
          NotificationType::LowBattery => "LowBattery",
-@@ -114,14 +125,33 @@ fn webhook_body(notification_type: &NotificationType, message: &str) -> String {
+@@ -114,14 +125,38 @@ fn webhook_body(notification_type: &NotificationType, message: &str) -> String {
          "source": "rayhunter",
          "type": type_str,
          "message": message,
@@ -101,14 +101,19 @@ index 387c47d..1a85ae5 100644
      .to_string()
  }
  
-+/// The base of a Gotify URL: everything before any query/fragment, with a
-+/// trailing slash trimmed. The Gotify token belongs in `gotify_token` (sent as
-+/// `X-Gotify-Key`, redacted from `GET /api/config`), never in the URL.
++/// The base of a Gotify URL: everything before any query/fragment, with
++/// surrounding whitespace and a trailing slash trimmed (so a blank or
++/// slash-/query-only value normalizes to `""`). The Gotify token belongs in
++/// `gotify_token` (sent as `X-Gotify-Key`, redacted from `GET /api/config`),
++/// never in the URL.
 +pub(crate) fn gotify_base_url(url: &str) -> String {
 +    url.split(['?', '#'])
 +        .next()
 +        .unwrap_or(url)
-+        .trim_end_matches('/')
++        // Trim trailing slashes AND whitespace together (so "/  /" and
++        // "https://g /" both collapse correctly), then any leading whitespace.
++        .trim_end_matches(|c: char| c == '/' || c.is_whitespace())
++        .trim_start()
 +        .to_string()
 +}
 +
@@ -127,7 +132,7 @@ index 387c47d..1a85ae5 100644
      let (title, priority) = match notification_type {
          NotificationType::Warning => ("Rayhunter alert", 8),
          NotificationType::LowBattery => ("Rayhunter: low battery", 5),
-@@ -135,7 +165,9 @@ fn gotify_body(notification_type: &NotificationType, message: &str) -> String {
+@@ -135,7 +170,9 @@ fn gotify_body(notification_type: &NotificationType, message: &str) -> String {
  /// tagged notification instead of a bare line. A generic webhook receiver
  /// ignores unknown headers, so this stays harmless off ntfy.
  /// See <https://docs.ntfy.sh/publish/>.
@@ -138,7 +143,26 @@ index 387c47d..1a85ae5 100644
      let (title, priority, tags) = match notification_type {
          NotificationType::Warning => ("Rayhunter alert", "high", "rotating_light,warning"),
          NotificationType::LowBattery => ("Rayhunter: low battery", "default", "battery,warning"),
-@@ -159,7 +191,18 @@ pub async fn send_notification(
+@@ -144,6 +181,18 @@ fn ntfy_headers_for(notification_type: &NotificationType) -> [(&'static str, &'s
+     [("Title", title), ("Priority", priority), ("Tags", tags)]
+ }
+ 
++/// The HTTP client every notification sender must use. It NEVER follows
++/// redirects: reqwest strips `Authorization` on a cross-origin 30x but not a
++/// custom credential header like `X-Gotify-Key`, so following a redirect could
++/// leak the token to a redirect target. Notification callers build the client
++/// here (not [`crate::http_client::client`]) so the no-redirect policy lives in
++/// one place rather than being re-specified (or forgotten) at each call site.
++pub(crate) fn redirect_safe_client() -> reqwest::Result<reqwest::Client> {
++    crate::http_client::builder()
++        .redirect(reqwest::redirect::Policy::none())
++        .build()
++}
++
+ /// Sends a notification message to the specified URL, applying each of
+ /// `headers` as an HTTP header (empty for a plain POST, the historical
+ /// behavior).
+@@ -159,7 +208,18 @@ pub async fn send_notification(
          .body(message)
          .timeout(Duration::from_secs(timeout));
      for (name, value) in headers {
@@ -158,7 +182,7 @@ index 387c47d..1a85ae5 100644
      }
      // Strip the URL from any transport error: the destination (e.g. a private
      // ntfy topic) is a secret and must not reach the daemon log.
-@@ -184,7 +227,7 @@ pub fn run_notification_worker(
+@@ -184,20 +244,20 @@ pub fn run_notification_worker(
      gotify_token: Option<String>,
  ) {
      task_tracker.spawn(async move {
@@ -166,24 +190,33 @@ index 387c47d..1a85ae5 100644
 +        // Collect the configured sinks (ntfy, a generic webhook and/or Gotify).
          let mut sink_urls: HashMap<SinkKind, String> = HashMap::new();
          if let Some(url) = notification_service.url.take()
-             && !url.is_empty()
-@@ -208,7 +251,14 @@ pub fn run_notification_worker(
+-            && !url.is_empty()
++            && !url.trim().is_empty()
+         {
+             sink_urls.insert(SinkKind::Ntfy, url);
+         }
+         if let Some(url) = notification_service.webhook_url.take()
+-            && !url.is_empty()
++            && !url.trim().is_empty()
+         {
+             sink_urls.insert(SinkKind::Webhook, url);
+         }
+         if let Some(url) = notification_service.gotify_url.take()
+-            && !url.is_empty()
++            && !gotify_base_url(&url).is_empty()
+         {
+             sink_urls.insert(SinkKind::Gotify, url);
+         }
+@@ -208,7 +268,7 @@ pub fn run_notification_worker(
              return;
          }
  
 -        let http_client = match crate::http_client::client() {
-+        // A notification sink must not follow redirects: reqwest strips
-+        // `Authorization` on a cross-origin 30x but NOT a custom credential
-+        // header like `X-Gotify-Key`, so a redirecting proxy or a captive portal
-+        // on `http://` over cellular could harvest the token.
-+        let http_client = match crate::http_client::builder()
-+            .redirect(reqwest::redirect::Policy::none())
-+            .build()
-+        {
++        let http_client = match redirect_safe_client() {
              Ok(client) => client,
              Err(err) => {
                  error!("failed to create notification HTTP client: {err}");
-@@ -229,11 +279,13 @@ pub fn run_notification_worker(
+@@ -229,11 +289,13 @@ pub fn run_notification_worker(
                          if !enabled_notifications.contains(&notification.notification_type) {
                              continue;
                          }
@@ -197,7 +230,7 @@ index 387c47d..1a85ae5 100644
                                      needs_sending: true,
                                      last_sent: None,
                                      last_attempt: None,
-@@ -247,6 +299,7 @@ pub fn run_notification_worker(
+@@ -247,6 +309,7 @@ pub fn run_notification_worker(
                                  continue;
                              }
                              status.message = notification.message.clone();
@@ -205,7 +238,7 @@ index 387c47d..1a85ae5 100644
                              status.needs_sending = true;
                          }
                      }
-@@ -255,8 +308,16 @@ pub fn run_notification_worker(
+@@ -255,8 +318,16 @@ pub fn run_notification_worker(
                  }
              }
  
@@ -224,7 +257,7 @@ index 387c47d..1a85ae5 100644
                  if !status.needs_sending {
                      continue;
                  }
-@@ -270,56 +331,95 @@ pub fn run_notification_worker(
+@@ -270,56 +341,95 @@ pub fn run_notification_worker(
                      }
                  }
  
@@ -351,7 +384,7 @@ index 387c47d..1a85ae5 100644
                          status.failed_since_last_success += 1;
                          status.last_attempt = Some(Instant::now());
                      }
-@@ -568,6 +668,50 @@ mod tests {
+@@ -568,6 +678,50 @@ mod tests {
          cleanup_worker(notification_sender, task_tracker).await;
      }
  
@@ -402,7 +435,7 @@ index 387c47d..1a85ae5 100644
      #[tokio::test]
      async fn test_notification_worker_sends_webhook_json() {
          let (received_messages, received_headers, url) = setup_test_server().await;
-@@ -820,4 +964,182 @@ mod tests {
+@@ -820,4 +974,188 @@ mod tests {
  
          cleanup_worker(notification_sender, task_tracker).await;
      }
@@ -508,6 +541,15 @@ index 387c47d..1a85ae5 100644
 +            gotify_base_url("https://g.example/path#f"),
 +            "https://g.example/path"
 +        );
++        // A slash-, query-, or whitespace-only value normalizes to empty (so the
++        // sink is skipped rather than POSTing to a bare "/message").
++        assert_eq!(gotify_base_url("/"), "");
++        assert_eq!(gotify_base_url("?token=x"), "");
++        assert_eq!(gotify_base_url("   "), "");
++        assert_eq!(
++            gotify_base_url("  https://g.example/  "),
++            "https://g.example"
++        );
 +    }
 +
 +    #[tokio::test]
@@ -563,10 +605,7 @@ index 387c47d..1a85ae5 100644
 +        tokio::time::sleep(Duration::from_millis(100)).await;
 +
 +        // The worker and test_notification both use this redirect-disabled client.
-+        let client = crate::http_client::builder()
-+            .redirect(reqwest::redirect::Policy::none())
-+            .build()
-+            .unwrap();
++        let client = redirect_safe_client().unwrap();
 +        let err = send_notification(
 +            &client,
 +            &format!("http://{addr}/redirect"),
@@ -586,7 +625,7 @@ index 387c47d..1a85ae5 100644
 +    }
  }
 diff --git a/daemon/src/server.rs b/daemon/src/server.rs
-index a3976d1..ce3df15 100644
+index a3976d1..636ae8a 100644
 --- a/daemon/src/server.rs
 +++ b/daemon/src/server.rs
 @@ -155,6 +155,12 @@ pub async fn get_config(
@@ -602,7 +641,18 @@ index a3976d1..ce3df15 100644
      Ok(Json(config))
  }
  
-@@ -187,7 +193,10 @@ fn resolve_endpoint_secret(
+@@ -164,7 +170,9 @@ pub async fn get_config(
+ fn resolve_secret(incoming: Option<String>, stored: Option<&str>) -> Option<String> {
+     match incoming.as_deref() {
+         None => stored.map(str::to_string),
+-        Some("") => None,
++        // An empty or whitespace-only value clears the secret, so inert
++        // whitespace is never persisted (matches resolve_endpoint_secret).
++        Some(s) if s.trim().is_empty() => None,
+         Some(_) => incoming,
+     }
+ }
+@@ -187,11 +195,42 @@ fn resolve_endpoint_secret(
      match incoming_secret.as_deref() {
          None if incoming_url == stored_url => stored_secret.map(str::to_string),
          None => None,
@@ -614,36 +664,60 @@ index a3976d1..ce3df15 100644
          Some(_) => incoming_secret,
      }
  }
-@@ -216,6 +225,19 @@ pub async fn set_config(
-         config.gps_fixed_latitude = None;
-         config.gps_fixed_longitude = None;
-     }
-+    // Normalize gotify_url to its base (strip query/fragment + trailing slash),
-+    // the same form get_config returns, on BOTH the incoming and stored side.
-+    // Otherwise a benign GET -> POST round-trip -- where GET already returned the
-+    // normalized URL -- would look like a URL change to resolve_endpoint_secret
-+    // and silently drop the stored gotify_token.
-+    if let Some(url) = config.gotify_url.as_deref() {
-+        config.gotify_url = Some(crate::notifications::gotify_base_url(url));
-+    }
-+    let stored_gotify_base = state
-+        .config
-+        .gotify_url
-+        .as_deref()
-+        .map(crate::notifications::gotify_base_url);
-     config.ntfy_auth = resolve_endpoint_secret(
-         config.ntfy_auth.clone(),
-         config.ntfy_url.as_deref(),
-@@ -226,7 +248,7 @@ pub async fn set_config(
-         config.gotify_token.clone(),
-         config.gotify_url.as_deref(),
-         state.config.gotify_token.as_deref(),
--        state.config.gotify_url.as_deref(),
-+        stored_gotify_base.as_deref(),
+ 
++/// Normalize `gotify_url` to its base (strip query/fragment + trailing slash) on
++/// BOTH the incoming and stored side, then resolve the token. `get_config`
++/// returns the normalized URL, so without matching normalization here a benign
++/// GET->POST round-trip would look like a URL change and drop `gotify_token`.
++/// Returns `(normalized_url, resolved_token)`.
++fn resolve_gotify(
++    incoming_url: Option<String>,
++    incoming_token: Option<String>,
++    stored_url: Option<&str>,
++    stored_token: Option<&str>,
++) -> (Option<String>, Option<String>) {
++    // A gotify_url that normalizes to "" (blank, "/", "?token=x") is dropped to
++    // None rather than persisted as an empty string.
++    let incoming_url = incoming_url
++        .map(|u| crate::notifications::gotify_base_url(&u))
++        .filter(|s| !s.is_empty());
++    let stored_base = stored_url
++        .map(crate::notifications::gotify_base_url)
++        .filter(|s| !s.is_empty());
++    let token = resolve_endpoint_secret(
++        incoming_token,
++        incoming_url.as_deref(),
++        stored_token,
++        stored_base.as_deref(),
++    );
++    (incoming_url, token)
++}
++
+ #[cfg_attr(feature = "apidocs", utoipa::path(
+     post,
+     path = "/api/config",
+@@ -222,12 +261,16 @@ pub async fn set_config(
+         state.config.ntfy_auth.as_deref(),
+         state.config.ntfy_url.as_deref(),
      );
+-    config.gotify_token = resolve_endpoint_secret(
+-        config.gotify_token.clone(),
+-        config.gotify_url.as_deref(),
+-        state.config.gotify_token.as_deref(),
++    // Normalize gotify_url to its base and resolve the token together (see
++    // resolve_gotify): a GET->POST round-trip must not drop gotify_token.
++    let (gotify_url, gotify_token) = resolve_gotify(
++        config.gotify_url.take(),
++        config.gotify_token.take(),
+         state.config.gotify_url.as_deref(),
++        state.config.gotify_token.as_deref(),
+     );
++    config.gotify_url = gotify_url;
++    config.gotify_token = gotify_token;
      // webhook_url is redacted from GET (it may embed a credential), so a
      // round-trip that omits it must keep the stored value.
-@@ -278,53 +300,139 @@ pub async fn set_config(
+     config.webhook_url = resolve_secret(
+@@ -278,53 +321,141 @@ pub async fn set_config(
  pub async fn test_notification(
      State(state): State<Arc<ServerState>>,
  ) -> Result<(StatusCode, String), (StatusCode, String)> {
@@ -652,13 +726,14 @@ index a3976d1..ce3df15 100644
 -        "No notification URL configured".to_string(),
 -    ))?;
 +    use crate::notifications::{
-+        NotificationType, gotify_body, gotify_message_url, ntfy_headers_for, webhook_body,
++        NotificationType, gotify_base_url, gotify_body, gotify_message_url, ntfy_headers_for,
++        redirect_safe_client, webhook_body,
 +    };
- 
--    if url.is_empty() {
++
 +    let cfg = &state.config;
 +    let message = "Test notification from Rayhunter".to_string();
-+
+ 
+-    if url.is_empty() {
 +    // One test request per CONFIGURED sink (each with the same headers/body a
 +    // real notification uses), so a webhook-only or Gotify-only setup is tested,
 +    // and a multi-sink setup tests every sink rather than just ntfy.
@@ -669,7 +744,7 @@ index a3976d1..ce3df15 100644
 +        headers: Vec<(&'static str, String)>,
 +    }
 +    let mut sinks: Vec<TestSink> = Vec::new();
-+    if let Some(url) = cfg.ntfy_url.as_deref().filter(|u| !u.is_empty()) {
++    if let Some(url) = cfg.ntfy_url.as_deref().filter(|u| !u.trim().is_empty()) {
 +        let mut h: Vec<(&'static str, String)> = Vec::new();
 +        if let Some(auth) = cfg.ntfy_auth.as_deref().filter(|a| !a.trim().is_empty()) {
 +            h.push(("Authorization", auth.to_string()));
@@ -686,7 +761,7 @@ index a3976d1..ce3df15 100644
 +            headers: h,
 +        });
 +    }
-+    if let Some(url) = cfg.webhook_url.as_deref().filter(|u| !u.is_empty()) {
++    if let Some(url) = cfg.webhook_url.as_deref().filter(|u| !u.trim().is_empty()) {
 +        sinks.push(TestSink {
 +            name: "webhook",
 +            url: url.to_string(),
@@ -694,7 +769,11 @@ index a3976d1..ce3df15 100644
 +            headers: vec![("Content-Type", "application/json".to_string())],
 +        });
 +    }
-+    if let Some(url) = cfg.gotify_url.as_deref().filter(|u| !u.is_empty()) {
++    if let Some(url) = cfg
++        .gotify_url
++        .as_deref()
++        .filter(|u| !gotify_base_url(u).is_empty())
++    {
 +        let mut h: Vec<(&'static str, String)> =
 +            vec![("Content-Type", "application/json".to_string())];
 +        if let Some(token) = cfg.gotify_token.as_deref().filter(|t| !t.trim().is_empty()) {
@@ -716,29 +795,33 @@ index a3976d1..ce3df15 100644
      }
  
 -    let http_client = crate::http_client::client().map_err(|err| {
--        (
--            StatusCode::INTERNAL_SERVER_ERROR,
--            format!("failed to create HTTP client: {err}"),
--        )
--    })?;
--    let message = "Test notification from Rayhunter".to_string();
 +    // Same redirect-disabled client the worker uses, so a credential header is
 +    // never forwarded across a redirect.
-+    let http_client = crate::http_client::builder()
-+        .redirect(reqwest::redirect::Policy::none())
-+        .build()
-+        .map_err(|err| {
-+            (
-+                StatusCode::INTERNAL_SERVER_ERROR,
-+                format!("failed to create HTTP client: {err}"),
-+            )
-+        })?;
++    let http_client = redirect_safe_client().map_err(|err| {
+         (
+             StatusCode::INTERNAL_SERVER_ERROR,
+             format!("failed to create HTTP client: {err}"),
+         )
+     })?;
+-    let message = "Test notification from Rayhunter".to_string();
  
 -    // Include the configured Authorization header so the test reaches a
 -    // protected ntfy endpoint, just like a real notification does.
 -    let mut headers: Vec<(&str, &str)> = Vec::new();
 -    if let Some(auth) = &state.config.ntfy_auth {
 -        headers.push(("Authorization", auth.as_str()));
+-    }
+-
+-    crate::notifications::send_notification(
+-        &http_client,
+-        url,
+-        message,
+-        DEFAULT_NOTIFICATION_TIMEOUT,
+-        &headers,
+-    )
+-    .await
+-    .map(|()| {
+-        (
 +    // Send to every configured sink concurrently (matching the worker).
 +    let mut set = tokio::task::JoinSet::new();
 +    for s in sinks {
@@ -763,18 +846,8 @@ index a3976d1..ce3df15 100644
 +            .map_err(|e| format!("{e}"));
 +            (name, result)
 +        });
-     }
- 
--    crate::notifications::send_notification(
--        &http_client,
--        url,
--        message,
--        DEFAULT_NOTIFICATION_TIMEOUT,
--        &headers,
--    )
--    .await
--    .map(|()| {
--        (
++    }
++
 +    let mut ok: Vec<&'static str> = Vec::new();
 +    let mut failed: Vec<String> = Vec::new();
 +    while let Some(joined) = set.join_next().await {
@@ -819,7 +892,7 @@ index a3976d1..ce3df15 100644
  }
  
  /// Response for GET /api/time
-@@ -712,7 +820,7 @@ mod tests {
+@@ -712,7 +843,7 @@ mod tests {
      }
  
      #[tokio::test]
@@ -828,7 +901,7 @@ index a3976d1..ce3df15 100644
          let (_temp_dir, store_lock) = create_test_qmdl_store().await;
          let config = Config {
              ntfy_auth: Some("Bearer tk_secret".to_string()),
-@@ -737,6 +845,57 @@ mod tests {
+@@ -737,6 +868,90 @@ mod tests {
          );
      }
  
@@ -850,25 +923,58 @@ index a3976d1..ce3df15 100644
 +    }
 +
 +    #[test]
-+    fn gotify_token_survives_trailing_slash_roundtrip() {
-+        use crate::notifications::gotify_base_url;
-+        // set_config normalizes the incoming AND stored gotify_url the same way
-+        // get_config does, so a GET (normalized base URL, token redacted to None)
-+        // POSTed straight back is NOT seen as a URL change -- the stored
-+        // gotify_token is preserved rather than silently dropped.
-+        let stored_url = "https://gotify.example.com/"; // stored with a trailing slash
-+        let incoming_url = gotify_base_url(stored_url); // the form GET returned
-+        let token = resolve_endpoint_secret(
-+            None, // the client re-POSTs the redacted (None) token
-+            Some(gotify_base_url(&incoming_url).as_str()),
-+            Some("A-app-token"), // stored token
-+            Some(gotify_base_url(stored_url).as_str()),
++    fn resolve_gotify_keeps_token_on_trailing_slash_roundtrip() {
++        // This exercises the exact helper set_config calls. get_config returns the
++        // normalized base URL (no trailing slash) with the token redacted to None;
++        // re-POSTing that must NOT look like a URL change, so the stored
++        // gotify_token survives and the persisted URL is normalized.
++        let (url, token) = resolve_gotify(
++            Some("https://gotify.example.com".to_string()), // the base GET returned
++            None,                                           // token was redacted
++            Some("https://gotify.example.com/"),            // stored WITH a slash
++            Some("A-app-token"),
 +        );
++        assert_eq!(url.as_deref(), Some("https://gotify.example.com"));
 +        assert_eq!(
 +            token.as_deref(),
 +            Some("A-app-token"),
 +            "gotify_token must survive a trailing-slash GET->POST round-trip"
 +        );
++    }
++
++    #[test]
++    fn resolve_gotify_drops_empty_normalized_url() {
++        // A gotify_url that normalizes to "" ("/", "?token=x", blank) becomes None
++        // rather than being persisted as an empty string.
++        let (url, _token) = resolve_gotify(Some("/".to_string()), None, None, None);
++        assert_eq!(url, None);
++    }
++
++    #[test]
++    fn resolve_gotify_empty_overwrite_drops_stored_url_and_token() {
++        // Overwriting a CONFIGURED gotify_url with "/" (normalizes to None) drops
++        // both the URL and the stored token -- there is no endpoint to send to.
++        let (url, token) = resolve_gotify(
++            Some("/".to_string()),              // incoming normalizes to None
++            None,                               // token redacted on the GET
++            Some("https://gotify.example.com"), // previously stored URL
++            Some("A-app-token"),                // previously stored token
++        );
++        assert_eq!(url, None);
++        assert_eq!(token, None, "clearing the URL must drop the stored token");
++    }
++
++    #[test]
++    fn resolve_gotify_drops_token_on_real_url_change() {
++        // Repointing the URL to a different host must NOT carry the stored token
++        // (the config API is unauthenticated).
++        let (_url, token) = resolve_gotify(
++            Some("https://evil.example".to_string()),
++            None,
++            Some("https://gotify.example.com"),
++            Some("A-app-token"),
++        );
++        assert_eq!(token, None, "a real URL change must drop the token");
 +    }
 +
 +    #[tokio::test]
@@ -886,7 +992,7 @@ index a3976d1..ce3df15 100644
      #[test]
      fn resolve_secret_preserves_clears_replaces() {
          // None -> keep the stored value
-@@ -751,7 +910,7 @@ mod tests {
+@@ -751,7 +966,7 @@ mod tests {
      }
  
      #[test]
@@ -895,7 +1001,7 @@ index a3976d1..ce3df15 100644
          let url = Some("https://ntfy.sh/t");
          assert_eq!(
              resolve_endpoint_secret(None, url, Some("Bearer x"), url),
-@@ -760,7 +919,7 @@ mod tests {
+@@ -760,7 +975,7 @@ mod tests {
      }
  
      #[test]
@@ -904,7 +1010,7 @@ index a3976d1..ce3df15 100644
          // The config API is unauthenticated: a write that repoints ntfy_url must
          // NOT carry the stored credential to the new endpoint.
          assert_eq!(
-@@ -775,16 +934,21 @@ mod tests {
+@@ -775,16 +990,43 @@ mod tests {
      }
  
      #[test]
@@ -919,6 +1025,28 @@ index a3976d1..ce3df15 100644
 +        assert_eq!(
 +            resolve_endpoint_secret(Some("   ".to_string()), url, Some("Bearer x"), url),
 +            None
++        );
++    }
++
++    #[test]
++    fn resolve_secret_clears_on_empty_or_whitespace() {
++        // webhook_url: empty or whitespace-only clears; None preserves; a real
++        // value replaces.
++        assert_eq!(
++            resolve_secret(Some("   ".to_string()), Some("https://old")),
++            None
++        );
++        assert_eq!(
++            resolve_secret(Some(String::new()), Some("https://old")),
++            None
++        );
++        assert_eq!(
++            resolve_secret(None, Some("https://old")).as_deref(),
++            Some("https://old")
++        );
++        assert_eq!(
++            resolve_secret(Some("https://new".to_string()), Some("https://old")).as_deref(),
++            Some("https://new")
 +        );
      }
  

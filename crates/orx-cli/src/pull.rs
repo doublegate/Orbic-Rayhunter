@@ -655,17 +655,22 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
         .open(&tmp)
         .map_err(|e| format!("create {}: {e}", tmp.display()))?;
 
-    // On any failure, remove the partial temp before returning (it may hold
-    // sensitive data and would otherwise block a retry with EEXIST).
-    let result = (|| {
-        f.write_all(data)
-            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        // Propagate flush/ENOSPC errors: renaming an incompletely-written file
-        // over the target would defeat the crash-safety guarantee.
-        f.sync_all()
-            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+    // Write + fsync (propagate flush/ENOSPC errors: renaming an incompletely
+    // written file would defeat the crash-safety guarantee), then CLOSE the
+    // handle before the rename so no open fd is held across rename/unlink.
+    let written = f
+        .write_all(data)
+        .map_err(|e| format!("write {}: {e}", tmp.display()))
+        .and_then(|()| {
+            f.sync_all()
+                .map_err(|e| format!("sync {}: {e}", tmp.display()))
+        });
+    drop(f);
+    let result = written.and_then(|()| {
         std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", tmp.display()))
-    })();
+    });
+    // On any failure, remove the partial temp (it may hold sensitive data and
+    // would otherwise block a retry with EEXIST).
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
