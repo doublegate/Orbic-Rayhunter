@@ -118,7 +118,10 @@ scripts/apply-patches.sh
   SIB1 ECGI<->TAC, keyed on full ECGI, fires once per cell, bounded state; Low, off by default;
   ECGI<->PCI correlation / GPS-stationary TAC / MCC mismatch / short-lived cells deferred to T-OR-118
   -- the PCI correlation needs real-capture calibration to avoid mobility false positives)
-- [ ] T-OR-060: recording-level identity-exposure summary in the report
+- [x] T-OR-060: recording-level identity-exposure summary in the report (patch 0020,
+  `rayhunter-check`: per-recording tally of permanent-identity-exposure events -- identity
+  disclosure / IMSI requested / IMSI paging -- in the stdout summary and the JSON `identity_exposure`
+  map; report-side aggregate, no analysis change)
 
 Acceptance criteria: as Sprint 5.2; T-OR-058 merged or agreed upstream before T-OR-059 depends on
 PCI data.

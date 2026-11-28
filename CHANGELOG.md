@@ -92,6 +92,11 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   self-tested `orbic-ui-read.py` login path; `--selftest` asserts the payload still matches
   upstream's exploit string. `docs/INSTALL.md` and `docs/BACKUP-AND-RECOVERY.md` now show it as the
   secret-safe re-open.
+- **Recording-level identity-exposure summary** (T-OR-060, `[UPSTREAM]` patch 0020): `rayhunter-check`
+  now tallies, per recording, how often the network obtained or targeted a UE's permanent identity
+  (IMSI/IMEI) -- events from the identity-disclosure, IMSI-requested and IMSI-paging analyzers,
+  grouped by analyzer -- in the summary log and as an `identity_exposure` map in the JSON report.
+  A report-side aggregate over events the harness already produces; no analysis change.
 - **Cell identity consistency detector** (T-OR-059, `[UPSTREAM]` patch 0019): flags an E-UTRAN cell
   that advertises the same identity (ECGI = PLMN + cellIdentity, from SIB1) with two different
   tracking area codes within one recording -- possible identity cloning or tracking-area rotation by
