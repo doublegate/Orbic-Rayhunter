@@ -1,6 +1,17 @@
 ## [Unreleased]
 
-### Added (toward v1.2.0 — daemon notification sinks, `[UPSTREAM]` patches)
+## [1.2.0] - 2026-11-28
+
+Second enhancement release: the v1.2.0 IMSI-catcher detector suite. Eleven new `[UPSTREAM]`
+analyzer/tooling patches (0006–0020) on top of the v1.1.x notification sinks — NAS and RRC
+detectors, ML1 measurement plumbing, cell-identity consistency, and a recording-level
+identity-exposure summary. Every detector ships **off by default** pending on-device
+false-positive calibration (T-OR-061). Detector vectors are cross-validated with the reference
+Python pycrate ASN.1 encoder against the Rust `telcom_parser` decoder; they are not yet validated
+against a live capture (the device's built-in SIM is inactive). Requires a firmware rebuild and
+device reinstall.
+
+### Added (daemon notification sinks + detectors, `[UPSTREAM]` patches)
 
 - **ntfy header enrichment** (T-OR-045, patch 0001): opt-in `ntfy_headers` sends ntfy
   `Title`/`Priority`/`Tags` derived from the notification type; default-off keeps today's plain POST.

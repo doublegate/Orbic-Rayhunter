@@ -3,8 +3,8 @@
 Single source of truth for the current state of Orbic-Rayhunter. Other files point here instead
 of restating status. Updated at every sprint and phase boundary.
 
-- Last updated: 2026-11-28 (v1.2.0 WIP -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity + identity-disclosure + inter-RAT-downgrade + IMSI-paging + RRC-null-integrity detectors, patches 0001-0016; T-OR-110 mobile-identity parsing landed (patch 0012, pycrate-rs fork pin), unblocking T-OR-054; T-OR-061 device session started -- patched daemon installed (patches 0001-0009), detectors live; host tooling adds rayhunter-check --config (T-OR-113, patch 0010) + RRC golden-vector harness (T-OR-112, patch 0011); reproducible 0-FP baseline over ~614k messages, but the built-in Verizon SIM is not activated, so this is broadcast-only traffic (every attach refused with EMM cause #7; no Auth/SMC/Identity NAS) and the NAS detectors need an active SIM to calibrate meaningfully)
-- Version: 1.1.1 (`Cargo.toml` `workspace.package.version = "1.1.1"`)
+- Last updated: 2026-11-28 (v1.2.0 RELEASED -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity + identity-disclosure + inter-RAT-downgrade + IMSI-paging + RRC-null-integrity + ML1-measurement-plumbing + cell-identity-consistency detectors + identity-exposure summary, patches 0001-0020; T-OR-110 mobile-identity parsing landed (patch 0012, pycrate-rs fork pin), unblocking T-OR-054; T-OR-061 device session started -- patched daemon installed (reinstall to 0001-0020 at release), detectors live; host tooling adds rayhunter-check --config (T-OR-113, patch 0010) + RRC golden-vector harness (T-OR-112, patch 0011); reproducible 0-FP baseline over ~614k messages, but the built-in Verizon SIM is not activated, so this is broadcast-only traffic (every attach refused with EMM cause #7; no Auth/SMC/Identity NAS) and the NAS detectors need an active SIM to calibrate meaningfully)
+- Version: 1.2.0 (`Cargo.toml` `workspace.package.version = "1.2.0"`)
 - Upstream pin: EFForg/rayhunter v0.13.0 (cd462a1)
 - Target: Orbic RC400L, `ORB400L_V1.2.0_BVZRT`
 
@@ -61,7 +61,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | Host crates | 1 (`orx-cli`) | `Cargo.toml` workspace members |
 | Host unit tests | 136 orx-cli tests; 4 Python tool self-tests | `cargo test` (local and CI) |
 | CI runs | `ci` run 45041852700 green (the 8 checks required at the time passed; the `main` ruleset now requires 11, see docs/CI.md) | GitHub Actions on `b982d00` |
-| Latest release | v1.1.1 (2026-11-25, via PR) | `gh release list` |
+| Latest release | v1.2.0 (2026-11-28, detector suite) | `gh release list` |
 | Local devel daemon build | 16291376 bytes, unstripped, SHA-256 `1bad88b8...a091c` | `ls -l dist/`, `dist/SHA256SUMS` (2026-11-22) |
 | Device firmware | `ORB400L_V1.2.0_BVZRT` | [docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md) |
 | Device backup | verified (`backups/2026-11-23-V1.2.0/fs/`) + encrypted off-repo copy | `backups/` |
