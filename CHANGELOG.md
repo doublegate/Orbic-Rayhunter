@@ -92,6 +92,12 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   self-tested `orbic-ui-read.py` login path; `--selftest` asserts the payload still matches
   upstream's exploit string. `docs/INSTALL.md` and `docs/BACKUP-AND-RECOVERY.md` now show it as the
   secret-safe re-open.
+- **Permanent-identity disclosure detector** (T-OR-054, `[UPSTREAM]` patch 0013): flags the UE
+  disclosing a permanent identity over NAS -- an Identity Response carrying the IMSI (Medium) or the
+  IMEI/IMEISV device identity (High), or an Attach Request using an IMSI as its EPS mobile identity
+  instead of a GUTI (Low). The response-side complement to upstream `imsi_requested`; keys on the
+  message and identity type, never the digits. Off by default (`identity_disclosure`) pending
+  per-network calibration. Builds on T-OR-110.
 - **Mobile-identity decoding** (T-OR-110, `[UPSTREAM]` patch 0012): the EPS mobile identity
   (TS 24.301 9.9.3.12) and mobile identity (TS 24.008 10.5.1.4) IEs now decode to an identity type
   (IMSI, IMEI, IMEISV, GUTI, TMSI) plus digits / GUTI parts / TMSI, instead of empty structs that
