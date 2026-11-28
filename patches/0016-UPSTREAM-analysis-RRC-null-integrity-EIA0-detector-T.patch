@@ -1,0 +1,281 @@
+From 9315df006ac010398c5185a6fa3f23209bd714fd Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Sat, 28 Nov 2026 03:22:21 -0500
+Subject: [PATCH] [UPSTREAM] analysis: RRC null integrity (EIA0) detector
+ (T-OR-111 part a)
+
+RrcNullIntegrityAnalyzer (default off) flags an RRC Security Mode Command
+that selects the null integrity algorithm (EIA0), leaving access-stratum
+signalling unauthenticated -- the AS-layer counterpart to the NAS Security
+Mode Command EIA0 that the null_integrity analyzer already flags. A UE that
+accepts it will act on forged RRC (measurement config, reconfiguration,
+release/redirect), the foothold a false base station needs. High.
+
+The one legitimate use of EIA0 is an unauthenticated emergency call;
+suppressing that case (an EIA0 RRC SMC after an emergency attach) needs
+connection state and is the remaining stateful part of T-OR-111, so an
+emergency call is a known false positive until then -- hence off by default.
+
+Test vectors are DL-DCCH SecurityModeCommand PDUs encoded with the reference
+Python pycrate and decoded through telcom_parser: a Security Mode Command
+selecting EIA0 (fires High), one selecting EIA2 (ignored), a benign
+RRCConnectionReconfiguration (ignored), and a non-LTE element (ignored).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ lib/src/analysis/analyzer.rs           |  34 +++++-
+ lib/src/analysis/mod.rs                |   1 +
+ lib/src/analysis/rrc_null_integrity.rs | 141 +++++++++++++++++++++++++
+ 3 files changed, 175 insertions(+), 1 deletion(-)
+ create mode 100644 lib/src/analysis/rrc_null_integrity.rs
+
+diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
+index 0e6371a..547f936 100644
+--- a/lib/src/analysis/analyzer.rs
++++ b/lib/src/analysis/analyzer.rs
+@@ -19,7 +19,7 @@ use super::{
+     nas_reject::NasRejectAnalyzer, no_nas_messages::NoNasMessagesAnalyzer,
+     null_cipher::NullCipherAnalyzer, null_integrity::NullIntegrityAnalyzer,
+     priority_2g_downgrade::LteSib6And7DowngradeAnalyzer, rat_downgrade::RatDowngradeAnalyzer,
+-    test_analyzer::TestAnalyzer,
++    rrc_null_integrity::RrcNullIntegrityAnalyzer, test_analyzer::TestAnalyzer,
+ };
+ 
+ /// A list of booleans which stores information about which analyzers are enabled
+@@ -42,6 +42,7 @@ pub struct AnalyzerConfig {
+     pub identity_disclosure: bool,
+     pub rat_downgrade: bool,
+     pub imsi_paging: bool,
++    pub rrc_null_integrity: bool,
+ }
+ 
+ impl Default for AnalyzerConfig {
+@@ -76,6 +77,10 @@ impl Default for AnalyzerConfig {
+             // Off by default: paging by IMSI is a strong signal but needs
+             // per-network false-positive calibration before enabling.
+             imsi_paging: false,
++            // Off by default: EIA0 is legitimate for an unauthenticated
++            // emergency call, so it needs per-network calibration and
++            // emergency-case suppression.
++            rrc_null_integrity: false,
+         }
+     }
+ }
+@@ -441,6 +446,10 @@ impl Harness {
+             harness.add_analyzer(Box::new(ImsiPagingAnalyzer))
+         }
+ 
++        if analyzer_config.rrc_null_integrity {
++            harness.add_analyzer(Box::new(RrcNullIntegrityAnalyzer))
++        }
++
+         if analyzer_config.diagnostic_analyzer {
+             harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
+         }
+@@ -644,6 +653,7 @@ mod tests {
+         assert!(!config.identity_disclosure);
+         assert!(!config.rat_downgrade);
+         assert!(!config.imsi_paging);
++        assert!(!config.rrc_null_integrity);
+         // A config that sets an existing key keeps the rest at their defaults.
+         let config: AnalyzerConfig =
+             serde_json::from_value(json!({ "imsi_requested": true })).unwrap();
+@@ -654,6 +664,7 @@ mod tests {
+         assert!(!config.identity_disclosure);
+         assert!(!config.rat_downgrade);
+         assert!(!config.imsi_paging);
++        assert!(!config.rrc_null_integrity);
+     }
+ 
+     #[test]
+@@ -781,6 +792,27 @@ mod tests {
+         }));
+     }
+ 
++    #[test]
++    fn new_with_config_wires_rrc_null_integrity_only_when_enabled() {
++        let metadata = DeviceMetadata::default();
++        let expected = RrcNullIntegrityAnalyzer.get_name().into_owned();
++        let has = |config: &AnalyzerConfig| {
++            Harness::new_with_config(config, &metadata)
++                .get_metadata()
++                .analyzers
++                .iter()
++                .any(|a| a.name == expected)
++        };
++        assert!(has(&AnalyzerConfig {
++            rrc_null_integrity: true,
++            ..Default::default()
++        }));
++        assert!(!has(&AnalyzerConfig {
++            rrc_null_integrity: false,
++            ..Default::default()
++        }));
++    }
++
+     #[test]
+     fn test_analysis_row_deserialize_old_format() {
+         let row: AnalysisRow = serde_json::from_value(json!({
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index 1cf848c..67145de 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -14,6 +14,7 @@ pub mod null_cipher;
+ pub mod null_integrity;
+ pub mod priority_2g_downgrade;
+ pub mod rat_downgrade;
++pub mod rrc_null_integrity;
+ pub mod test_analyzer;
+ #[cfg(test)]
+ pub(crate) mod test_util;
+diff --git a/lib/src/analysis/rrc_null_integrity.rs b/lib/src/analysis/rrc_null_integrity.rs
+new file mode 100644
+index 0000000..6f3c97b
+--- /dev/null
++++ b/lib/src/analysis/rrc_null_integrity.rs
+@@ -0,0 +1,141 @@
++//! Flags an RRC Security Mode Command that selects the null integrity algorithm
++//! (EIA0) for access-stratum signalling.
++//!
++//! EIA0 leaves RRC signalling integrity-unprotected: a UE that accepts it will
++//! act on unauthenticated RRC messages (measurement config, reconfiguration,
++//! release/redirect), which is exactly the foothold a false base station needs.
++//! This is the access-stratum counterpart to the NAS Security Mode Command
++//! selecting EIA0 that the `null_integrity` analyzer already flags; a CSS can
++//! drive either layer.
++//!
++//! The one legitimate use of EIA0 is an unauthenticated emergency call, where
++//! the network has no security context to integrity-protect with. The detector
++//! is therefore stateless and High but off by default: suppressing the
++//! emergency case (an EIA0 Security Mode Command that follows an emergency
++//! attach) needs connection state and is a separate, stateful follow-up, so
++//! until then an emergency call is a known false positive.
++//!
++//! Scope: operates on the RRC the Rayhunter DIAG pipeline delivers, matching the
++//! decoded DL-DCCH SecurityModeCommand directly.
++
++use std::borrow::Cow;
++
++use chrono::{DateTime, FixedOffset};
++use telcom_parser::lte_rrc::{
++    DL_DCCH_MessageType, DL_DCCH_MessageType_c1, SecurityAlgorithmConfigIntegrityProtAlgorithm,
++    SecurityModeCommandCriticalExtensions, SecurityModeCommandCriticalExtensions_c1,
++};
++
++use super::analyzer::{Analyzer, Event, EventType};
++use super::information_element::{InformationElement, LteInformationElement};
++
++pub struct RrcNullIntegrityAnalyzer;
++
++impl Analyzer for RrcNullIntegrityAnalyzer {
++    fn get_name(&self) -> Cow<'_, str> {
++        Cow::from("RRC null integrity (EIA0)")
++    }
++
++    fn get_description(&self) -> Cow<'_, str> {
++        Cow::from(
++            "Flags an RRC Security Mode Command that selects the null integrity algorithm (EIA0), \
++             leaving access-stratum signalling unauthenticated -- the access-stratum counterpart to \
++             a NAS Security Mode Command selecting EIA0. A false base station uses it so the UE will \
++             act on forged RRC messages. High. The one legitimate use is an unauthenticated \
++             emergency call, which a stateless detector cannot yet exclude, so it is off by default \
++             pending calibration and emergency-case suppression.",
++        )
++    }
++
++    fn get_version(&self) -> u32 {
++        0
++    }
++
++    fn analyze_information_element(
++        &mut self,
++        ie: &InformationElement,
++        _packet_num: usize,
++        _timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        let InformationElement::LTE(lte) = ie else {
++            return None;
++        };
++        let LteInformationElement::DlDcch(msg) = lte.as_ref() else {
++            return None;
++        };
++        let DL_DCCH_MessageType::C1(DL_DCCH_MessageType_c1::SecurityModeCommand(smc)) =
++            &msg.message
++        else {
++            return None;
++        };
++        let SecurityModeCommandCriticalExtensions::C1(
++            SecurityModeCommandCriticalExtensions_c1::SecurityModeCommand_r8(r8),
++        ) = &smc.critical_extensions
++        else {
++            return None;
++        };
++        let integ = r8
++            .security_config_smc
++            .security_algorithm_config
++            .integrity_prot_algorithm
++            .0;
++        (integ == SecurityAlgorithmConfigIntegrityProtAlgorithm::EIA0_V920).then(|| Event {
++            event_type: EventType::High,
++            message: "RRC Security Mode Command selected null integrity (EIA0) -- access-stratum \
++                      signalling left unauthenticated"
++                .to_string(),
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::test_util::{collect_events, dl_dcch, packet_time};
++
++    fn hex(s: &str) -> Vec<u8> {
++        assert_eq!(s.len() % 2, 0, "odd-length hex vector");
++        (0..s.len())
++            .step_by(2)
++            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
++            .collect()
++    }
++
++    // DL-DCCH SecurityModeCommand PDUs encoded with the reference Python pycrate
++    // (TS 36.331) and decoded here through telcom_parser.
++    // integrityProtAlgorithm = eia0-v920 (null integrity).
++    const SMC_EIA0: &str = "300000";
++    // integrityProtAlgorithm = eia2 (a real algorithm) -- benign.
++    const SMC_EIA2: &str = "300020";
++    // A benign DL-DCCH RRCConnectionReconfiguration (not a SecurityModeCommand).
++    const BENIGN_DLDCCH: &str = "200200";
++
++    fn run(v: &str) -> Vec<(usize, Event)> {
++        let mut a = RrcNullIntegrityAnalyzer;
++        collect_events(&mut a, &[(dl_dcch(&hex(v)), packet_time(0))])
++    }
++
++    #[test]
++    fn rrc_smc_with_eia0_is_high() {
++        let events = run(SMC_EIA0);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::High);
++        assert!(events[0].1.message.contains("EIA0"));
++    }
++
++    #[test]
++    fn rrc_smc_with_a_real_algorithm_is_ignored() {
++        assert!(run(SMC_EIA2).is_empty());
++    }
++
++    #[test]
++    fn non_smc_dl_dcch_is_ignored() {
++        assert!(run(BENIGN_DLDCCH).is_empty());
++    }
++
++    #[test]
++    fn non_lte_information_element_is_ignored() {
++        let mut a = RrcNullIntegrityAnalyzer;
++        assert!(collect_events(&mut a, &[(InformationElement::GSM, packet_time(0))]).is_empty());
++    }
++}
+-- 
+2.56.1
+
