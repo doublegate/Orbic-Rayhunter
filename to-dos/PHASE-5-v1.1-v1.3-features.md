@@ -111,7 +111,7 @@ scripts/apply-patches.sh
       CellChangeOrder/Handover to GERAN (High), Handover to UTRA (Informational), Handover/e-CSFB to CDMA2000 (Low), NR/E-UTRA ignored, SIB8 broadcast (Low); vectors
       pycrate-encoded + telcom_parser-decoded. Follow-up T-OR-115: `idleModeMobilityControlInfo` dedicated
       priorities + the per-MCC sunset policy table
-- [x] T-OR-058: measurement plumbing -- `Ml1Measurement` + a default-no-op `report_measurement`
+- [x] T-OR-058: measurement plumbing -- `Ml1Measurement` + a `report_measurement` (default delegates to `report_skipped_packet`)
   trait method + harness dispatch of 0xB17F/0xB180 (patch 0018; additive, no `InformationElement`/enum
   change; RACH TA plumbing + the RSRP/TA outlier feature deferred to T-OR-117);
 - [ ] T-OR-059: recording-scoped cell identity consistency

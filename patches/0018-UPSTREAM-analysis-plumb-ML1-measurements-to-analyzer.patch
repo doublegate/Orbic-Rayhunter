@@ -1,4 +1,4 @@
-From b9c52014467ab7c67980ee3b253e9bcdda6a061a Mon Sep 17 00:00:00 2001
+From 6fa3ca6f15ec0e2bcd168779dd29dd2be43a6960 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 04:06:04 -0500
 Subject: [PATCH] [UPSTREAM] analysis: plumb ML1 measurements to analyzers
@@ -29,14 +29,14 @@ packet once, and ML1-only packets still make a time-based analyzer fire.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ---
- lib/src/analysis/analyzer.rs    | 253 +++++++++++++++++++++++++++++++-
- lib/src/analysis/measurement.rs | 161 ++++++++++++++++++++
+ lib/src/analysis/analyzer.rs    | 252 +++++++++++++++++++++++++++++++-
+ lib/src/analysis/measurement.rs | 174 ++++++++++++++++++++++
  lib/src/analysis/mod.rs         |   1 +
- 3 files changed, 409 insertions(+), 6 deletions(-)
+ 3 files changed, 421 insertions(+), 6 deletions(-)
  create mode 100644 lib/src/analysis/measurement.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
-index 547f936..d27638a 100644
+index 547f936..e0e3c20 100644
 --- a/lib/src/analysis/analyzer.rs
 +++ b/lib/src/analysis/analyzer.rs
 @@ -15,11 +15,12 @@ use super::{
@@ -84,7 +84,7 @@ index 547f936..d27638a 100644
      /// Returns a version number for this Analyzer. This should only ever
      /// increase in value, and do so whenever substantial changes are made to
      /// the Analyzer's heuristic.
-@@ -529,6 +550,20 @@ impl Harness {
+@@ -529,6 +550,19 @@ impl Harness {
          };
          row.packet_timestamp = packet_timestamp;
  
@@ -96,8 +96,7 @@ index 547f936..d27638a 100644
 +        if let (Message::Log { body, .. }, Some(timestamp)) = (&qmdl_message, packet_timestamp)
 +            && let Some(measurement) = Ml1Measurement::from_log_body(body)
 +        {
-+            let packet_num = self.packet_num;
-+            row.events = self.report_measurement(&measurement, packet_num, timestamp);
++            row.events = self.report_measurement(&measurement, timestamp);
 +            self.assert_events_match_analyzers(&row.events);
 +            return row;
 +        }
@@ -105,17 +104,17 @@ index 547f936..d27638a 100644
          let (timestamp, gsmtap_msg) = match gsmtap_parser::parse(qmdl_message) {
              Ok(Some((timestamp, msg))) => (timestamp.to_datetime(), msg),
              Ok(None) => {
-@@ -608,6 +643,26 @@ impl Harness {
+@@ -608,6 +642,26 @@ impl Harness {
              .collect()
      }
  
 +    fn report_measurement(
 +        &mut self,
 +        measurement: &Ml1Measurement,
-+        packet_num: usize,
 +        timestamp: DateTime<FixedOffset>,
 +    ) -> Vec<Option<Event>> {
 +        let packet_str = self.packet_suffix();
++        let packet_num = self.packet_num;
 +        self.analyzers
 +            .iter_mut()
 +            .map(|analyzer| {
@@ -132,7 +131,7 @@ index 547f936..d27638a 100644
      fn packet_suffix(&self) -> String {
          format!(" (packet {})", self.packet_num)
      }
-@@ -615,7 +670,6 @@ impl Harness {
+@@ -615,7 +669,6 @@ impl Harness {
      fn assert_events_match_analyzers(&self, events: &[Option<Event>]) {
          assert_eq!(events.len(), self.analyzers.len());
      }
@@ -140,7 +139,7 @@ index 547f936..d27638a 100644
      pub fn get_metadata(&self) -> ReportMetadata {
          let mut analyzers = Vec::new();
          for analyzer in &self.analyzers {
-@@ -640,6 +694,8 @@ impl Harness {
+@@ -640,6 +693,8 @@ impl Harness {
  mod tests {
      use super::*;
      use serde_json::json;
@@ -149,7 +148,7 @@ index 547f936..d27638a 100644
  
      #[test]
      fn analyzer_config_missing_keys_default_off() {
-@@ -936,4 +992,189 @@ mod tests {
+@@ -936,4 +991,189 @@ mod tests {
          let event = row.events[0].as_ref().expect("expected a warning event");
          assert!(event.message.ends_with(" (packet 3)"));
      }
@@ -183,7 +182,7 @@ index 547f936..d27638a 100644
 +        ) -> Option<Event> {
 +            let message = match measurement {
 +                Ml1Measurement::ServingCell(c) => format!("serving pci {}", c.pci),
-+                Ml1Measurement::NeighborCells { cells, .. } => format!("{} neighbors", cells.len()),
++                Ml1Measurement::NeighborCells(n) => format!("{} neighbors", n.cells.len()),
 +            };
 +            Some(Event {
 +                event_type: EventType::Informational,
@@ -341,10 +340,10 @@ index 547f936..d27638a 100644
  }
 diff --git a/lib/src/analysis/measurement.rs b/lib/src/analysis/measurement.rs
 new file mode 100644
-index 0000000..359beea
+index 0000000..c2a497d
 --- /dev/null
 +++ b/lib/src/analysis/measurement.rs
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,174 @@
 +//! Physical-layer (ML1) measurement input for analyzers.
 +//!
 +//! RRC and NAS reach an analyzer as an [`InformationElement`]; physical-layer
@@ -408,18 +407,31 @@ index 0000000..359beea
 +    }
 +}
 +
++/// Neighbor-cell measurements on one carrier (DIAG log `0xb180`). `earfcn` is
++/// kept on the report so it survives an empty `cells` list.
++#[derive(Debug, Clone, PartialEq)]
++#[non_exhaustive]
++pub struct Ml1NeighborCells {
++    pub earfcn: u32,
++    pub cells: Vec<Ml1NeighborCell>,
++}
++
++impl Ml1NeighborCells {
++    /// Construct a neighbor-cells report (see [`Ml1ServingCell::new`] for why a
++    /// constructor is provided).
++    pub fn new(earfcn: u32, cells: Vec<Ml1NeighborCell>) -> Self {
++        Self { earfcn, cells }
++    }
++}
++
 +/// A decoded ML1 measurement report.
 +#[derive(Debug, Clone, PartialEq)]
 +#[non_exhaustive]
 +pub enum Ml1Measurement {
 +    /// Serving-cell measurement and evaluation (DIAG log `0xb17f`).
 +    ServingCell(Ml1ServingCell),
-+    /// Neighbor-cell measurements on one carrier (DIAG log `0xb180`). `earfcn`
-+    /// is kept on the report so it survives an empty `cells` list.
-+    NeighborCells {
-+        earfcn: u32,
-+        cells: Vec<Ml1NeighborCell>,
-+    },
++    /// Neighbor-cell measurements on one carrier (DIAG log `0xb180`).
++    NeighborCells(Ml1NeighborCells),
 +}
 +
 +impl Ml1Measurement {
@@ -443,10 +455,10 @@ index 0000000..359beea
 +                        rsrp_dbm: c.get_meas_rsrp(),
 +                    })
 +                    .collect();
-+                Some(Ml1Measurement::NeighborCells {
++                Some(Ml1Measurement::NeighborCells(Ml1NeighborCells {
 +                    earfcn: data.get_earfcn(),
 +                    cells,
-+                })
++                }))
 +            }
 +            _ => None,
 +        }
@@ -492,13 +504,13 @@ index 0000000..359beea
 +        let m = Ml1Measurement::from_log_body(&log_body(0xb180, NEIGHBOR_V4)).expect("neighbor");
 +        assert_eq!(
 +            m,
-+            Ml1Measurement::NeighborCells {
++            Ml1Measurement::NeighborCells(Ml1NeighborCells {
 +                earfcn: 6300,
 +                cells: vec![Ml1NeighborCell {
 +                    pci: 131,
 +                    rsrp_dbm: -102.125,
 +                }],
-+            }
++            })
 +        );
 +    }
 +
