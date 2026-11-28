@@ -250,7 +250,10 @@ def selftest() -> int:
         {"name": "Authentication failure or reject", "version": 0},
         {"name": "Null integrity (EIA0) requested", "version": 0},
         {"name": "Permanent identity disclosure", "version": 0},
-        {"name": "Inter-RAT downgrade command / sunset-RAT advertisement", "version": 0},
+        {
+            "name": "Inter-RAT downgrade command / sunset-RAT advertisement",
+            "version": 0,
+        },
         {"name": "Null Cipher", "version": 1},
     ]
 
