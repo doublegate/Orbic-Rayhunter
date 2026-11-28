@@ -72,6 +72,12 @@ Implementation rules (section 5 of the research file):
 - Timeouts use packet timestamps, not message counts, so re-analysis is reproducible.
 - Never place IMSI, IMEI, GUTI or S-TMSI values in `Event.message`; compare identities through a
   salted hash held in memory.
+- Since T-OR-110 (patch 0012) the decoded mobile identity is in memory in cleartext. Its `Debug`
+  and `Serialize` redact digits, the M-TMSI and the TMSI (identity type, digit count and the
+  GUTI's MCC/MNC/MME parts only). The explicit accessors (`digit_string()`, `digits()`,
+  `guti().m_tmsi()`, `tmsi()`) return the real values: use them only for an in-memory comparison
+  or a salted hash, and never interpolate them into an `Event`, a notification, a log line or a
+  report.
 - Golden vectors per analyzer ([TESTING.md](TESTING.md)).
 
 ## Planned analyzers (v1.2)

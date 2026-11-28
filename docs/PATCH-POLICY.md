@@ -53,8 +53,17 @@ dependency, and a patch repoints `Cargo.toml` at it. Rules:
 - Pin an exact commit with `rev = "<40-hex>"`. Cargo records no checksum for git dependencies, so
   the full commit hash is the only integrity check; never pin a branch or a short hash.
 - Before pinning, audit the fork against the commit upstream had locked: only the intended
-  commits, no `build.rs`, proc-macros, `unsafe`, network/filesystem/process use, or new runtime
-  dependencies unless the change needs them. Record the result in the patch or PR description.
+  commits; no `build.rs`, proc-macros, `unsafe`, network/filesystem/process use, or new runtime
+  dependencies unless the change needs them; and, for code that parses over-the-air or device
+  bytes, no panic path (`unwrap`/`expect`, unchecked indexing, arithmetic underflow) and no new
+  way for a malformed field to fail the surrounding message. Pin the panic and failure claims
+  with tests in the patch, not prose. Record the audit in the patch commit message with the
+  GitHub compare URL (`<upstream>/compare/<old>...<fork-owner>:<repo>:<new>`).
+- Test vectors in a fork are public: use only upstream's existing public vectors or synthetic
+  identities (test PLMN 001/01), never bytes from this device's captures.
+- Availability: a fork pin is a git dependency like the EFForg one it replaces; if GitHub or the
+  fork is unreachable, `cargo build` fails to fetch it the same way (`scripts/apply-patches.sh`
+  does not fetch and is unaffected). Builds with a warm `~/.cargo/git` cache keep working.
 - Keep the pinned commit reachable: tag it in the fork (`orbic-rayhunter-pin-<ticket>`) and never
   delete that tag. The branch may be rebased for an upstream submission; the tag keeps old
   builds working.

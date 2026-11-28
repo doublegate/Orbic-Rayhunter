@@ -1,4 +1,4 @@
-From 771b32f2de3a2a02eec735f7492bf00c4f02963e Mon Sep 17 00:00:00 2001
+From 440918feaa538acc6279a8670591e8e2a9882947 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Fri, 27 Nov 2026 21:42:04 -0500
 Subject: [PATCH] [UPSTREAM] deps: decode mobile identities via pycrate-rs
@@ -25,17 +25,30 @@ commit 9ca5f54 and the mobile-identity change. No build.rs, proc-macro,
 unsafe, network/filesystem/process use, or new runtime dependency (only a
 dev-only serde_json).
 
-Add a harness test that an Identity Response carrying a synthetic IMSI
-decodes through the live InformationElement path with its type and digits,
-and that neither Debug nor Serialize output carries the digits.
+Fork audit, panic safety: every index in the decoder is behind a length
+check (first() guard, len()==11 for a GUTI, len()==5 for a TMSI) and reads
+stay inside the buffer Type4LV already sized, so a malformed identity can
+no longer fail or panic where the empty struct could not. Compare:
+https://github.com/EFForg/pycrate-rs/compare/9e72e40bee9c3c09205ad871cf681628b443de7c...doublegate:pycrate-rs:77b1cc8236a6d4a7c0de571c9e550a58e13cb00a
+
+Harness tests, through the live InformationElement path, for both IE
+flavours (ID via Identity Response, EPSID via TAU Request old GUTI):
+every identity type decodes with the right type/digits/GUTI parts and
+neither Debug nor Serialize (of the identity or the whole message) renders
+digits, BCD octets, hex or the M-TMSI/TMSI; malformed IEs (length 0,
+reserved type, non-BCD, missing filler, truncated GUTI/TMSI) still decode
+the message and report is_well_formed() == false; and an exhaustive sweep
+of every type octet x length 0..=12 neither panics nor drops the message.
+Mutation-checked: a Debug leak and a removed GUTI bounds check each turn
+the tests red. All identities are synthetic (test PLMN 001/01).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- Cargo.lock                    |  2 +-
- lib/Cargo.toml                |  4 +++-
- lib/src/analysis/test_util.rs | 45 +++++++++++++++++++++++++++++++++++
- 3 files changed, 49 insertions(+), 2 deletions(-)
+ Cargo.lock                    |   2 +-
+ lib/Cargo.toml                |   4 +-
+ lib/src/analysis/test_util.rs | 206 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 210 insertions(+), 2 deletions(-)
 
 diff --git a/Cargo.lock b/Cargo.lock
 index c20d9bb..e5954b7 100644
@@ -66,55 +79,216 @@ index 0466724..4ef8a94 100644
  telcom-parser = { path = "../telcom-parser" }
  tokio = { version = "1.44.2", default-features = false, features = ["time", "rt", "macros", "fs", "io-util"] }
 diff --git a/lib/src/analysis/test_util.rs b/lib/src/analysis/test_util.rs
-index 1914284..24dbf23 100644
+index 1914284..cbbcd84 100644
 --- a/lib/src/analysis/test_util.rs
 +++ b/lib/src/analysis/test_util.rs
-@@ -200,6 +200,51 @@ mod tests {
+@@ -200,6 +200,212 @@ mod tests {
          );
      }
  
++    // ---- T-OR-110: mobile identities decoded through the live path ----
++    //
++    // Identity analyzers (T-OR-054) need to tell an IMSI/IMEI from a temporary
++    // identity, so the decoded IE must survive the GSMTAP -> InformationElement
++    // path for both IE flavours: `ID` (TS 24.008, carried here by an Identity
++    // Response) and `EPSID` (TS 24.301, carried by a TAU Request's old GUTI).
++    // All identities below are synthetic: test PLMN 001/01, the published example
++    // IMEI 490154203237518, and made-up IMEISV/TMSI/GUTI values.
++
++    /// Decode a plain EMM message through `InformationElement::try_from`,
++    /// returning the decode error instead of panicking.
++    fn decode_emm(message_type: u8, body: &[u8]) -> Result<pycrate_rs::nas::NASMessage, String> {
++        let mut payload = vec![0x07, message_type];
++        payload.extend_from_slice(body);
++        let ie = InformationElement::try_from(&GsmtapMessage {
++            header: GsmtapHeader::new(GsmtapType::LteNas(LteNasSubtype::Plain)),
++            payload,
++        })
++        .map_err(|e| format!("{e:?}"))?;
++        match ie {
++            InformationElement::LTE(lte) => match *lte {
++                LteInformationElement::NAS(msg) => Ok(msg),
++                _ => Err("not a NAS element".to_owned()),
++            },
++            _ => Err("not an LTE element".to_owned()),
++        }
++    }
++
++    /// An Identity Response (0x56) whose mobile identity (`ID`) is `value`.
++    fn identity_response_id(
++        value: &[u8],
++    ) -> Result<(pycrate_rs::nas::mobile_identity::MobileIdentity, String), String> {
++        use pycrate_rs::nas::{NASMessage, emm::EMMMessage};
++        let mut body = vec![value.len() as u8];
++        body.extend_from_slice(value);
++        match decode_emm(0x56, &body)? {
++            NASMessage::EMMMessage(EMMMessage::EMMIdentityResponse(r)) => {
++                let json = serde_json::to_string(&r).map_err(|e| e.to_string())?;
++                let out = format!("{json} {r:?}");
++                Ok((r.id.inner, out))
++            }
++            other => Err(format!("not an Identity Response: {other:?}")),
++        }
++    }
++
++    /// A TAU Request (0x48) whose old GUTI (`EPSID`) is `value`.
++    fn tau_request_epsid(
++        value: &[u8],
++    ) -> Result<(pycrate_rs::nas::mobile_identity::EpsMobileIdentity, String), String> {
++        use pycrate_rs::nas::{NASMessage, emm::EMMMessage};
++        // 0x61: EPS update type + NAS KSI half-octets, then the LV old GUTI.
++        let mut body = vec![0x61, value.len() as u8];
++        body.extend_from_slice(value);
++        match decode_emm(0x48, &body)? {
++            NASMessage::EMMMessage(EMMMessage::EMMTrackingAreaUpdateRequest(r)) => {
++                let json = serde_json::to_string(&r).map_err(|e| e.to_string())?;
++                let out = format!("{json} {r:?}");
++                Ok((r.old_guti.inner, out))
++            }
++            other => Err(format!("not a TAU Request: {other:?}")),
++        }
++    }
++
++    /// Everything that reaches logs, reports or JSON for one identity: its own
++    /// Debug and Serialize plus those of the whole decoded message.
++    fn rendered<T: std::fmt::Debug + serde::Serialize>(id: &T, message: &str) -> String {
++        format!("{id:?} {} {message}", serde_json::to_string(id).unwrap())
++    }
++
++    fn assert_not_leaked(rendered: &str, forbidden: &[&str]) {
++        for f in forbidden {
++            assert!(
++                !rendered.contains(f),
++                "identity value {f:?} leaked: {rendered}"
++            );
++        }
++    }
++
 +    #[test]
-+    fn emm_identity_response_exposes_the_decoded_identity() {
-+        // T-OR-110: an Identity Response's mobile identity must survive decoding
-+        // through the live InformationElement path, so identity analyzers
-+        // (T-OR-054) can tell an IMSI from a temporary identity. Synthetic test
-+        // IMSI 001010123456789 (test PLMN 001/01), never a real subscriber.
-+        use pycrate_rs::nas::NASMessage;
-+        use pycrate_rs::nas::emm::EMMMessage;
-+        use pycrate_rs::nas::mobile_identity::IdentityType;
-+        let ie = emm_message(0x56, &hex_literal_decode("080910101032547698"));
-+        let InformationElement::LTE(lte) = &ie else {
-+            panic!("expected an LTE information element");
-+        };
-+        let LteInformationElement::NAS(NASMessage::EMMMessage(EMMMessage::EMMIdentityResponse(
-+            resp,
-+        ))) = lte.as_ref()
-+        else {
-+            panic!("expected an EMM Identity Response");
-+        };
-+        assert_eq!(resp.id.inner.identity_type(), IdentityType::Imsi);
-+        assert!(resp.id.inner.is_well_formed());
++    fn each_identity_type_decodes_on_both_carriers_without_leaking() {
++        use pycrate_rs::nas::mobile_identity::IdentityType as T;
++        // (hex value, expected type, expected digits, values that must never render)
++        let id_cases: &[(&str, T, Option<&str>, &[&str])] = &[
++            (
++                "0910101032547698",
++                T::Imsi,
++                Some("001010123456789"),
++                &[
++                    "001010123456789",
++                    "123456789",
++                    "00101",
++                    "0910101032547698",
++                    "32547698",
++                    "[9, 16",
++                ],
++            ),
++            (
++                "4a09512430325781",
++                T::Imei,
++                Some("490154203237518"),
++                &["490154203237518", "4a0951", "[74, 9"],
++            ),
++            (
++                "3355140216325406f1",
++                T::Imeisv,
++                Some("3554120612345601"),
++                &["3554120612345601", "12345601", "335514"],
++            ),
++            (
++                "f4deadbeef",
++                T::Tmsi,
++                None,
++                &["deadbeef", "DEADBEEF", "3735928559"],
++            ),
++        ];
++        for (hex, ty, digits, forbidden) in id_cases {
++            let (id, msg) = identity_response_id(&hex_literal_decode(hex)).expect(hex);
++            assert_eq!(id.identity_type(), *ty, "{hex}");
++            assert!(id.is_well_formed(), "{hex}");
++            assert_eq!(id.digit_string().as_deref(), *digits, "{hex}");
++            let out = rendered(&id, &msg);
++            assert_not_leaked(&out, forbidden);
++            assert!(out.contains(&format!("{ty:?}")), "type missing: {out}");
++        }
++        // EPSID: TS 24.301 numbers type 011 as IMEI (TS 24.008 calls it IMEISV).
++        let eps_cases: &[(&str, T, Option<&str>, &[&str])] = &[
++            (
++                "0910101032547698",
++                T::Imsi,
++                Some("001010123456789"),
++                &["001010123456789", "123456789", "00101", "32547698"],
++            ),
++            (
++                "4b09512430325781",
++                T::Imei,
++                Some("490154203237518"),
++                &["490154203237518", "4b0951"],
++            ),
++            (
++                "f600f11080010112345678",
++                T::Guti,
++                None,
++                &["12345678", "305419896"],
++            ),
++        ];
++        for (hex, ty, digits, forbidden) in eps_cases {
++            let (id, msg) = tau_request_epsid(&hex_literal_decode(hex)).expect(hex);
++            assert_eq!(id.identity_type(), *ty, "{hex}");
++            assert!(id.is_well_formed(), "{hex}");
++            assert_eq!(id.digit_string().as_deref(), *digits, "{hex}");
++            assert_not_leaked(&rendered(&id, &msg), forbidden);
++        }
++        // the GUTI's network part is exposed (it names the network, not the UE)
++        let (guti, _) = tau_request_epsid(&hex_literal_decode("f600f11080010112345678")).unwrap();
++        let g = guti.guti().expect("GUTI");
 +        assert_eq!(
-+            resp.id.inner.digit_string().as_deref(),
-+            Some("001010123456789")
++            (g.mcc(), g.mnc(), g.mme_group_id(), g.mme_code()),
++            ("001", "01", 0x8001, 0x01)
 +        );
-+        // and neither Debug (of the identity or the whole information element)
-+        // nor Serialize (of the identity or the whole decoded NAS message) carries
-+        // the digits, while the identity type is still reported.
-+        for rendered in [
-+            format!("{:?}", resp.id.inner),
-+            format!("{ie:?}"),
-+            serde_json::to_string(&resp.id.inner).expect("serialize identity"),
-+            serde_json::to_string(resp).expect("serialize message"),
-+        ] {
-+            assert!(
-+                !rendered.contains("123456789"),
-+                "identity digits leaked: {rendered}"
-+            );
-+            assert!(
-+                rendered.contains("Imsi"),
-+                "identity type missing: {rendered}"
-+            );
++        assert_eq!(g.m_tmsi(), 0x1234_5678);
++    }
++
++    #[test]
++    fn malformed_mobile_identities_still_decode_the_message() {
++        // Before T-OR-110 these IEs were empty structs that could not fail; the
++        // decoder must keep that property so a malformed identity never drops
++        // the message (which would blind every analyzer that reads it).
++        let malformed: &[&[u8]] = &[
++            &[],                 // length 0
++            &[0x07],             // reserved type in both tables
++            &[0x09, 0x1a],       // IMSI with a non-BCD digit
++            &[0x01],             // IMSI, even digit count but no second octet
++            &[0x01, 0x10, 0x01], // IMSI, even count with no 1111 filler
++            &[0xf6, 0x13, 0x01], // truncated GUTI
++            &[0xf4, 0xde, 0xad], // truncated TMSI
++        ];
++        for v in malformed {
++            let (id, _) = identity_response_id(v).unwrap_or_else(|e| panic!("ID {v:02x?}: {e}"));
++            let (eps, _) = tau_request_epsid(v).unwrap_or_else(|e| panic!("EPSID {v:02x?}: {e}"));
++            assert!(!id.is_well_formed(), "ID {v:02x?} accepted");
++            assert!(!eps.is_well_formed(), "EPSID {v:02x?} accepted");
++        }
++    }
++
++    #[test]
++    fn no_mobile_identity_value_panics_or_loses_the_message() {
++        // Exhaustive over the identity-type octet and every length up to 12
++        // (GUTI is 11), with varying payload bytes: decoding must neither panic
++        // nor fail the surrounding message.
++        for first in 0..=255u8 {
++            for len in 0..=12usize {
++                let v: Vec<u8> = (0..len)
++                    .map(|i| {
++                        if i == 0 {
++                            first
++                        } else {
++                            (i as u8).wrapping_mul(37) ^ first
++                        }
++                    })
++                    .collect();
++                identity_response_id(&v).unwrap_or_else(|e| panic!("ID {v:02x?}: {e}"));
++                tau_request_epsid(&v).unwrap_or_else(|e| panic!("EPSID {v:02x?}: {e}"));
++            }
 +        }
 +    }
 +

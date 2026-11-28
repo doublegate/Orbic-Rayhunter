@@ -49,7 +49,7 @@ go-ahead. The stock UI is not to be opened in a browser until the OTA client is 
 | OTA block | applied & reboot-persistent (oma_dm/dmclient/mdm-daemon disabled) | T-OR-018 | reversible; undo manifest in backups/ |
 | Rayhunter on device | **our reproducible build installed & validated** (reboot-persistent, capturing; device-side SHA-256 verified at install) | T-OR-022, T-OR-036 | replaced upstream v0.13.0 on 2026-11-23 |
 | `orx` ops: doctor/backup/verify/install/uninstall/pull-logs/check/purge/rescue/alert | present (zero-dep, 136 tests, backup-gated) | T-OR-032..T-OR-036, T-OR-037 (check), T-OR-038 (pull-logs), T-OR-039, T-OR-040 (purge), T-OR-041 (rescue), T-OR-044 (alert status/test), T-OR-107 (alert set) | rescue is read-only (destructive `--apply` = T-OR-041b); retention policy (T-OR-040b) remains |
-| New analyzers | harness (0006, T-OR-051) + 3 NAS detectors landed: NAS Reject identity-forcing (0007, T-OR-052), auth failure/reject (0008, T-OR-053), null integrity EIA0 (0009, T-OR-055). **Off-device NAS-decodable tranche complete.** Remaining detectors: T-OR-054 (unblocked by T-OR-110, patch 0012), T-OR-056/057 (RRC vectors T-OR-112), T-OR-058 (ML1 plumbing), T-OR-059 (cell-id state) | T-OR-051..T-OR-064 | detectors ship OFF by default; enabling needs T-OR-061 on-device FP calibration |
+| New analyzers | harness (0006, T-OR-051) + 3 NAS detectors landed: NAS Reject identity-forcing (0007, T-OR-052), auth failure/reject (0008, T-OR-053), null integrity EIA0 (0009, T-OR-055). **Off-device NAS-decodable tranche complete.** Remaining detectors: T-OR-054 (unblocked by T-OR-110, patch 0012), T-OR-056/057 (RRC harness T-OR-112 landed; detectors next), T-OR-058 (ML1 plumbing), T-OR-059 (cell-id state) | T-OR-051..T-OR-064 | detectors ship OFF by default; enabling needs T-OR-061 on-device FP calibration |
 
 ## Metrics snapshot
 
@@ -121,7 +121,7 @@ is in progress** (user present):
   unblocks the RRC detectors T-OR-056/057 and the RRC half of T-OR-111.
 - DONE: T-OR-110 mobile-identity parsing (patch 0012): `EPSID`/`ID` decode in a pycrate-rs fork
   pinned by full commit (`doublegate/pycrate-rs@77b1cc8`, audited: no build script, unsafe, I/O or
-  new runtime deps); synthetic IMSI/IMEI vectors cross-checked against Python pycrate and
+  new runtime deps); EFF's public GUTI/M-TMSI/IMEISV test vectors plus synthetic IMSI/IMEI vectors cross-checked against Python pycrate and
   Wireshark. Unblocks T-OR-054. Upstreaming to EFForg/pycrate-rs is the maintainer's call.
 - Remaining: build T-OR-054 on T-OR-110; build T-OR-056/057 on the T-OR-112 harness; decide each detector's default
   on/off. NAS-detector calibration, T-OR-055 EIA0-path verification, and real-capture validation of
