@@ -27,3 +27,4 @@ null_integrity = true
 identity_disclosure = true
 rat_downgrade = true
 imsi_paging = true
+rrc_null_integrity = true
