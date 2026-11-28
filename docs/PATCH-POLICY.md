@@ -45,7 +45,29 @@ commit and fails if the series does not apply.
    upstream merged the equivalent, and note that in `CHANGELOG.md`.
 4. Commit the submodule move and the refreshed patches together as one change.
 
+## Dependency forks
+
+A fix that belongs in one of Rayhunter's dependencies (not in Rayhunter) goes to a fork of that
+dependency, and a patch repoints `Cargo.toml` at it. Rules:
+
+- Pin an exact commit with `rev = "<40-hex>"`. Cargo records no checksum for git dependencies, so
+  the full commit hash is the only integrity check; never pin a branch or a short hash.
+- Before pinning, audit the fork against the commit upstream had locked: only the intended
+  commits, no `build.rs`, proc-macros, `unsafe`, network/filesystem/process use, or new runtime
+  dependencies unless the change needs them. Record the result in the patch or PR description.
+- The pin is temporary. Once the change merges upstream, point back at the upstream repository.
+
+Current forks:
+
+| Dependency | Fork commit | Patch | Ticket | Upstream status |
+|---|---|---|---|---|
+| `pycrate-rs` | `doublegate/pycrate-rs@77b1cc8` (branch `mobile-identity`; upstream pin `9e72e40` plus EFF's README commit `9ca5f54` and the change) | 0012 | T-OR-110 | not yet submitted |
+
 ## Upstreaming
 
-`[UPSTREAM]` patches are submitted as PRs to EFForg/rayhunter following its CONTRIBUTING.md.
+`[UPSTREAM]` patches are submitted as PRs to EFForg/rayhunter (and dependency changes to the
+matching EFForg repository) following its CONTRIBUTING.md. That guide asks contributors to raise
+substantial features with the maintainers first, to keep a change under about 400 lines excluding
+tests, and, for AI-assisted work, to disclose it and to write the description and comments
+themselves. Submission is therefore done by the human maintainer of this project, not an agent.
 Once merged upstream and released, the patch is removed from the series at the next rebase.

@@ -56,11 +56,10 @@ curl -X POST http://192.168.1.1:8080/api/test-notification
       the real-capture scrubber is deferred to T-OR-061 (needs on-device captures)
 - [x] T-OR-052: NAS Reject identity-forcing analyzer (patch 0007, PR #20; stateless #9/#10)
 - [x] T-OR-053: authentication failure / reject analyzer (patch 0008, PR #21; stateless)
-- [ ] T-OR-054: own identity disclosure analyzer -- **BLOCKED on T-OR-110**. This `pycrate-rs`
-      leaves the mobile-identity structs (`EPSID`, `ID`) empty and `Type4LV` keeps only the length,
-      so IMSI-vs-IMEI-vs-GUTI is unreadable; a blind "any IdentityResponse" detector would be too
-      noisy to ship. Not a live blind spot -- upstream `imsi_requested` already flags the request
-      side. Build after T-OR-110, in the T-OR-061 device session.
+- [ ] T-OR-054: own identity disclosure analyzer -- **unblocked** by T-OR-110 (patch 0012):
+      `EPSID`/`ID` decode to identity type + digits/GUTI/TMSI. Next to build, against synthetic
+      vectors; real-capture validation needs an active SIM. Upstream `imsi_requested` already flags
+      the request side.
 - [x] T-OR-055: EIA0 null-integrity analyzer -- NAS half landed (patch 0009, `null_integrity`:
       NAS SMC EIA0 -> High). RRC-SMC-EIA0 and DRB-before-SMC ("security never activated") parts
       deferred to **T-OR-111** (need RRC/ASN.1 vectors in the harness).
@@ -71,11 +70,11 @@ curl -X POST http://192.168.1.1:8080/api/test-notification
 Acceptance criteria: each analyzer has its own version, config flag (default off), heuristics
 doc entry, and positive and negative golden vectors; timeouts use packet timestamps.
 
-> **T-OR-110 (enabling, do during the T-OR-061 device session):** hand-add EPS mobile-identity IE
-> parsing (type nibble + BCD digits, TS 24.301 9.9.3.12) to `EPSID`/`ID` in EFForg/pycrate-rs (or
-> fix its generator), bump the Cargo.lock pin, and validate against real DIAG captures. Unblocks
-> T-OR-054 and the identity-correlation part of T-OR-108; sharpens T-OR-056. Written just
-> before/during the device session so real captures validate it -- not built blind.
+> **T-OR-110 (enabling) -- landed as patch 0012.** Hand-written `mobile_identity.rs` in a
+> pycrate-rs fork (`doublegate/pycrate-rs@77b1cc8`), with the generator emitting type aliases.
+> The plan was to validate on real captures, but the built-in SIM is not activated, so no
+> identity exchange ever occurs on this unit. Validation instead: real GUTI/M-TMSI/IMEISV vectors
+> plus synthetic IMSI/IMEI vectors cross-checked against Python pycrate and Wireshark.
 
 Verification:
 
@@ -149,10 +148,10 @@ Verification:
 - [x] T-OR-113: `rayhunter-check --config <file>` loads a config's `[analyzers]` so archived QMDL
       can be re-scored with default-off detectors (patch 0010) -- the reproducible calibration path
 - [ ] T-OR-061: ask EFF whether Devilray profiles can be run against candidates 1-6
-- [ ] T-OR-110: write the `pycrate-rs` EPS mobile-identity parsing against the real DIAG captures
-      taken here (ground-truth IMSI/IMEI/GUTI bytes), then build T-OR-054 and the T-OR-108
-      identity-correlation on top. Done here, in the device session, because the parser needs real
-      data to validate and this is the only place that data exists.
+- [x] T-OR-110: `pycrate-rs` EPS mobile-identity parsing (patch 0012). Real IMSI/IMEI bytes do
+      not exist on this inactive SIM, so it was validated with real GUTI/M-TMSI/IMEISV vectors and
+      oracle-checked synthetic IMSI/IMEI vectors; re-check on an active SIM when one is available.
+- [ ] T-OR-054 and the T-OR-108 identity-correlation: build on T-OR-110.
 - [ ] T-OR-062: SIB reselection-parameter features (stretch)
 - [ ] T-OR-063: emergency-alert spoofing context (stretch)
 - [ ] T-OR-064: RRC Connection Reject DoS context (stretch)

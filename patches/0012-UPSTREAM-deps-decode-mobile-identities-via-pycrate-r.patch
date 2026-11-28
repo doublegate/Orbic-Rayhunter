@@ -1,0 +1,166 @@
+From c990c1830cdae50bd88f6006a027b1d6b7c6283c Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Fri, 27 Nov 2026 21:42:04 -0500
+Subject: [PATCH] [UPSTREAM] deps: decode mobile identities via pycrate-rs
+ (T-OR-110)
+
+pycrate-rs at the pinned upstream commit parses the EPS mobile identity
+(TS 24.301 9.9.3.12) and mobile identity (TS 24.008 10.5.1.4) IEs into
+empty structs, discarding the value octets, so no analyzer can tell an IMSI
+or IMEI from a GUTI/TMSI in an Identity Response, Attach Request, Security
+Mode Complete or TAU message. That blocks the identity-disclosure detector
+(T-OR-054).
+
+Point lib/ at a pycrate-rs fork commit that adds the decoding
+(doublegate/pycrate-rs@77b1cc8, branch mobile-identity): EpsMobileIdentity
+and MobileIdentity expose identity_type(), digit_string(), guti(), tmsi()
+and is_well_formed(), and never emit identity values from Debug/Serialize.
+The pin is temporary: switch back to EFForg/pycrate-rs once the change is
+upstreamed there.
+
+Add a harness test that an Identity Response carrying a synthetic IMSI
+decodes through the live InformationElement path with its type, digits and
+Debug redaction intact.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ Cargo.lock                    | 16 ++++++++--------
+ lib/Cargo.toml                |  4 +++-
+ lib/src/analysis/test_util.rs | 29 +++++++++++++++++++++++++++++
+ 3 files changed, 40 insertions(+), 9 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index c20d9bb..10941e7 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1824,7 +1824,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "cea14ef9355e3beab063703aa9dab15afd25f0667c341310c1e5274bb1d0da18"
+ dependencies = [
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -2975,7 +2975,7 @@ checksum = "e04d7f318608d35d4b61ddd75cbdaee86b023ebe2bd5a66ee0915f0bf93095a9"
+ dependencies = [
+  "hermit-abi 0.5.1",
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -3650,7 +3650,7 @@ version = "0.7.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "77e878c846a8abae00dd069496dbe8751b16ac1c3d6bd2a7283a938e8228f90d"
+ dependencies = [
+- "proc-macro-crate 3.4.0",
++ "proc-macro-crate 1.3.1",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.101",
+@@ -4445,7 +4445,7 @@ dependencies = [
+ [[package]]
+ name = "pycrate-rs"
+ version = "0.1.0"
+-source = "git+https://github.com/EFForg/pycrate-rs#9e72e40bee9c3c09205ad871cf681628b443de7c"
++source = "git+https://github.com/doublegate/pycrate-rs?rev=77b1cc8236a6d4a7c0de571c9e550a58e13cb00a#77b1cc8236a6d4a7c0de571c9e550a58e13cb00a"
+ dependencies = [
+  "clap",
+  "deku 0.18.1",
+@@ -4955,7 +4955,7 @@ dependencies = [
+  "errno",
+  "libc",
+  "linux-raw-sys 0.4.15",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -4968,7 +4968,7 @@ dependencies = [
+  "errno",
+  "libc",
+  "linux-raw-sys 0.9.4",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -6007,7 +6007,7 @@ dependencies = [
+  "getrandom 0.3.3",
+  "once_cell",
+  "rustix 1.0.7",
+- "windows-sys 0.59.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -6971,7 +6971,7 @@ version = "0.1.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
+ dependencies = [
+- "windows-sys 0.59.0",
++ "windows-sys 0.48.0",
+ ]
+ 
+ [[package]]
+diff --git a/lib/Cargo.toml b/lib/Cargo.toml
+index 0466724..4ef8a94 100644
+--- a/lib/Cargo.toml
++++ b/lib/Cargo.toml
+@@ -21,7 +21,9 @@ log = "0.4.20"
+ env_logger = { version = "0.11", default-features = false }
+ nix = { version = "0.29.0", features = ["feature"] }
+ pcap-file-tokio = "0.1.0"
+-pycrate-rs = { git = "https://github.com/EFForg/pycrate-rs" }
++# Fork carrying EPS mobile identity / mobile identity decoding (T-OR-110) until it
++# lands in EFForg/pycrate-rs; pinned to an exact commit.
++pycrate-rs = { git = "https://github.com/doublegate/pycrate-rs", rev = "77b1cc8236a6d4a7c0de571c9e550a58e13cb00a" }
+ thiserror = "1.0.50"
+ telcom-parser = { path = "../telcom-parser" }
+ tokio = { version = "1.44.2", default-features = false, features = ["time", "rt", "macros", "fs", "io-util"] }
+diff --git a/lib/src/analysis/test_util.rs b/lib/src/analysis/test_util.rs
+index 1914284..d78229b 100644
+--- a/lib/src/analysis/test_util.rs
++++ b/lib/src/analysis/test_util.rs
+@@ -200,6 +200,35 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn emm_identity_response_exposes_the_decoded_identity() {
++        // T-OR-110: an Identity Response's mobile identity must survive decoding
++        // through the live InformationElement path, so identity analyzers
++        // (T-OR-054) can tell an IMSI from a temporary identity. Synthetic test
++        // IMSI 001010123456789 (test PLMN 001/01), never a real subscriber.
++        use pycrate_rs::nas::NASMessage;
++        use pycrate_rs::nas::emm::EMMMessage;
++        use pycrate_rs::nas::mobile_identity::IdentityType;
++        let ie = emm_message(0x56, &hex_literal_decode("080910101032547698"));
++        let InformationElement::LTE(lte) = &ie else {
++            panic!("expected an LTE information element");
++        };
++        let LteInformationElement::NAS(NASMessage::EMMMessage(EMMMessage::EMMIdentityResponse(
++            resp,
++        ))) = lte.as_ref()
++        else {
++            panic!("expected an EMM Identity Response");
++        };
++        assert_eq!(resp.id.inner.identity_type(), IdentityType::Imsi);
++        assert!(resp.id.inner.is_well_formed());
++        assert_eq!(
++            resp.id.inner.digit_string().as_deref(),
++            Some("001010123456789")
++        );
++        // and the decoded IE never carries the digits into Debug output
++        assert!(!format!("{:?}", resp.id.inner).contains("123456789"));
++    }
++
+     #[test]
+     fn collect_events_pairs_each_event_with_its_packet_index() {
+         let mut analyzer = EveryElementAnalyzer;
+-- 
+2.56.1
+
