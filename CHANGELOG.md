@@ -94,8 +94,8 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   secret-safe re-open.
 - **Inter-RAT downgrade detector** (T-OR-057, `[UPSTREAM]` patch 0014): flags a network-directed
   move off LTE toward a legacy RAT -- a `MobilityFromEUTRACommand` CellChangeOrder or Handover to 2G/GERAN
-  (High), a Handover or e-CSFB to 3G/UTRA or CDMA2000 (Informational, NR/E-UTRA ignored), or an LTE
-  cell broadcasting CDMA2000 interworking via SIB8 (Low). Complements the broadcast-reselection analyzers. Off by default (`rat_downgrade`).
+  (High), a Handover to 3G/UTRA (Informational), a Handover or e-CSFB to CDMA2000 or a SIB8 CDMA2000
+  broadcast (Low); NR/E-UTRA ignored. Complements the broadcast-reselection analyzers. Off by default (`rat_downgrade`).
   Vectors are TS 36.331 PDUs encoded with Python pycrate and decoded through telcom_parser.
 - **Permanent-identity disclosure detector** (T-OR-054, `[UPSTREAM]` patch 0013): flags the UE
   disclosing a permanent identity over NAS -- an Identity Response carrying the IMSI (Medium) or the

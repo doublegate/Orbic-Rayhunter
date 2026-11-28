@@ -108,7 +108,7 @@ scripts/apply-patches.sh
       in-memory hash -- harness ready (T-OR-112); still needs the detector impl + the device IMSI
       (AT, T-OR-061) and a synthetic paging vector with a test identity
 - [x] T-OR-057: inter-RAT downgrade (patch 0014, `rat_downgrade`) -- `MobilityFromEUTRACommand`
-      CellChangeOrder/Handover to GERAN (High), Handover/e-CSFB to UTRA/CDMA2000 (Informational), NR/E-UTRA ignored, SIB8 broadcast (Low); vectors
+      CellChangeOrder/Handover to GERAN (High), Handover to UTRA (Informational), Handover/e-CSFB to CDMA2000 (Low), NR/E-UTRA ignored, SIB8 broadcast (Low); vectors
       pycrate-encoded + telcom_parser-decoded. Follow-up T-OR-115: `idleModeMobilityControlInfo` dedicated
       priorities + the per-MCC sunset policy table
 - [ ] T-OR-058: measurement plumbing (new `InformationElement` input for ML1 and RACH TA);

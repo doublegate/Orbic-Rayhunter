@@ -1,4 +1,4 @@
-From c716df54d342b5a2b49b118163517b7c09f59f7e Mon Sep 17 00:00:00 2001
+From fcd94de27cb9303cc94ab6b4ac5d46754f95a597 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 01:54:32 -0500
 Subject: [PATCH] [UPSTREAM] analysis: inter-RAT downgrade detector (T-OR-057)
@@ -8,32 +8,35 @@ toward a legacy/sunset RAT, complementing the broadcast-reselection
 analyzers (priority_2g_downgrade for SIB6/7, connection_redirect_downgrade
 for a Connection Release redirect).
 
-A MobilityFromEUTRACommand is classified by purpose and, for a Handover, by
-the decoded target RAT:
+Severity reflects how anomalous the target is, consistently across the
+active (MobilityFromEUTRACommand) and passive (SIB8) signals:
 - CellChangeOrder (always GERAN) or a Handover to GERAN -> High (a directed
-  2G downgrade).
-- A Handover or e-CSFB to 3G/UTRA or CDMA2000 -> Informational.
+  2G downgrade onto the weakest, most interceptable RAT).
+- A Handover to 3G/UTRA -> Informational (often legitimate where 3G runs).
+- A Handover or e-CSFB to CDMA2000, or an LTE cell broadcasting CDMA2000
+  interworking (SIB8) -> Low (CDMA2000 is decommissioned across the US; an
+  active command is never scored below the passive advert).
 - A Handover to NR (5G) or E-UTRA -> ignored (not a downgrade).
 The event message notes when cs-FallbackIndicator is set (usually a
 legitimate voice-call fallback), to aid calibration.
 
-An LTE cell broadcasting CDMA2000 interworking (SIB8) -> Low (anomalous
-where CDMA2000 is decommissioned; a per-MCC sunset policy to raise it is
-T-OR-115). SIB8 repeats on BCCH, so expect a Low event per repetition.
+SIB8 repeats on BCCH, so expect a Low event per repetition; per-recording
+dedup and SIB8 reselection-parameter inspection are tracked as T-OR-115
+with the per-MCC sunset policy table.
 
 Stateless; keys on the message/IE alone. Off by default pending per-market
 calibration. Test vectors are TS 36.331 PDUs encoded with the reference
 Python pycrate and decoded here through telcom_parser (two independent
-ASN.1 implementations): CellChangeOrder (r8/r9) and Handover to
-GERAN/UTRA/CDMA2000/NR, e-CSFB, a CS-fallback-marked handover, SIB8, a real
-SystemInformation without SIB8, a SIB1, and a benign reconfiguration.
+ASN.1 implementations), covering CellChangeOrder (r8/r9), Handover to
+GERAN/UTRA/CDMA2000/NR/E-UTRA, e-CSFB (plain and CS-fallback-marked), SIB8,
+a real SystemInformation without SIB8, a SIB1, and a benign reconfiguration.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  lib/src/analysis/analyzer.rs      |  34 ++-
  lib/src/analysis/mod.rs           |   1 +
- lib/src/analysis/rat_downgrade.rs | 356 ++++++++++++++++++++++++++++++
- 3 files changed, 390 insertions(+), 1 deletion(-)
+ lib/src/analysis/rat_downgrade.rs | 383 ++++++++++++++++++++++++++++++
+ 3 files changed, 417 insertions(+), 1 deletion(-)
  create mode 100644 lib/src/analysis/rat_downgrade.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -137,10 +140,10 @@ index 219122f..45b40ee 100644
  pub(crate) mod test_util;
 diff --git a/lib/src/analysis/rat_downgrade.rs b/lib/src/analysis/rat_downgrade.rs
 new file mode 100644
-index 0000000..19e9c6c
+index 0000000..cb4feb2
 --- /dev/null
 +++ b/lib/src/analysis/rat_downgrade.rs
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,383 @@
 +//! Flags network-directed moves off LTE toward a legacy or sunset radio access
 +//! technology -- the "push the UE down to a weaker RAT" step of a downgrade
 +//! attack, complementing the broadcast-reselection analyzers
@@ -194,14 +197,12 @@ index 0000000..19e9c6c
 +    Other,
 +}
 +
-+/// Name only the targets the Informational arm actually reports (3G/UTRA and
-+/// CDMA2000); GERAN is handled separately, and NR/E-UTRA never reach here.
++/// Name the CDMA2000 variants the Low arm reports; GERAN and UTRA are handled
++/// with their own literals, and NR/E-UTRA never reach here.
 +fn name_target_rat(target: u8) -> &'static str {
 +    match target {
-+        HandoverTargetRAT_Type::UTRA => "3G/UTRA",
-+        HandoverTargetRAT_Type::CDMA2000_1XRTT => "CDMA2000 1xRTT",
 +        HandoverTargetRAT_Type::CDMA2000_HRPD => "CDMA2000 HRPD",
-+        _ => "a legacy RAT",
++        _ => "CDMA2000 1xRTT",
 +    }
 +}
 +
@@ -232,29 +233,41 @@ index 0000000..19e9c6c
 +                    csfb_suffix(csfb)
 +                ),
 +            }),
-+            // 3G/UTRA and CDMA2000 handovers are lesser moves off LTE that can be
-+            // legitimate.
-+            HandoverTargetRAT_Type::UTRA
-+            | HandoverTargetRAT_Type::CDMA2000_1XRTT
-+            | HandoverTargetRAT_Type::CDMA2000_HRPD => Some(Event {
++            // A handover to 3G/UTRA is a lesser move off LTE that is often
++            // legitimate where 3G still runs.
++            HandoverTargetRAT_Type::UTRA => Some(Event {
 +                event_type: EventType::Informational,
 +                message: format!(
-+                    "Network commanded an inter-RAT handover off LTE to {} \
++                    "Network commanded an inter-RAT handover off LTE to 3G/UTRA \
 +                     (MobilityFromEUTRACommand Handover){}",
-+                    name_target_rat(target),
 +                    csfb_suffix(csfb)
 +                ),
 +            }),
++            // CDMA2000 is decommissioned across the US, so an active command onto
++            // it is as anomalous as the passive SIB8 advert -- Low, not below it.
++            HandoverTargetRAT_Type::CDMA2000_1XRTT | HandoverTargetRAT_Type::CDMA2000_HRPD => {
++                Some(Event {
++                    event_type: EventType::Low,
++                    message: format!(
++                        "Network commanded an inter-RAT handover off LTE to {} \
++                         (MobilityFromEUTRACommand Handover){}",
++                        name_target_rat(target),
++                        csfb_suffix(csfb)
++                    ),
++                })
++            }
 +            // NR (5G) and E-UTRA are not downgrades; any other (spare/unknown)
 +            // code is left alone rather than guessed at.
 +            HandoverTargetRAT_Type::NR | HandoverTargetRAT_Type::EUTRA => None,
 +            _ => None,
 +        },
 +        Purpose::ECsfb => Some(Event {
-+            event_type: EventType::Informational,
-+            message: "Network directed an e-CSFB to CDMA2000 (MobilityFromEUTRACommand) -- a \
-+                      fallback off LTE"
-+                .to_string(),
++            event_type: EventType::Low,
++            message: format!(
++                "Network directed an e-CSFB to CDMA2000 (MobilityFromEUTRACommand) -- a \
++                 fallback off LTE{}",
++                csfb_suffix(csfb)
++            ),
 +        }),
 +        Purpose::Other => None,
 +    }
@@ -383,6 +396,7 @@ index 0000000..19e9c6c
 +    const HANDOVER_GERAN: &str = "1800202000";
 +    const HANDOVER_UTRA: &str = "1800002000";
 +    const HANDOVER_NR: &str = "1800802000";
++    const HANDOVER_EUTRA: &str = "1800a02000";
 +    // r8 Handover -> CDMA2000 1xRTT (value 2), and GERAN with cs-FallbackIndicator set.
 +    const HANDOVER_CDMA: &str = "1800402000";
 +    const HANDOVER_GERAN_CSFB: &str = "1810202000";
@@ -391,6 +405,8 @@ index 0000000..19e9c6c
 +    // r9 CellChangeOrder -> GERAN, and r9 e-CSFB.
 +    const CELL_CHANGE_R9_GERAN: &str = "1842000050";
 +    const ECSFB_R9: &str = "184400";
++    // e-CSFB with cs-FallbackIndicator set (a compliant eNB marks genuine e-CSFB).
++    const ECSFB_R9_CSFB: &str = "185400";
 +    // BCCH-DL-SCH SystemInformation carrying SIB8.
 +    const SIB8_BCCH: &str = "001880";
 +    // A real BCCH-DL-SCH SystemInformation with SIBs but no SIB8 (the T-OR-112
@@ -425,6 +441,8 @@ index 0000000..19e9c6c
 +        assert_eq!(events.len(), 1);
 +        assert_eq!(events[0].1.event_type, EventType::High);
 +        assert!(events[0].1.message.contains("GERAN"));
++        // the plain (non-CSFB) command must not claim CS fallback.
++        assert!(!events[0].1.message.contains("CS fallback"));
 +    }
 +
 +    #[test]
@@ -442,11 +460,18 @@ index 0000000..19e9c6c
 +    }
 +
 +    #[test]
-+    fn handover_to_cdma2000_is_informational() {
++    fn handover_to_cdma2000_is_low() {
++        // Active command onto a decommissioned RAT: Low, matching the passive
++        // SIB8 advert (never below it).
 +        let events = run_dl(HANDOVER_CDMA);
 +        assert_eq!(events.len(), 1);
-+        assert_eq!(events[0].1.event_type, EventType::Informational);
++        assert_eq!(events[0].1.event_type, EventType::Low);
 +        assert!(events[0].1.message.contains("CDMA2000"));
++    }
++
++    #[test]
++    fn handover_to_eutra_is_ignored() {
++        assert!(run_dl(HANDOVER_EUTRA).is_empty());
 +    }
 +
 +    #[test]
@@ -466,11 +491,16 @@ index 0000000..19e9c6c
 +    }
 +
 +    #[test]
-+    fn ecsfb_is_informational() {
++    fn ecsfb_is_low() {
 +        let events = run_dl(ECSFB_R9);
 +        assert_eq!(events.len(), 1);
-+        assert_eq!(events[0].1.event_type, EventType::Informational);
++        assert_eq!(events[0].1.event_type, EventType::Low);
 +        assert!(events[0].1.message.contains("CDMA2000"));
++        assert!(!events[0].1.message.contains("CS fallback"));
++        // a genuine e-CSFB sets cs-FallbackIndicator; it is surfaced.
++        let marked = run_dl(ECSFB_R9_CSFB);
++        assert_eq!(marked.len(), 1);
++        assert!(marked[0].1.message.contains("CS fallback"));
 +    }
 +
 +    #[test]
