@@ -13,3 +13,4 @@
 0010-UPSTREAM-check-config-to-select-analyzers.patch
 0011-UPSTREAM-analysis-RRC-golden-vector-test-harness.patch
 0012-UPSTREAM-deps-decode-mobile-identities-via-pycrate-r.patch
+0013-UPSTREAM-analysis-permanent-identity-disclosure-dete.patch

@@ -1,0 +1,374 @@
+From 40f2a0b418364197adf99b141143f18ec96c66ed Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Sat, 28 Nov 2026 01:26:04 -0500
+Subject: [PATCH] [UPSTREAM] analysis: permanent-identity disclosure detector (T-OR-054)
+
+Upstream's imsi_requested analyzer watches the request side (the network
+asking for an identity, and the stateful request-without-auth sequence).
+This adds the response side: whether the UE actually surrendered a
+permanent identity, which is the disclosure that matters.
+
+IdentityDisclosureAnalyzer (default off) flags, keying on the message and
+the decoded identity type alone (never the digits, per the in-memory
+identity contract):
+- Identity Response carrying an IMSI -> Medium (the permanent subscriber
+  identity was sent in the clear; imsi_requested judges the home-network /
+  no-auth context that makes it an attack).
+- Identity Response carrying an IMEI/IMEISV -> High (a network rarely needs
+  the permanent device identity via the NAS identity procedure).
+- Attach Request using an IMSI as its EPS mobile identity instead of a GUTI
+  -> Low (what a CSS forces via an identity-wiping reject, but also a
+  legitimate first attach with no stored GUTI).
+
+Relies on the T-OR-110 mobile-identity decoding (patch 0012). Off by
+default pending per-network calibration: a UE with no stored GUTI discloses
+its IMSI on a genuine first attach. Tests cover each type and severity on
+both carriers, the GUTI/temporary non-firing cases, and the message never
+containing the digits.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ lib/src/analysis/analyzer.rs            |  42 ++++-
+ lib/src/analysis/identity_disclosure.rs | 221 ++++++++++++++++++++++++
+ lib/src/analysis/mod.rs                 |   1 +
+ 3 files changed, 259 insertions(+), 5 deletions(-)
+ create mode 100644 lib/src/analysis/identity_disclosure.rs
+
+diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
+index db87e20..ad4b0c4 100644
+--- a/lib/src/analysis/analyzer.rs
++++ b/lib/src/analysis/analyzer.rs
+@@ -13,11 +13,12 @@ use crate::util::RuntimeMetadata;
+ use super::{
+     auth_failure::AuthFailureAnalyzer,
+     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
+-    imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
+-    information_element::InformationElement, nas_null_cipher::NasNullCipherAnalyzer,
+-    nas_reject::NasRejectAnalyzer, no_nas_messages::NoNasMessagesAnalyzer,
+-    null_cipher::NullCipherAnalyzer, null_integrity::NullIntegrityAnalyzer,
+-    priority_2g_downgrade::LteSib6And7DowngradeAnalyzer, test_analyzer::TestAnalyzer,
++    identity_disclosure::IdentityDisclosureAnalyzer, imsi_requested::ImsiRequestedAnalyzer,
++    incomplete_sib::IncompleteSibAnalyzer, information_element::InformationElement,
++    nas_null_cipher::NasNullCipherAnalyzer, nas_reject::NasRejectAnalyzer,
++    no_nas_messages::NoNasMessagesAnalyzer, null_cipher::NullCipherAnalyzer,
++    null_integrity::NullIntegrityAnalyzer, priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
++    test_analyzer::TestAnalyzer,
+ };
+ 
+ /// A list of booleans which stores information about which analyzers are enabled
+@@ -37,6 +38,7 @@ pub struct AnalyzerConfig {
+     pub nas_reject_identity: bool,
+     pub auth_failure: bool,
+     pub null_integrity: bool,
++    pub identity_disclosure: bool,
+ }
+ 
+ impl Default for AnalyzerConfig {
+@@ -61,6 +63,9 @@ impl Default for AnalyzerConfig {
+             // Off by default: EIA0 is legitimate for an unauthenticated emergency
+             // call, so it needs per-network false-positive calibration.
+             null_integrity: false,
++            // Off by default: a UE with no stored GUTI discloses its IMSI on a
++            // genuine first attach, so the severity needs per-network calibration.
++            identity_disclosure: false,
+         }
+     }
+ }
+@@ -414,6 +419,10 @@ impl Harness {
+             harness.add_analyzer(Box::new(NullIntegrityAnalyzer))
+         }
+ 
++        if analyzer_config.identity_disclosure {
++            harness.add_analyzer(Box::new(IdentityDisclosureAnalyzer))
++        }
++
+         if analyzer_config.diagnostic_analyzer {
+             harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
+         }
+@@ -614,6 +623,7 @@ mod tests {
+         assert!(!config.nas_reject_identity);
+         assert!(!config.auth_failure);
+         assert!(!config.null_integrity);
++        assert!(!config.identity_disclosure);
+         // A config that sets an existing key keeps the rest at their defaults.
+         let config: AnalyzerConfig =
+             serde_json::from_value(json!({ "imsi_requested": true })).unwrap();
+@@ -621,6 +631,7 @@ mod tests {
+         assert!(!config.nas_reject_identity);
+         assert!(!config.auth_failure);
+         assert!(!config.null_integrity);
++        assert!(!config.identity_disclosure);
+     }
+ 
+     #[test]
+@@ -685,6 +696,27 @@ mod tests {
+         }));
+     }
+ 
++    #[test]
++    fn new_with_config_wires_identity_disclosure_only_when_enabled() {
++        let metadata = DeviceMetadata::default();
++        let expected = IdentityDisclosureAnalyzer.get_name().into_owned();
++        let has = |config: &AnalyzerConfig| {
++            Harness::new_with_config(config, &metadata)
++                .get_metadata()
++                .analyzers
++                .iter()
++                .any(|a| a.name == expected)
++        };
++        assert!(has(&AnalyzerConfig {
++            identity_disclosure: true,
++            ..Default::default()
++        }));
++        assert!(!has(&AnalyzerConfig {
++            identity_disclosure: false,
++            ..Default::default()
++        }));
++    }
++
+     #[test]
+     fn test_analysis_row_deserialize_old_format() {
+         let row: AnalysisRow = serde_json::from_value(json!({
+diff --git a/lib/src/analysis/identity_disclosure.rs b/lib/src/analysis/identity_disclosure.rs
+new file mode 100644
+index 0000000..c5aba7d
+--- /dev/null
++++ b/lib/src/analysis/identity_disclosure.rs
+@@ -0,0 +1,221 @@
++//! Flags the UE disclosing a permanent subscriber or device identity in the
++//! clear over NAS -- the other half of an IMSI-catcher's identification step.
++//!
++//! Upstream's `imsi_requested` analyzer watches the *request* side (the network
++//! sending an `Identity Request`, and the stateful request-without-auth
++//! sequence). This analyzer watches the *response* side: whether the UE
++//! actually surrendered a permanent identity, which is the disclosure that
++//! matters for the subscriber.
++//!
++//! - `Identity Response` carrying an **IMSI** (TS 24.301 5.4.4): the permanent
++//!   subscriber identity was sent in the clear. A legitimate network requests
++//!   the IMSI only when it has no valid GUTI/temporary identity for the UE;
++//!   an IMSI-catcher requests it precisely to identify the subscriber. Medium,
++//!   because the disclosure alone does not prove intent -- the stateful
++//!   `imsi_requested` analyzer judges the home-network/no-authentication
++//!   context that raises it to an attack signal.
++//! - `Identity Response` carrying an **IMEI/IMEISV**: the permanent *device*
++//!   identity. A network has almost no legitimate need to pull the IMEI through
++//!   the NAS identity procedure, so this is a stronger signal (High).
++//! - `Attach Request` whose EPS mobile identity is an **IMSI** rather than a
++//!   GUTI: the UE attached with its permanent identity. This is what a CSS
++//!   forces by rejecting an attach with an identity-wiping cause (see
++//!   `nas_reject`), but it is also how a UE with no valid GUTI attaches
++//!   legitimately, so it is Low on its own.
++//!
++//! Stateless: keys on the message and the identity *type* only. It never reads
++//! the identity digits -- per docs/ANALYZERS.md the decoded IMSI/IMEI value
++//! must never reach an `Event`, so the messages name the identity type alone.
++//! Off by default pending per-network calibration: a UE with no stored GUTI
++//! discloses its IMSI on a genuine first attach, and an inactive/unprovisioned
++//! SIM (which cannot complete authentication) can be made to re-disclose it.
++//!
++//! Scope: operates on the plain/decrypted NAS the Rayhunter DIAG pipeline
++//! delivers, matching `NASMessage::EMMMessage` directly, like the other NAS
++//! analyzers here.
++
++use std::borrow::Cow;
++
++use chrono::{DateTime, FixedOffset};
++use pycrate_rs::nas::NASMessage;
++use pycrate_rs::nas::emm::EMMMessage;
++use pycrate_rs::nas::mobile_identity::IdentityType;
++
++use super::analyzer::{Analyzer, Event, EventType};
++use super::information_element::{InformationElement, LteInformationElement};
++
++pub struct IdentityDisclosureAnalyzer;
++
++impl Analyzer for IdentityDisclosureAnalyzer {
++    fn get_name(&self) -> Cow<'_, str> {
++        Cow::from("Permanent identity disclosure")
++    }
++
++    fn get_description(&self) -> Cow<'_, str> {
++        Cow::from(
++            "Flags the UE disclosing a permanent identity over NAS: an Identity Response carrying \
++             the IMSI (Medium) or the IMEI/IMEISV device identity (High), or an Attach Request that \
++             uses the IMSI as its EPS mobile identity instead of a GUTI (Low). An IMSI-catcher \
++             requests the permanent identity to identify the subscriber; this analyzer confirms the \
++             UE surrendered it. It complements the request-side imsi_requested analyzer and keys on \
++             the message and identity type alone -- never the identity digits. A UE with no stored \
++             GUTI discloses its IMSI on a genuine first attach, so this is off by default pending \
++             per-network calibration.",
++        )
++    }
++
++    fn get_version(&self) -> u32 {
++        0
++    }
++
++    fn analyze_information_element(
++        &mut self,
++        ie: &InformationElement,
++        _packet_num: usize,
++        _timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        let InformationElement::LTE(lte) = ie else {
++            return None;
++        };
++        let LteInformationElement::NAS(NASMessage::EMMMessage(emm)) = lte.as_ref() else {
++            return None;
++        };
++        match emm {
++            EMMMessage::EMMIdentityResponse(resp) => match resp.id.inner.identity_type() {
++                IdentityType::Imsi => Some(Event {
++                    event_type: EventType::Medium,
++                    message: "Identity Response disclosed the IMSI (permanent subscriber identity)"
++                        .to_string(),
++                }),
++                IdentityType::Imei | IdentityType::Imeisv => Some(Event {
++                    event_type: EventType::High,
++                    message: "Identity Response disclosed the IMEI/IMEISV (permanent device \
++                              identity) -- a network rarely needs this via the NAS identity \
++                              procedure"
++                        .to_string(),
++                }),
++                _ => None,
++            },
++            EMMMessage::EMMAttachRequest(req) => {
++                if req.epsid.inner.identity_type() == IdentityType::Imsi {
++                    Some(Event {
++                        event_type: EventType::Low,
++                        message: "Attach Request used the IMSI as its EPS mobile identity instead \
++                                  of a GUTI"
++                            .to_string(),
++                    })
++                } else {
++                    None
++                }
++            }
++            _ => None,
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::test_util::{collect_events, emm_message, packet_time};
++
++    // EMM message type identifiers (TS 24.301 table 9.8.1).
++    const ATTACH_REQUEST: u8 = 65;
++    const IDENTITY_RESPONSE: u8 = 86;
++
++    // Mobile-identity IE values for the Identity Response (the LV length byte is
++    // added by `id_response`). Synthetic test identities only (test PLMN 001/01).
++    const IMSI: &str = "0910101032547698"; // type 001, 15 digits
++    const IMEISV: &str = "3355140216325406f1"; // 24.008 type 011, IMEISV
++    const GUTI_IE: &str = "f600f11080010112345678"; // type 110, must not flag
++
++    // Fully synthetic Attach Request bodies (after the 07/41 header), built with
++    // only the mandatory IEs -- EPS mobile identity, UE network capability
++    // (`02 e0e0`), ESM message container (`0003` + 3 bytes). Both carry the test
++    // PLMN 001/01 and synthetic values (no real carrier PLMN, GUTI or TAC); each
++    // round-trips exactly through the reference Python pycrate. They differ only
++    // in the EPS mobile identity: a synthetic GUTI vs. the test IMSI.
++    const GUTI_ATTACH: &str = "020bf600f1108001011234567802e0e00003010203";
++    const IMSI_ATTACH: &str = "0208091010103254769802e0e00003010203";
++
++    fn hex(s: &str) -> Vec<u8> {
++        (0..s.len())
++            .step_by(2)
++            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
++            .collect()
++    }
++
++    /// An Identity Response (0x56) whose mobile identity is the LV `value`.
++    fn id_response(value_hex: &str) -> Vec<(usize, Event)> {
++        let v = hex(value_hex);
++        let mut body = vec![v.len() as u8];
++        body.extend_from_slice(&v);
++        let mut analyzer = IdentityDisclosureAnalyzer;
++        collect_events(
++            &mut analyzer,
++            &[(emm_message(IDENTITY_RESPONSE, &body), packet_time(0))],
++        )
++    }
++
++    fn attach_request(body_hex: &str) -> Vec<(usize, Event)> {
++        let mut analyzer = IdentityDisclosureAnalyzer;
++        collect_events(
++            &mut analyzer,
++            &[(emm_message(ATTACH_REQUEST, &hex(body_hex)), packet_time(0))],
++        )
++    }
++
++    #[test]
++    fn identity_response_imsi_is_medium() {
++        let events = id_response(IMSI);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Medium);
++        assert!(events[0].1.message.contains("IMSI"));
++        // never the digits
++        assert!(!events[0].1.message.contains("001010123456789"));
++    }
++
++    #[test]
++    fn identity_response_imeisv_is_high() {
++        let events = id_response(IMEISV);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::High);
++        assert!(events[0].1.message.contains("IMEI"));
++    }
++
++    #[test]
++    fn identity_response_guti_is_ignored() {
++        // A temporary identity in an Identity Response is not a disclosure.
++        assert!(id_response(GUTI_IE).is_empty());
++    }
++
++    #[test]
++    fn attach_request_with_imsi_is_low() {
++        let events = attach_request(IMSI_ATTACH);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Low);
++        assert!(events[0].1.message.contains("IMSI"));
++    }
++
++    #[test]
++    fn attach_request_with_guti_is_ignored() {
++        // The common case: attaching with a GUTI must not flag.
++        assert!(attach_request(GUTI_ATTACH).is_empty());
++    }
++
++    #[test]
++    fn unrelated_emm_message_is_ignored() {
++        // An Authentication Reject (type 84) is EMM but not an identity message.
++        let mut analyzer = IdentityDisclosureAnalyzer;
++        assert!(
++            collect_events(&mut analyzer, &[(emm_message(84, &[]), packet_time(0))]).is_empty()
++        );
++    }
++
++    #[test]
++    fn non_lte_information_element_is_ignored() {
++        let mut analyzer = IdentityDisclosureAnalyzer;
++        assert!(
++            collect_events(&mut analyzer, &[(InformationElement::GSM, packet_time(0))]).is_empty()
++        );
++    }
++}
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index b23a60f..219122f 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -2,6 +2,7 @@ pub mod analyzer;
+ pub mod auth_failure;
+ pub mod connection_redirect_downgrade;
+ pub mod diagnostic;
++pub mod identity_disclosure;
+ pub mod imsi_requested;
+ pub mod incomplete_sib;
+ pub mod information_element;
+-- 
+2.56.1
+

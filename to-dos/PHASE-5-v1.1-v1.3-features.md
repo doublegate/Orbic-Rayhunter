@@ -56,10 +56,10 @@ curl -X POST http://192.168.1.1:8080/api/test-notification
       the real-capture scrubber is deferred to T-OR-061 (needs on-device captures)
 - [x] T-OR-052: NAS Reject identity-forcing analyzer (patch 0007, PR #20; stateless #9/#10)
 - [x] T-OR-053: authentication failure / reject analyzer (patch 0008, PR #21; stateless)
-- [ ] T-OR-054: own identity disclosure analyzer -- **unblocked** by T-OR-110 (patch 0012):
-      `EPSID`/`ID` decode to identity type + digits/GUTI/TMSI. Next to build, against synthetic
-      vectors; real-capture validation needs an active SIM. Upstream `imsi_requested` already flags
-      the request side.
+- [x] T-OR-054: own identity disclosure analyzer -- **landed** (patch 0013, `identity_disclosure`).
+      Identity Response IMSI (Medium) / IMEI-IMEISV (High), Attach Request IMSI-type EPS mobile
+      identity (Low); stateless, never emits the digits. Off by default pending calibration;
+      real-capture firing needs an active SIM. Upstream `imsi_requested` covers the request side.
 - [x] T-OR-055: EIA0 null-integrity analyzer -- NAS half landed (patch 0009, `null_integrity`:
       NAS SMC EIA0 -> High). RRC-SMC-EIA0 and DRB-before-SMC ("security never activated") parts
       deferred to **T-OR-111** (need RRC/ASN.1 vectors in the harness).
