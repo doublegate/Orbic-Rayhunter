@@ -115,7 +115,15 @@ release is part of T-OR-061.
 ## Field calibration (T-OR-061)
 
 New detectors ship off by default (`device/config/config.orbic.toml`) and are enabled only after
-their false-positive rate is measured on real carrier traffic:
+their false-positive rate is measured on real carrier traffic.
+
+> **This unit's SIM is not activated** ([DEVICE-PROFILE.md](DEVICE-PROFILE.md)): the modem hears
+> real cells but every attach is refused (EMM cause #7), so its captures are broadcast-only -- real
+> SIBs and paging, plus one Attach Request -> Attach Reject per boot, and never an authentication,
+> Security Mode Command or identity exchange. That calibrates the RRC detectors and gives a negative
+> baseline for `nas_reject_identity`, but `auth_failure` and `null_integrity` need an active SIM.
+
+The loop:
 
 1. **Capture normal use.** Install the build and let the device record on a real-carrier SIM for as
    long as is practical. The detectors do **not** need to be enabled on the device for the

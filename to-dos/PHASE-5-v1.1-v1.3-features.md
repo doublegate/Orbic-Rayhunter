@@ -139,9 +139,11 @@ Verification:
       all 3 detectors enabled on-device and live in the capture pipeline. Calibration tooling landed
       (`scripts/calib-run.sh` + `scripts/calib-snapshot.py`, from the daemon's analysis NDJSON).
       Reproducible offline baseline via `rayhunter-check --config scripts/calib-analyzers.toml`
-      (T-OR-113, patch 0010): 0 firings over ~614k messages of real Verizon traffic, every message
-      re-scored with the detectors enabled (5 Attach Rejects seen, all cause #7 -- correctly not
-      flagged). Soak continues to widen the sample.
+      (T-OR-113, patch 0010): 0 firings over ~614k messages, every message re-scored with the
+      detectors enabled. The built-in Verizon SIM is NOT activated, so this is broadcast-only
+      traffic: real SIBs/paging, but the only NAS is an Attach Request -> Attach Reject (#7) per
+      boot (correctly not flagged by `nas_reject_identity`). Calibrating `auth_failure` and
+      `null_integrity`, and verifying the T-OR-055 EIA0 path, need an active SIM.
 - [ ] T-OR-061: negative baselines (days of normal use on Verizon; AT&T and T-Mobile SIMs if
       available); false-positive rate per analyzer; choose severities; decide default on/off
 - [x] T-OR-113: `rayhunter-check --config <file>` loads a config's `[analyzers]` so archived QMDL
