@@ -61,8 +61,10 @@ interactive `orbic-shell` is the same exploit plus a terminal. Do not use `orbic
 writes `/bin/rootshell` and changes the USB composition.
 
 ```sh
-scripts/orbic-open-shell.py     # reads the mode-600 password file, nothing in argv
+scripts/orbic-open-shell.py     # reads ~/.claude-secrets/orbic-admin.txt (mode 600), nothing in argv
 ```
+
+Pass `--password-file PATH` to use a different mode-600 file.
 
 The upstream installer does the same injection but takes the password as an argument, so it
 appears in the host process list:
