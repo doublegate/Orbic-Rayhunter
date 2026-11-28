@@ -92,6 +92,12 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   self-tested `orbic-ui-read.py` login path; `--selftest` asserts the payload still matches
   upstream's exploit string. `docs/INSTALL.md` and `docs/BACKUP-AND-RECOVERY.md` now show it as the
   secret-safe re-open.
+- **ML1 measurement plumbing** (T-OR-058, `[UPSTREAM]` patch 0018): physical-layer serving/neighbor
+  cell measurements (PCI, EARFCN, RSRP) now reach analyzers through a new
+  `Analyzer::report_measurement` trait method (whose default delegates to `report_skipped_packet`,
+  so time-based analyzers keep ticking) and a harness dispatch of the `0xB17F`/`0xB180` ML1 log
+  bodies. Additive and backward-compatible (no public-enum change); carries no subscriber identity.
+  The measurement input a cell-identity-consistency analyzer (T-OR-059) consumes.
 - **RRC null integrity (EIA0) detector** (T-OR-111 part a, `[UPSTREAM]` patch 0016): flags an RRC
   configuration selecting the null integrity algorithm (EIA0 -> High) in a Security Mode Command or
   a handover reconfiguration (`securityConfigHO`), leaving access-stratum signalling unauthenticated -- the AS-layer counterpart to the NAS EIA0 that

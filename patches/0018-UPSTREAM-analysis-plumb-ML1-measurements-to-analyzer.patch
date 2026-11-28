@@ -1,0 +1,555 @@
+From 4701417c2f71a3fe370a57ffc6921bc1ddd2818c Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Sat, 28 Nov 2026 04:06:04 -0500
+Subject: [PATCH] [UPSTREAM] analysis: plumb ML1 measurements to analyzers
+ (T-OR-058)
+
+Physical-layer ML1 serving/neighbor cell measurements (PCI, EARFCN, RSRP)
+are decoded by the diag layer but never reached analyzers: they are not
+GSMTAP-convertible, so analyze_qmdl_message reported them as skipped packets.
+
+Add an analyzer-facing `Ml1Measurement` (serving cell / neighbor cells,
+decoupled from the on-wire deku structs, carrying no subscriber identity) with
+`from_log_body`, a new `Analyzer::report_measurement` trait method, a Harness
+fan-out, and an analyze_qmdl_message dispatch that surfaces the two ML1 log
+bodies (0xb17f serving, 0xb180 neighbor) before the GSMTAP path.
+
+report_measurement's default delegates to report_skipped_packet, so a
+time-based analyzer that does not care about measurements keeps advancing its
+clock automatically, and an analyzer that overrides it handles each ML1 packet
+exactly once (no double dispatch). The measurement types are #[non_exhaustive]
+with constructors, and report_measurement carries packet_num, so future
+additions (RACH TA, RSRQ/RSSI) are not breaking changes.
+
+This is additive and backward-compatible -- no public enum changes -- and is
+the measurement input a cell-identity-consistency analyzer (T-OR-059) consumes.
+Tests: from_log_body matches the diag ml1 vectors (pci/earfcn/rsrp), serving
+and neighbor logs reach report_measurement, an overriding analyzer handles a
+packet once, and ML1-only packets still make a time-based analyzer fire.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ lib/src/analysis/analyzer.rs    | 244 +++++++++++++++++++++++++++++++-
+ lib/src/analysis/measurement.rs | 166 ++++++++++++++++++++++
+ lib/src/analysis/mod.rs         |   1 +
+ lib/src/analysis/test_util.rs   |  19 +++
+ 4 files changed, 424 insertions(+), 6 deletions(-)
+ create mode 100644 lib/src/analysis/measurement.rs
+
+diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
+index 547f936..dfffd00 100644
+--- a/lib/src/analysis/analyzer.rs
++++ b/lib/src/analysis/analyzer.rs
+@@ -15,11 +15,12 @@ use super::{
+     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
+     identity_disclosure::IdentityDisclosureAnalyzer, imsi_paging::ImsiPagingAnalyzer,
+     imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
+-    information_element::InformationElement, nas_null_cipher::NasNullCipherAnalyzer,
+-    nas_reject::NasRejectAnalyzer, no_nas_messages::NoNasMessagesAnalyzer,
+-    null_cipher::NullCipherAnalyzer, null_integrity::NullIntegrityAnalyzer,
+-    priority_2g_downgrade::LteSib6And7DowngradeAnalyzer, rat_downgrade::RatDowngradeAnalyzer,
+-    rrc_null_integrity::RrcNullIntegrityAnalyzer, test_analyzer::TestAnalyzer,
++    information_element::InformationElement, measurement::Ml1Measurement,
++    nas_null_cipher::NasNullCipherAnalyzer, nas_reject::NasRejectAnalyzer,
++    no_nas_messages::NoNasMessagesAnalyzer, null_cipher::NullCipherAnalyzer,
++    null_integrity::NullIntegrityAnalyzer, priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
++    rat_downgrade::RatDowngradeAnalyzer, rrc_null_integrity::RrcNullIntegrityAnalyzer,
++    test_analyzer::TestAnalyzer,
+ };
+ 
+ /// A list of booleans which stores information about which analyzers are enabled
+@@ -185,6 +186,29 @@ pub trait Analyzer {
+         None
+     }
+ 
++    /// Reports a physical-layer (ML1) serving/neighbor cell measurement to the
++    /// analyzer: PCI, EARFCN and RSRP, carrying no subscriber identity. These do
++    /// not arrive as an [`InformationElement`] (they are not RRC/NAS), so an
++    /// analyzer that correlates cell identity or signal strength over a recording
++    /// consumes them here.
++    ///
++    /// The default implementation delegates to [`Self::report_skipped_packet`],
++    /// so a time-based analyzer that does not care about measurements keeps
++    /// advancing its clock on these packets with no extra work. An analyzer that
++    /// DOES override this handles the ML1 packet exactly once; if it also needs
++    /// the time tick it must call `self.report_skipped_packet(timestamp)` AND
++    /// return the single resulting event itself (this method returns only one
++    /// `Option<Event>`, so dropping that return value would silently drop a
++    /// time-based alert).
++    fn report_measurement(
++        &mut self,
++        _measurement: &Ml1Measurement,
++        _packet_num: usize,
++        timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        self.report_skipped_packet(timestamp)
++    }
++
+     /// Returns a version number for this Analyzer. This should only ever
+     /// increase in value, and do so whenever substantial changes are made to
+     /// the Analyzer's heuristic.
+@@ -529,6 +553,19 @@ impl Harness {
+         };
+         row.packet_timestamp = packet_timestamp;
+ 
++        // Physical-layer ML1 measurement logs are not GSMTAP-convertible, so they
++        // would otherwise be reported as skipped. Surface them to analyzers via
++        // report_measurement before the GSMTAP path consumes the message. An
++        // analyzer that does not override report_measurement advances its clock
++        // through the default (which delegates to report_skipped_packet).
++        if let (Message::Log { body, .. }, Some(timestamp)) = (&qmdl_message, packet_timestamp)
++            && let Some(measurement) = Ml1Measurement::from_log_body(body)
++        {
++            row.events = self.report_measurement(&measurement, timestamp);
++            self.assert_events_match_analyzers(&row.events);
++            return row;
++        }
++
+         let (timestamp, gsmtap_msg) = match gsmtap_parser::parse(qmdl_message) {
+             Ok(Some((timestamp, msg))) => (timestamp.to_datetime(), msg),
+             Ok(None) => {
+@@ -608,6 +645,26 @@ impl Harness {
+             .collect()
+     }
+ 
++    fn report_measurement(
++        &mut self,
++        measurement: &Ml1Measurement,
++        timestamp: DateTime<FixedOffset>,
++    ) -> Vec<Option<Event>> {
++        let packet_str = self.packet_suffix();
++        let packet_num = self.packet_num;
++        self.analyzers
++            .iter_mut()
++            .map(|analyzer| {
++                let mut maybe_event =
++                    analyzer.report_measurement(measurement, packet_num, timestamp);
++                if let Some(ref mut event) = maybe_event {
++                    event.message.push_str(&packet_str);
++                }
++                maybe_event
++            })
++            .collect()
++    }
++
+     fn packet_suffix(&self) -> String {
+         format!(" (packet {})", self.packet_num)
+     }
+@@ -615,7 +672,6 @@ impl Harness {
+     fn assert_events_match_analyzers(&self, events: &[Option<Event>]) {
+         assert_eq!(events.len(), self.analyzers.len());
+     }
+-
+     pub fn get_metadata(&self) -> ReportMetadata {
+         let mut analyzers = Vec::new();
+         for analyzer in &self.analyzers {
+@@ -640,6 +696,8 @@ impl Harness {
+ mod tests {
+     use super::*;
+     use serde_json::json;
++    use std::sync::Arc;
++    use std::sync::atomic::{AtomicUsize, Ordering};
+ 
+     #[test]
+     fn analyzer_config_missing_keys_default_off() {
+@@ -936,4 +994,178 @@ mod tests {
+         let event = row.events[0].as_ref().expect("expected a warning event");
+         assert!(event.message.ends_with(" (packet 3)"));
+     }
++
++    // A test analyzer that echoes an ML1 measurement back as an event, so a test
++    // can observe that report_measurement was dispatched with the decoded cell.
++    struct MeasurementEcho;
++    impl Analyzer for MeasurementEcho {
++        fn get_name(&self) -> Cow<'_, str> {
++            Cow::from("measurement echo")
++        }
++        fn get_description(&self) -> Cow<'_, str> {
++            Cow::from("test analyzer that echoes ML1 measurements")
++        }
++        fn get_version(&self) -> u32 {
++            0
++        }
++        fn analyze_information_element(
++            &mut self,
++            _ie: &InformationElement,
++            _packet_num: usize,
++            _timestamp: DateTime<FixedOffset>,
++        ) -> Option<Event> {
++            None
++        }
++        fn report_measurement(
++            &mut self,
++            measurement: &Ml1Measurement,
++            _packet_num: usize,
++            _timestamp: DateTime<FixedOffset>,
++        ) -> Option<Event> {
++            let message = match measurement {
++                Ml1Measurement::ServingCell(c) => format!("serving pci {}", c.pci),
++                Ml1Measurement::NeighborCells(n) => format!("{} neighbors", n.cells.len()),
++            };
++            Some(Event {
++                event_type: EventType::Informational,
++                message,
++            })
++        }
++    }
++
++    use crate::analysis::test_util::{ML1_NEIGHBOR_V4, ML1_SERVING_V4, ml1_log_body};
++
++    fn ml1_serving_body() -> LogBody {
++        ml1_log_body(0xb17f, ML1_SERVING_V4)
++    }
++
++    fn ml1_neighbor_body() -> LogBody {
++        ml1_log_body(0xb180, ML1_NEIGHBOR_V4)
++    }
++
++    #[test]
++    fn ml1_measurement_log_reaches_report_measurement() {
++        let mut harness = Harness::new();
++        harness.add_analyzer(Box::new(MeasurementEcho));
++
++        // An ML1 serving-cell log is dispatched to report_measurement with the
++        // decoded PCI, not reported as a skipped/unparsed packet.
++        let row = harness.analyze_qmdl_message(Ok(log_message(0, ml1_serving_body())));
++        let event = row.events[0]
++            .as_ref()
++            .expect("expected a measurement event");
++        assert!(
++            event.message.contains("serving pci 214"),
++            "{}",
++            event.message
++        );
++
++        // A non-ML1 log must NOT reach report_measurement.
++        let row =
++            harness.analyze_qmdl_message(Ok(log_message(0, LogBody::IpTraffic { msg: vec![] })));
++        assert!(row.events.iter().all(|event| event.is_none()));
++    }
++
++    #[test]
++    fn ml1_measurement_logs_still_advance_time_based_analyzers() {
++        // Before measurements were plumbed, an ML1 log reached time-based
++        // analyzers via report_skipped_packet. The measurement dispatch must not
++        // regress that: feeding only ML1 logs across the 5-minute threshold must
++        // still make NoNasMessagesAnalyzer fire (its clock was ticked).
++        let mut harness = Harness::new();
++        harness.add_analyzer(Box::new(NoNasMessagesAnalyzer::new()));
++
++        assert!(
++            harness
++                .analyze_qmdl_message(Ok(log_message(0, ml1_serving_body())))
++                .events
++                .iter()
++                .all(|e| e.is_none())
++        );
++        assert!(
++            harness
++                .analyze_qmdl_message(Ok(log_message(ALMOST_FIVE_MINUTES_TS, ml1_serving_body())))
++                .events
++                .iter()
++                .all(|e| e.is_none())
++        );
++        let row =
++            harness.analyze_qmdl_message(Ok(log_message(FIVE_MINUTES_TS, ml1_serving_body())));
++        assert!(
++            row.events[0].is_some(),
++            "NoNasMessagesAnalyzer should warn after 5 min of ML1-only packets"
++        );
++    }
++
++    #[test]
++    fn ml1_neighbor_log_reaches_report_measurement() {
++        let mut harness = Harness::new();
++        harness.add_analyzer(Box::new(MeasurementEcho));
++        let row = harness.analyze_qmdl_message(Ok(log_message(0, ml1_neighbor_body())));
++        let event = row.events[0]
++            .as_ref()
++            .expect("expected a measurement event");
++        assert!(event.message.contains("1 neighbors"), "{}", event.message);
++    }
++
++    // An analyzer that OVERRIDES report_measurement handles the ML1 packet once;
++    // the default report_skipped_packet delegation does not also fire for it.
++    struct CountingMeasurement {
++        measurements: Arc<AtomicUsize>,
++        skips: Arc<AtomicUsize>,
++    }
++    impl Analyzer for CountingMeasurement {
++        fn get_name(&self) -> Cow<'_, str> {
++            Cow::from("counting measurement")
++        }
++        fn get_description(&self) -> Cow<'_, str> {
++            Cow::from("test analyzer")
++        }
++        fn get_version(&self) -> u32 {
++            0
++        }
++        fn analyze_information_element(
++            &mut self,
++            _ie: &InformationElement,
++            _packet_num: usize,
++            _timestamp: DateTime<FixedOffset>,
++        ) -> Option<Event> {
++            None
++        }
++        fn report_skipped_packet(&mut self, _timestamp: DateTime<FixedOffset>) -> Option<Event> {
++            self.skips.fetch_add(1, Ordering::Relaxed);
++            None
++        }
++        fn report_measurement(
++            &mut self,
++            _measurement: &Ml1Measurement,
++            _packet_num: usize,
++            _timestamp: DateTime<FixedOffset>,
++        ) -> Option<Event> {
++            self.measurements.fetch_add(1, Ordering::Relaxed);
++            None
++        }
++    }
++
++    #[test]
++    fn overriding_report_measurement_handles_ml1_packet_once() {
++        let measurements = Arc::new(AtomicUsize::new(0));
++        let skips = Arc::new(AtomicUsize::new(0));
++        let mut harness = Harness::new();
++        harness.add_analyzer(Box::new(CountingMeasurement {
++            measurements: measurements.clone(),
++            skips: skips.clone(),
++        }));
++        harness.analyze_qmdl_message(Ok(log_message(0, ml1_serving_body())));
++        assert_eq!(
++            measurements.load(Ordering::Relaxed),
++            1,
++            "measurement delivered once"
++        );
++        assert_eq!(
++            skips.load(Ordering::Relaxed),
++            0,
++            "overrider is not also told the packet was skipped"
++        );
++    }
+ }
+diff --git a/lib/src/analysis/measurement.rs b/lib/src/analysis/measurement.rs
+new file mode 100644
+index 0000000..4b3d67c
+--- /dev/null
++++ b/lib/src/analysis/measurement.rs
+@@ -0,0 +1,166 @@
++//! Physical-layer (ML1) measurement input for analyzers.
++//!
++//! RRC and NAS reach an analyzer as an [`InformationElement`]; physical-layer
++//! serving/neighbor cell measurements (PCI, EARFCN, RSRP) do not -- they are
++//! Qualcomm DIAG ML1 logs that the GSMTAP path does not model. This type is the
++//! analyzer-facing view of those measurements, decoupled from the on-wire deku
++//! structs, delivered through [`Analyzer::report_measurement`].
++//!
++//! It carries only cell-identity and signal-strength fields, never a subscriber
++//! identity, so it does not widen the identity surface analyzers already see.
++//!
++//! Scope: `0xb17f`/`0xb180` are RRC_IDLE serving/neighbor cell-reselection logs
++//! and typically stop while the UE is RRC_CONNECTED (active data, handovers).
++//! So this input covers idle-mode cell identity; connected-mode serving PCI
++//! would come from other DIAG logs (e.g. `0xb192`/`0xb193`/`0xb197`), a future
++//! add tracked under T-OR-117.
++//!
++//! The measurement types are `#[non_exhaustive]`: ML1 carries more than is
++//! modelled here (RSRQ/RSSI, and RACH timing advance from other logs), so new
++//! variants and fields are expected and must not break a downstream `match`.
++//!
++//! [`InformationElement`]: super::information_element::InformationElement
++//! [`Analyzer::report_measurement`]: super::analyzer::Analyzer::report_measurement
++
++use crate::diag::diaglog::LogBody;
++
++/// The serving cell seen in an ML1 serving-cell measurement: its physical cell
++/// id, carrier, and measured reference-signal received power (dBm).
++#[derive(Debug, Clone, Copy, PartialEq)]
++#[non_exhaustive]
++pub struct Ml1ServingCell {
++    pub pci: u16,
++    pub earfcn: u32,
++    pub rsrp_dbm: f32,
++}
++
++/// One neighbor cell on the carrier of an ML1 neighbor measurement: its physical
++/// cell id and measured RSRP (dBm). The carrier EARFCN is on the parent
++/// [`Ml1Measurement::NeighborCells`].
++#[derive(Debug, Clone, Copy, PartialEq)]
++#[non_exhaustive]
++pub struct Ml1NeighborCell {
++    pub pci: u16,
++    pub rsrp_dbm: f32,
++}
++
++impl Ml1ServingCell {
++    /// Construct a serving-cell measurement. A constructor is provided because
++    /// the struct is `#[non_exhaustive]`, so callers in other crates (e.g. tests
++    /// of a custom [`Analyzer`]) cannot use a struct literal.
++    ///
++    /// [`Analyzer`]: super::analyzer::Analyzer
++    pub fn new(pci: u16, earfcn: u32, rsrp_dbm: f32) -> Self {
++        Self {
++            pci,
++            earfcn,
++            rsrp_dbm,
++        }
++    }
++}
++
++impl Ml1NeighborCell {
++    /// Construct a neighbor-cell measurement (see [`Ml1ServingCell::new`] for why
++    /// a constructor is provided).
++    pub fn new(pci: u16, rsrp_dbm: f32) -> Self {
++        Self { pci, rsrp_dbm }
++    }
++}
++
++/// Neighbor-cell measurements on one carrier (DIAG log `0xb180`). `earfcn` is
++/// kept on the report so it survives an empty `cells` list.
++#[derive(Debug, Clone, PartialEq)]
++#[non_exhaustive]
++pub struct Ml1NeighborCells {
++    pub earfcn: u32,
++    pub cells: Vec<Ml1NeighborCell>,
++}
++
++impl Ml1NeighborCells {
++    /// Construct a neighbor-cells report (see [`Ml1ServingCell::new`] for why a
++    /// constructor is provided).
++    pub fn new(earfcn: u32, cells: Vec<Ml1NeighborCell>) -> Self {
++        Self { earfcn, cells }
++    }
++}
++
++/// A decoded ML1 measurement report.
++#[derive(Debug, Clone, PartialEq)]
++#[non_exhaustive]
++pub enum Ml1Measurement {
++    /// Serving-cell measurement and evaluation (DIAG log `0xb17f`).
++    ServingCell(Ml1ServingCell),
++    /// Neighbor-cell measurements on one carrier (DIAG log `0xb180`).
++    NeighborCells(Ml1NeighborCells),
++}
++
++impl Ml1Measurement {
++    /// Build an [`Ml1Measurement`] from a decoded DIAG [`LogBody`], or `None`
++    /// when the log is not an ML1 serving/neighbor measurement.
++    pub fn from_log_body(body: &LogBody) -> Option<Self> {
++        match body {
++            LogBody::LteMl1ServingCellMeasurementAndEvaluation { data } => {
++                Some(Ml1Measurement::ServingCell(Ml1ServingCell {
++                    pci: data.get_pci(),
++                    earfcn: data.get_earfcn(),
++                    rsrp_dbm: data.get_meas_rsrp(),
++                }))
++            }
++            LogBody::LteMl1NeighborCellsMeasurements { data } => {
++                let cells = data
++                    .cells
++                    .iter()
++                    .map(|c| Ml1NeighborCell {
++                        pci: c.pci,
++                        rsrp_dbm: c.get_meas_rsrp(),
++                    })
++                    .collect();
++                Some(Ml1Measurement::NeighborCells(Ml1NeighborCells {
++                    earfcn: data.get_earfcn(),
++                    cells,
++                }))
++            }
++            _ => None,
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::test_util::{ML1_NEIGHBOR_V4, ML1_SERVING_V4, ml1_log_body};
++
++    #[test]
++    fn serving_cell_surfaces_pci_earfcn_rsrp() {
++        let m =
++            Ml1Measurement::from_log_body(&ml1_log_body(0xb17f, ML1_SERVING_V4)).expect("serving");
++        assert_eq!(
++            m,
++            Ml1Measurement::ServingCell(Ml1ServingCell {
++                pci: 214,
++                earfcn: 6300,
++                rsrp_dbm: -101.25,
++            })
++        );
++    }
++
++    #[test]
++    fn neighbor_cells_surface_carrier_and_each_cell() {
++        let m = Ml1Measurement::from_log_body(&ml1_log_body(0xb180, ML1_NEIGHBOR_V4))
++            .expect("neighbor");
++        assert_eq!(
++            m,
++            Ml1Measurement::NeighborCells(Ml1NeighborCells {
++                earfcn: 6300,
++                cells: vec![Ml1NeighborCell {
++                    pci: 131,
++                    rsrp_dbm: -102.125,
++                }],
++            })
++        );
++    }
++
++    // The non-ML1 (`_ => None`) path is exercised at the harness level by the
++    // measurement dispatch test in analyzer.rs, which feeds non-ML1 messages
++    // through analyze_qmdl_message.
++}
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index 67145de..cb9aed5 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -7,6 +7,7 @@ pub mod imsi_paging;
+ pub mod imsi_requested;
+ pub mod incomplete_sib;
+ pub mod information_element;
++pub mod measurement;
+ pub mod nas_null_cipher;
+ pub mod nas_reject;
+ pub mod no_nas_messages;
+diff --git a/lib/src/analysis/test_util.rs b/lib/src/analysis/test_util.rs
+index d20ab6c..5c73020 100644
+--- a/lib/src/analysis/test_util.rs
++++ b/lib/src/analysis/test_util.rs
+@@ -5,11 +5,30 @@
+ //! as analyzers land.
+ 
+ use chrono::{DateTime, FixedOffset, TimeDelta};
++use deku::DekuReader;
+ 
+ use crate::analysis::analyzer::{Analyzer, Event};
+ use crate::analysis::information_element::InformationElement;
++use crate::diag::diaglog::LogBody;
+ use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, LteNasSubtype, LteRrcSubtype};
+ 
++/// An ML1 serving-cell measurement-and-evaluation log body (`0xb17f`): PCI 214,
++/// EARFCN 6300, RSRP -101.25 dBm. Shared with the diag `ml1.rs` parser tests.
++pub(crate) const ML1_SERVING_V4: &str =
++    "040100009C18D60AECC44E00E2244E00FFFCE30FFED80A0047AD56021D310100A2624100";
++
++/// An ML1 neighbor-cells measurements log body (`0xb180`): one cell, PCI 131,
++/// EARFCN 6300, RSRP -102.125 dBm.
++pub(crate) const ML1_NEIGHBOR_V4: &str =
++    "040100009C1847008348E44DDEA44C00CAB4CC32B6D8420300000000FF773301FF77330122020100";
++
++/// Decode a DIAG [`LogBody`] from a hex payload under the given log id. The ML1
++/// log variants read a fixed-shape struct and ignore the header-length context.
++pub(crate) fn ml1_log_body(id: u16, payload_hex: &str) -> LogBody {
++    let (_, mut reader) = crate::test_util::unhexlify(payload_hex);
++    LogBody::from_reader_with_ctx(&mut reader, (id, 0u16)).expect("decodes")
++}
++
+ /// Decode a hex string into bytes, for synthetic PDU test vectors. Operates on
+ /// ASCII bytes so a stray non-hex or multi-byte character fails with a clear
+ /// message rather than a UTF-8 boundary panic. Shared by every analyzer's tests.
+-- 
+2.56.1
+
