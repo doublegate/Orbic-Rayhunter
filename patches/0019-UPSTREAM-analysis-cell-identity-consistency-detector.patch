@@ -1,36 +1,39 @@
-From 9838ea7a478cea71f4ea2ab53eb5101f5f62d177 Mon Sep 17 00:00:00 2001
+From f1d8b0af902029d70d31930c3c9dddfd0eb522df Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 04:53:40 -0500
 Subject: [PATCH] [UPSTREAM] analysis: cell identity consistency detector
  (T-OR-059)
 
-CellConsistencyAnalyzer (default off) flags a cell inconsistent with itself
-across one recording: the same E-UTRAN cell identity (from SIB1) advertised
-with two different tracking area codes, or -- correlating the most recent
-serving SIB1 with an ML1 serving measurement (T-OR-058) -- measured on two
-different physical cell ids. A real cell has one fixed (identity, TAC, PCI);
-a mismatch can be identifier cloning or rotation by a false base station.
+CellConsistencyAnalyzer (default off, `cell_consistency`) flags an E-UTRAN
+cell that advertises the same identity (ECGI) with two different tracking
+area codes within one recording -- possible identity cloning or tracking-area
+rotation by a false base station. Corroborative -> Low; fires once per cell.
 
-Corroborative and Low, off by default pending T-OR-061 calibration. State is
-per recording (first value seen per cell identity). The PCI half uses the
-RRC_IDLE ML1 serving log, so it covers idle-mode; connected-mode PCI is T-OR-117.
+The cell key is the full ECGI (primary PLMN MCC+MNC plus the 28-bit
+cellIdentity), because cellIdentity is only unique within a PLMN, so two PLMNs
+can legitimately share one cellIdentity (fixes cross-PLMN false positives).
+Identifiers are unpacked to integers (not hashed BitVec bytes) and the state
+maps are bounded (4096 cells) against untrusted SIB1 broadcast floods.
 
-Privacy: compares cell-identity / TAC bit patterns and PCI values but never
-puts any identifier in an event -- it reports only that a mismatch occurred.
+Scope is SIB1-only and sound without real-capture calibration. Correlating the
+ECGI with the serving PCI (an ML1 measurement) is deferred to T-OR-118: a
+serving measurement cannot be reliably attributed to a cell across idle-mode
+reselection without the per-SIB1 PCI or calibrated hysteresis, so doing it now
+would false-positive on routine mobility.
 
-Test vectors are SIB1 PDUs encoded with the reference Python pycrate and
-decoded through telcom_parser: same cell identity with two TACs (fires), with
-one TAC (quiet), two different cell identities (quiet); and ML1 serving
-measurements giving the same cell identity two PCIs (fires) / one PCI (quiet),
-plus a measurement before any SIB1 (quiet).
+Privacy: compares the ECGI and TAC but never puts either in an event.
+
+Test vectors are SIB1 PDUs encoded with pycrate and decoded through
+telcom_parser: same ECGI with two TACs (fires once), with one TAC (quiet),
+two different cellIdentities (quiet), and the same cellIdentity under two PLMNs
+(quiet -- legal).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
  lib/src/analysis/analyzer.rs         |  31 +++-
- lib/src/analysis/cell_consistency.rs | 240 +++++++++++++++++++++++++++
+ lib/src/analysis/cell_consistency.rs | 215 +++++++++++++++++++++++++++
  lib/src/analysis/mod.rs              |   1 +
- 3 files changed, 271 insertions(+), 1 deletion(-)
+ 3 files changed, 246 insertions(+), 1 deletion(-)
  create mode 100644 lib/src/analysis/cell_consistency.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -119,69 +122,91 @@ index dfffd00..e79709c 100644
          let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/cell_consistency.rs b/lib/src/analysis/cell_consistency.rs
 new file mode 100644
-index 0000000..80e6150
+index 0000000..5a371c1
 --- /dev/null
 +++ b/lib/src/analysis/cell_consistency.rs
-@@ -0,0 +1,240 @@
-+//! Flags a cell that is inconsistent with itself across one recording: the same
-+//! E-UTRAN cell identity advertised with two different tracking area codes, or
-+//! the same cell identity measured on two different physical cell ids (PCI).
+@@ -0,0 +1,215 @@
++//! Flags an E-UTRAN cell that advertises the same cell identity (ECGI) with two
++//! different tracking area codes within one recording.
 +//!
-+//! A real eNB cell has one fixed (cell identity, TAC, PCI). A false base station
-+//! that clones a legitimate cell's identity, or rotates identifiers to evade
-+//! correlation, produces a mismatch within a single recording. This is a weak
-+//! signal on its own -- it corroborates the NAS/RRC detectors on the same cell
-+//! -- so it is Low and off by default pending T-OR-061 calibration.
++//! A real eNB cell has one fixed (ECGI, TAC): the ECGI identifies the cell and
++//! the TAC the tracking area it belongs to. A false base station that clones a
++//! legitimate cell's ECGI, or rotates the TAC to evade correlation, advertises
++//! the same ECGI under two TACs in one recording. This corroborates the NAS/RRC
++//! detectors on the same cell rather than standing alone, so it is Low and off
++//! by default pending T-OR-061 calibration.
 +//!
-+//! State is per recording and holds only the FIRST value seen per cell identity;
-+//! it is reset implicitly by starting a new recording (a new analyzer instance).
++//! The cell key is the full ECGI -- primary PLMN (MCC+MNC) plus the 28-bit
++//! `cellIdentity` -- because `cellIdentity` is only unique within a PLMN, so two
++//! PLMNs (roaming, border areas) can legitimately share one `cellIdentity`.
 +//!
-+//! Inputs:
-+//! - RRC SIB1 (`BcchDlSch` -> `SystemInformationBlockType1`) gives the serving
-+//!   cell's `cellIdentity` and `trackingAreaCode`.
-+//! - ML1 serving measurements (via [`Analyzer::report_measurement`], T-OR-058)
-+//!   give the serving cell's PCI, correlated with the most recent SIB1's cell
-+//!   identity. These are RRC_IDLE logs, so the PCI check covers idle mode.
++//! State is per recording: the first TAC seen per ECGI, plus the set of ECGIs
++//! already reported (so each mismatch fires once, not on every repeated SIB1).
++//! Both are bounded so a long recording or a SIB1 flood of untrusted broadcast
++//! identities cannot exhaust memory on the device.
 +//!
-+//! Privacy: the analyzer compares cell-identity / TAC bit patterns and PCI
-+//! values but never puts any of them in an event; it reports only that a
-+//! mismatch occurred, not the identifiers involved.
++//! Scope: SIB1-only and sound without real-capture calibration. Correlating the
++//! ECGI with the serving PCI (an ML1 measurement) is deferred to T-OR-118: a
++//! serving measurement cannot be reliably attributed to a cell across idle-mode
++//! reselection without the per-SIB1 PCI or calibrated hysteresis.
++//!
++//! Privacy: compares the ECGI and TAC but never puts either in an event; it
++//! reports only that a mismatch occurred.
 +
 +use std::borrow::Cow;
-+use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
 +
 +use chrono::{DateTime, FixedOffset};
-+use telcom_parser::lte_rrc::{BCCH_DL_SCH_MessageType, BCCH_DL_SCH_MessageType_c1};
++use telcom_parser::lte_rrc::{
++    BCCH_DL_SCH_MessageType, BCCH_DL_SCH_MessageType_c1, MCC_MNC_Digit, PLMN_Identity,
++};
 +
 +use super::analyzer::{Analyzer, Event, EventType};
 +use super::information_element::{InformationElement, LteInformationElement};
-+use super::measurement::Ml1Measurement;
 +
-+/// A cell identity / tracking area code reduced to its raw bytes, for comparison
-+/// as a map key. Equal bit patterns yield equal bytes; the values are never
-+/// logged.
-+type Bits = Vec<u8>;
++/// Cap on distinct ECGIs tracked in one recording. Keys come from untrusted OTA
++/// SIB1 broadcasts (2^28 possible cell identities per PLMN), so the maps stop
++/// growing past this to bound memory on the MDM9207.
++const MAX_TRACKED_CELLS: usize = 4096;
++
++/// A cell's global identity for comparison: primary PLMN string (`mcc-mnc`) and
++/// the 28-bit E-UTRAN cell identity. Never logged.
++type Ecgi = (String, u32);
 +
 +#[derive(Default)]
 +pub struct CellConsistencyAnalyzer {
-+    /// cell identity -> the first tracking area code seen with it.
-+    tac_by_cell: HashMap<Bits, Bits>,
-+    /// cell identity -> the first serving PCI seen with it.
-+    pci_by_cell: HashMap<Bits, u16>,
-+    /// The cell identity of the most recently decoded serving SIB1, used to
-+    /// attribute a serving-cell PCI measurement to a cell identity.
-+    last_serving_cell: Option<Bits>,
++    /// ECGI -> the first tracking area code (16-bit) seen with it.
++    tac_by_ecgi: HashMap<Ecgi, u16>,
++    /// ECGIs already reported as inconsistent, so each fires once per recording.
++    reported: HashSet<Ecgi>,
++}
++
++/// Primary PLMN of a SIB1 as `mcc-mnc` digit string (matches the form the
++/// `imsi_requested` analyzer uses).
++fn plmn_to_str(plmn: &PLMN_Identity) -> String {
++    let mcc: String = plmn
++        .mcc
++        .as_ref()
++        .map(|mcc| mcc.0.iter().map(|MCC_MNC_Digit(n)| n.to_string()).collect())
++        .unwrap_or_default();
++    let mnc: String = plmn
++        .mnc
++        .0
++        .iter()
++        .map(|MCC_MNC_Digit(n)| n.to_string())
++        .collect();
++    format!("{mcc}-{mnc}")
 +}
 +
 +impl CellConsistencyAnalyzer {
-+    fn event(detail: &str) -> Event {
++    fn event() -> Event {
 +        Event {
 +            event_type: EventType::Low,
-+            message: format!(
-+                "A cell was inconsistent with itself within one recording: {detail}. A real cell \
-+                 has one fixed identity, tracking area and physical cell id; a mismatch can be \
-+                 identifier cloning or rotation by a false base station"
-+            ),
++            message: "A cell announced the same identity (ECGI) with two different tracking area \
++                      codes within one recording. A real cell has one fixed tracking area; a \
++                      mismatch can be identity cloning or tracking-area rotation by a false base \
++                      station"
++                .to_string(),
 +        }
 +    }
 +}
@@ -193,10 +218,11 @@ index 0000000..80e6150
 +
 +    fn get_description(&self) -> Cow<'_, str> {
 +        Cow::from(
-+            "Flags a cell inconsistent with itself across one recording: the same E-UTRAN cell \
-+             identity (from SIB1) advertised with two different tracking area codes, or measured \
-+             (idle-mode ML1) on two different physical cell ids. Corroborative and Low; off by \
-+             default pending calibration. Compares identifiers but never reports their values.",
++            "Flags an E-UTRAN cell that advertises the same identity (ECGI = PLMN + cellIdentity, \
++             from SIB1) with two different tracking area codes within one recording -- possible \
++             identity cloning or tracking-area rotation by a false base station. Corroborative and \
++             Low; fires once per cell; off by default pending calibration. Compares identifiers but \
++             never reports their values.",
 +        )
 +    }
 +
@@ -223,39 +249,34 @@ index 0000000..80e6150
 +            return None;
 +        };
 +        let cari = &sib1.cell_access_related_info;
-+        let cell = cari.cell_identity.0.clone().into_vec();
-+        let tac = cari.tracking_area_code.0.clone().into_vec();
-+        self.last_serving_cell = Some(cell.clone());
-+
-+        match self.tac_by_cell.get(&cell) {
-+            Some(seen) if *seen != tac => Some(Self::event(
-+                "the same cell identity was announced with two tracking area codes",
-+            )),
-+            Some(_) => None,
-+            None => {
-+                self.tac_by_cell.insert(cell, tac);
-+                None
-+            }
-+        }
-+    }
-+
-+    fn report_measurement(
-+        &mut self,
-+        measurement: &Ml1Measurement,
-+        _packet_num: usize,
-+        _timestamp: DateTime<FixedOffset>,
-+    ) -> Option<Event> {
-+        let Ml1Measurement::ServingCell(serving) = measurement else {
-+            return None;
++        // Fold the big-endian bit strings into integers (ECI is 28 bits, TAC 16).
++        let fold = |bits: &telcom_parser::lte_rrc::CellIdentity| -> u32 {
++            bits.0.iter().fold(0u32, |acc, b| (acc << 1) | (*b as u32))
 +        };
-+        let cell = self.last_serving_cell.clone()?;
-+        match self.pci_by_cell.get(&cell) {
-+            Some(seen) if *seen != serving.pci => Some(Self::event(
-+                "the same cell identity appeared on two physical cell ids",
-+            )),
++        let plmn = plmn_to_str(&cari.plmn_identity_list.0.first()?.plmn_identity);
++        let eci = fold(&cari.cell_identity);
++        let tac = cari
++            .tracking_area_code
++            .0
++            .iter()
++            .fold(0u32, |acc, b| (acc << 1) | (*b as u32)) as u16;
++        let ecgi: Ecgi = (plmn, eci);
++
++        if self.reported.contains(&ecgi) {
++            return None;
++        }
++        match self.tac_by_ecgi.get(&ecgi) {
++            Some(seen) if *seen != tac => {
++                self.reported.insert(ecgi);
++                Some(Self::event())
++            }
 +            Some(_) => None,
 +            None => {
-+                self.pci_by_cell.insert(cell, serving.pci);
++                // Bound memory: stop inserting new cells past the cap (already
++                // tracked cells still fire).
++                if self.tac_by_ecgi.len() < MAX_TRACKED_CELLS {
++                    self.tac_by_ecgi.insert(ecgi, tac);
++                }
 +                None
 +            }
 +        }
@@ -265,102 +286,59 @@ index 0000000..80e6150
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
-+    use crate::analysis::measurement::Ml1ServingCell;
 +    use crate::analysis::test_util::{bcch_dl_sch, hex, packet_time};
 +
-+    // SIB1 PDUs encoded with the reference Python pycrate (TS 36.331, PLMN
-+    // 001/01) and decoded through telcom_parser.
-+    // cellIdentity A=0x0ABCDEF; TAC 0x0001 / 0x0002. cellIdentity B=0x1234567.
-+    const SIB1_A_TAC1: &str = "4040040300010ABCDEF8000080108280";
-+    const SIB1_A_TAC2: &str = "4040040300020ABCDEF8000080108280";
-+    const SIB1_B_TAC1: &str = "40400403000112345678000080108280";
++    // SIB1 PDUs encoded with the reference Python pycrate (TS 36.331) and decoded
++    // through telcom_parser. cellIdentity A=0x0ABCDEF, B=0x1234567; TAC 1 / 2;
++    // the "C" vectors reuse cellIdentity A under a different PLMN (002/01).
++    const A_PLMN1_TAC1: &str = "4040040300010ABCDEF8000080108280";
++    const A_PLMN1_TAC2: &str = "4040040300020ABCDEF8000080108280";
++    const B_PLMN1_TAC1: &str = "40400403000112345678000080108280";
++    const A_PLMN2_TAC2: &str = "4040080300020ABCDEF8000080108280";
 +
 +    fn sib1(v: &str) -> InformationElement {
 +        bcch_dl_sch(&hex(v))
 +    }
 +
-+    fn serving(pci: u16) -> Ml1Measurement {
-+        Ml1Measurement::ServingCell(Ml1ServingCell::new(pci, 6300, -100.0))
++    fn run(a: &mut CellConsistencyAnalyzer, v: &str, p: usize) -> Option<Event> {
++        a.analyze_information_element(&sib1(v), p, packet_time(p as i64))
 +    }
 +
 +    #[test]
-+    fn same_cell_identity_two_tacs_fires() {
++    fn same_ecgi_two_tacs_fires_once() {
 +        let mut a = CellConsistencyAnalyzer::default();
-+        assert!(
-+            a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0))
-+                .is_none()
-+        );
-+        let ev = a
-+            .analyze_information_element(&sib1(SIB1_A_TAC2), 1, packet_time(1))
-+            .expect("mismatch fires");
++        assert!(run(&mut a, A_PLMN1_TAC1, 0).is_none());
++        let ev = run(&mut a, A_PLMN1_TAC2, 1).expect("mismatch fires");
 +        assert_eq!(ev.event_type, EventType::Low);
 +        assert!(ev.message.contains("tracking area"));
-+        // The event must not leak the identifiers.
++        // Does not leak identifiers.
 +        assert!(!ev.message.contains("0001") && !ev.message.contains("0002"));
++        // Fires once: a repeated mismatched SIB1 is quiet.
++        assert!(run(&mut a, A_PLMN1_TAC2, 2).is_none());
++        assert!(run(&mut a, A_PLMN1_TAC1, 3).is_none());
 +    }
 +
 +    #[test]
-+    fn same_cell_identity_same_tac_is_quiet() {
++    fn same_ecgi_same_tac_is_quiet() {
 +        let mut a = CellConsistencyAnalyzer::default();
-+        assert!(
-+            a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0))
-+                .is_none()
-+        );
-+        assert!(
-+            a.analyze_information_element(&sib1(SIB1_A_TAC1), 1, packet_time(1))
-+                .is_none()
-+        );
++        assert!(run(&mut a, A_PLMN1_TAC1, 0).is_none());
++        assert!(run(&mut a, A_PLMN1_TAC1, 1).is_none());
 +    }
 +
 +    #[test]
 +    fn different_cell_identities_are_quiet() {
 +        let mut a = CellConsistencyAnalyzer::default();
-+        assert!(
-+            a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0))
-+                .is_none()
-+        );
-+        assert!(
-+            a.analyze_information_element(&sib1(SIB1_B_TAC1), 1, packet_time(1))
-+                .is_none()
-+        );
++        assert!(run(&mut a, A_PLMN1_TAC1, 0).is_none());
++        assert!(run(&mut a, B_PLMN1_TAC1, 1).is_none());
 +    }
 +
 +    #[test]
-+    fn same_cell_identity_two_pcis_fires() {
++    fn same_cell_identity_different_plmn_is_quiet() {
++        // Same 28-bit cellIdentity under two PLMNs with different TACs is legal
++        // (cellIdentity is only unique within a PLMN) and must not fire.
 +        let mut a = CellConsistencyAnalyzer::default();
-+        a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0));
-+        assert!(
-+            a.report_measurement(&serving(214), 1, packet_time(1))
-+                .is_none()
-+        );
-+        let ev = a
-+            .report_measurement(&serving(425), 2, packet_time(2))
-+            .expect("pci mismatch fires");
-+        assert_eq!(ev.event_type, EventType::Low);
-+        assert!(ev.message.contains("physical cell id"));
-+    }
-+
-+    #[test]
-+    fn same_cell_identity_same_pci_is_quiet() {
-+        let mut a = CellConsistencyAnalyzer::default();
-+        a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0));
-+        assert!(
-+            a.report_measurement(&serving(214), 1, packet_time(1))
-+                .is_none()
-+        );
-+        assert!(
-+            a.report_measurement(&serving(214), 2, packet_time(2))
-+                .is_none()
-+        );
-+    }
-+
-+    #[test]
-+    fn a_measurement_before_any_sib1_is_quiet() {
-+        let mut a = CellConsistencyAnalyzer::default();
-+        assert!(
-+            a.report_measurement(&serving(214), 0, packet_time(0))
-+                .is_none()
-+        );
++        assert!(run(&mut a, A_PLMN1_TAC1, 0).is_none());
++        assert!(run(&mut a, A_PLMN2_TAC2, 1).is_none());
 +    }
 +}
 diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs

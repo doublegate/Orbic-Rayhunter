@@ -115,8 +115,9 @@ scripts/apply-patches.sh
   trait method + harness dispatch of 0xB17F/0xB180 (patch 0018; additive, no `InformationElement`/enum
   change; RACH TA plumbing + the RSRP/TA outlier feature deferred to T-OR-117);
 - [x] T-OR-059: recording-scoped cell identity consistency (patch 0019, `cell_consistency`:
-  SIB1 ECGI<->TAC + idle-mode ECGI<->PCI via T-OR-058; Low, off by default; connected-mode PCI /
-  GPS-stationary TAC / MCC mismatch / short-lived cells deferred to T-OR-118)
+  SIB1 ECGI<->TAC, keyed on full ECGI, fires once per cell, bounded state; Low, off by default;
+  ECGI<->PCI correlation / GPS-stationary TAC / MCC mismatch / short-lived cells deferred to T-OR-118
+  -- the PCI correlation needs real-capture calibration to avoid mobility false positives)
 - [ ] T-OR-060: recording-level identity-exposure summary in the report
 
 Acceptance criteria: as Sprint 5.2; T-OR-058 merged or agreed upstream before T-OR-059 depends on
