@@ -1,4 +1,4 @@
-From 4af8ae0c82ab941e1dc1c2053c10a94bc63f01cf Mon Sep 17 00:00:00 2001
+From 7eea730db5688e436529aadafe0e7b7780548466 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 05:34:54 -0500
 Subject: [PATCH] [UPSTREAM] check: recording-level permanent-identity-exposure
@@ -28,11 +28,11 @@ count); seeding and an Informational-severity case are covered.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- check/src/main.rs | 201 +++++++++++++++++++++++++++++++++++++++-------
- 1 file changed, 170 insertions(+), 31 deletions(-)
+ check/src/main.rs | 207 +++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 176 insertions(+), 31 deletions(-)
 
 diff --git a/check/src/main.rs b/check/src/main.rs
-index 94c3429..83b8065 100644
+index 94c3429..23a004f 100644
 --- a/check/src/main.rs
 +++ b/check/src/main.rs
 @@ -10,7 +10,10 @@ use rayhunter::{
@@ -63,18 +63,24 @@ index 94c3429..83b8065 100644
  #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
  struct Report {
      skipped_reasons: HashMap<String, u32>,
-@@ -64,6 +76,10 @@ struct Report {
+@@ -64,6 +76,16 @@ struct Report {
      total_messages: u32,
      warnings: u32,
      skipped: u32,
 +    /// Per-recording count of permanent-identity-exposure events, keyed by
-+    /// analyzer name (T-OR-060). Empty when nothing exposed an identity.
++    /// analyzer name (T-OR-060). `seed_identity_exposure` inserts a `0` entry for
++    /// every exposure analyzer ENABLED in the run, so a clean monitored recording
++    /// has explicit `0`s and the map is empty only when NO exposure analyzer was
++    /// active -- do not read `is_empty()` as "no exposure". The count sums
++    /// analyzer events and is NOT deduplicated per identity exchange (a suspicious
++    /// Identity Request + Response increments both the IMSI-requested and
++    /// identity-disclosure analyzers).
 +    #[serde(default)]
 +    identity_exposure: BTreeMap<String, u32>,
      file_path: String,
  }
  
-@@ -75,6 +91,18 @@ impl Report {
+@@ -75,6 +97,18 @@ impl Report {
          }
      }
  
@@ -93,7 +99,7 @@ index 94c3429..83b8065 100644
      fn process_row(&mut self, row: AnalysisRow, analyzer_names: &[String]) {
          self.total_messages += 1;
          if let Some(reason) = row.skipped_message_reason {
-@@ -103,6 +131,9 @@ impl Report {
+@@ -103,6 +137,9 @@ impl Report {
                      self.warnings += 1;
                  }
              }
@@ -103,7 +109,7 @@ index 94c3429..83b8065 100644
              self.events.push(EventWithTimestamp {
                  timestamp,
                  analyzer,
-@@ -122,36 +153,23 @@ impl Report {
+@@ -122,36 +159,23 @@ impl Report {
              "{}: {} messages analyzed, {} warnings, {} messages skipped",
              self.file_path, self.total_messages, self.warnings, self.skipped
          );
@@ -157,7 +163,7 @@ index 94c3429..83b8065 100644
      }
  }
  
-@@ -209,6 +227,7 @@ async fn analyze_pcap(
+@@ -209,6 +233,7 @@ async fn analyze_pcap(
          .await
          .expect("failed to read PCAP file");
      let mut report = Report::new(pcap_path);
@@ -165,7 +171,7 @@ index 94c3429..83b8065 100644
      while let Some(Ok(block)) = pcap_reader.next_block().await {
          let row = match block {
              Block::EnhancedPacket(packet) => harness.analyze_pcap_packet(packet),
-@@ -241,6 +260,7 @@ async fn analyze_qmdl(
+@@ -241,6 +266,7 @@ async fn analyze_qmdl(
          .await
          .expect("failed to open QmdlReader");
      let mut report = Report::new(qmdl_path);
@@ -173,7 +179,7 @@ index 94c3429..83b8065 100644
      while let Some(maybe_message) = qmdl_reader
          .get_next_message()
          .await
-@@ -377,3 +397,122 @@ async fn main() {
+@@ -377,3 +403,122 @@ async fn main() {
              .expect("failed to finish writing to JSON file");
      }
  }
