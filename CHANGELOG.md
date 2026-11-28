@@ -86,6 +86,12 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   `lte_rrc`/`bcch_dl_sch`/`dl_dcch` builders that wrap raw RRC octets through the live `lte_rrc`
   decode path, seeded with identifier-free vectors captured from the device, so the RRC analyzers
   (which upstream ships untested) can finally be unit-tested. Unblocks T-OR-056/T-OR-057.
+- **Mobile-identity decoding** (T-OR-110, `[UPSTREAM]` patch 0012): the EPS mobile identity
+  (TS 24.301 9.9.3.12) and mobile identity (TS 24.008 10.5.1.4) IEs now decode to an identity type
+  (IMSI, IMEI, IMEISV, GUTI, TMSI) plus digits / GUTI parts / TMSI, instead of empty structs that
+  discarded the value octets. Lives in a `pycrate-rs` fork pinned by full commit
+  (`doublegate/pycrate-rs@77b1cc8`) until upstreamed; `Debug`/`Serialize` never emit identity
+  values. Unblocks the identity-disclosure detector (T-OR-054).
 - **`rayhunter-check --config`** (T-OR-113, `[UPSTREAM]` patch 0010): select which analyzers run by
   loading a config's `[analyzers]` table, so offline re-analysis can exercise detectors that are off
   by default (it otherwise ran only the default-on set). This is the reproducible calibration path.
