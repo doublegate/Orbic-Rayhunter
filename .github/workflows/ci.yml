@@ -111,6 +111,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # orbic-open-shell.py --selftest reads upstream/installer/src/orbic_network.rs
+          # to confirm its injection payload has not drifted.
+          submodules: true
       # Every project script, derived from the globs so a new script is never skipped;
       # only the vendored reviewer scripts are excluded (checked at -S error below).
       - name: shellcheck (project scripts, full severity)
@@ -150,6 +153,7 @@ jobs:
           ruff format --check scripts/*.py
           python scripts/orbic-ui-read.py --selftest
           python scripts/orbic-shell.py --selftest
+          python scripts/orbic-open-shell.py --selftest
           python scripts/orbic-backup.py --selftest
           python scripts/orbic-ota-block.py --selftest
 

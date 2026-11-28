@@ -337,7 +337,15 @@ over the `:24` root shell instead. It is **read-only**: it reports free space on
 stored recordings (oldest first, with sizes), and fails closed if `/data` is not mounted or the
 store is missing. It does not delete anything.
 
-The `:24` root shell is not reboot-persistent. Re-open it before using `orx rescue`:
+The `:24` root shell is not reboot-persistent. Re-open it before using `orx rescue`. The
+secret-safe way reads the password from a mode-600 file, never argv (default
+`~/.claude-secrets/orbic-admin.txt`, or `--password-file PATH`):
+
+```sh
+scripts/orbic-open-shell.py
+```
+
+The upstream equivalent puts the password in the host process list:
 
 ```sh
 ./upstream/target/release/installer util orbic-start-telnet --admin-password "$(cat ~/.claude-secrets/orbic-admin.txt)"
