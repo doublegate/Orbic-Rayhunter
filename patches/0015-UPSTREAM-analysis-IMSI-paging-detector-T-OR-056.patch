@@ -1,4 +1,4 @@
-From 631d10b921c4ff93407c1dfcca9c2919b47b267d Mon Sep 17 00:00:00 2001
+From 6d3694bd2ead7a31855f1aec535cefc3654147f5 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 02:48:46 -0500
 Subject: [PATCH] [UPSTREAM] analysis: IMSI paging detector (T-OR-056)
@@ -7,26 +7,26 @@ ImsiPagingAnalyzer (default off) flags a PCCH paging record that addresses
 a UE by its permanent IMSI rather than a temporary S-TMSI. A false base
 station pages a known IMSI to confirm a target's presence without an attach.
 
-Reported Medium, not High: normal paging uses the S-TMSI, but MME
-failure/restoration can legitimately fall back to paging by IMSI (TS 23.401
-5.3.4.3, TS 23.007 20), and this analyzer cannot yet tell whether the paged
-IMSI is this device's -- that salted-hash compare (needing the device IMSI
-over AT) is follow-up T-OR-116 and would raise a confirmed self-page.
+Reported Medium, not High: a legitimate core can fall back to paging by IMSI
+during MME failure/restoration to recover UE context (TS 23.401 5.3.4.3,
+TS 23.007 20), and the analyzer cannot tell whether the paged IMSI is the
+monitoring device's own. The event reports how many of the PCCH records were
+IMSI records (helps triage an MME-restoration burst), and reads only the
+identity type, never the paged digits.
 
-Reads only the identity type, never the paged digits (the in-memory
-identity contract in docs/ANALYZERS.md). Stateless; off by default pending
-per-network calibration. Test vectors are PCCH Paging PDUs encoded with the
-reference Python pycrate and decoded through telcom_parser: paging by IMSI
-(fires Medium, digits never in the event), an IMSI record after an S-TMSI
-record (exercises the multi-record path), paging by S-TMSI (ignored), a
-Paging with no records (ignored), and a non-PCCH LTE message (ignored).
+Stateless; off by default pending per-network calibration. Test vectors are
+PCCH Paging PDUs encoded with the reference Python pycrate and decoded
+through telcom_parser: paging by IMSI (fires Medium, digits never in the
+event), an IMSI record after an S-TMSI record (multi-record path), paging by
+S-TMSI (ignored), a Paging with no records (ignored), and a non-PCCH LTE
+message (ignored).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  lib/src/analysis/analyzer.rs    |  44 +++++++--
- lib/src/analysis/imsi_paging.rs | 160 ++++++++++++++++++++++++++++++++
+ lib/src/analysis/imsi_paging.rs | 162 ++++++++++++++++++++++++++++++++
  lib/src/analysis/mod.rs         |   1 +
- 3 files changed, 199 insertions(+), 6 deletions(-)
+ 3 files changed, 201 insertions(+), 6 deletions(-)
  create mode 100644 lib/src/analysis/imsi_paging.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -128,10 +128,10 @@ index 3567f0f..0e6371a 100644
          let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/imsi_paging.rs b/lib/src/analysis/imsi_paging.rs
 new file mode 100644
-index 0000000..6f72b70
+index 0000000..36ff2c5
 --- /dev/null
 +++ b/lib/src/analysis/imsi_paging.rs
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,162 @@
 +//! Flags a network paging a UE by its permanent IMSI on PCCH.
 +//!
 +//! A network normally pages a UE by a temporary identity (an S-TMSI derived
@@ -139,19 +139,18 @@ index 0000000..6f72b70
 +//! known IMSI-catcher technique: the operator of a false base station that has
 +//! learned a target's IMSI pages that IMSI to make the target's UE respond,
 +//! confirming the subscriber's presence in the area without completing an
-+//! attach. A legitimate network has the subscriber's temporary identity and has
-+//! no reason to page by IMSI, so an IMSI paging record is a strong, low-false-
-+//! positive signal (High).
++//! attach.
 +//!
-+//! This analyzer flags *any* IMSI paging record. Narrowing it to "paged by
-+//! **our** IMSI" -- comparing the paged identity to the device's own IMSI held
-+//! only as a salted in-memory hash -- needs the device IMSI read over AT, which
-+//! is tracked separately (T-OR-116); it does not change that paging by IMSI at
-+//! all is anomalous.
++//! It is reported Medium rather than High because a legitimate core can fall
++//! back to paging by IMSI during MME failure/restoration to recover UE context
++//! (3GPP TS 23.401 5.3.4.3, TS 23.007 20), and this analyzer cannot tell whether
++//! the paged IMSI is the monitoring device's own. Comparing the paged identity
++//! to the device's IMSI (held only as a salted in-memory hash) would let a
++//! confirmed self-page be raised, but needs the device's own IMSI and is a
++//! future refinement.
 +//!
-+//! Privacy: the analyzer reads only the identity *type* (IMSI vs. a temporary
-+//! identity), never the paged digits, so no IMSI reaches the event, per the
-+//! in-memory identity contract in docs/ANALYZERS.md.
++//! Privacy: the analyzer reads only the identity type (IMSI vs. a temporary
++//! identity), never the paged digits, so no IMSI value reaches the event.
 +//!
 +//! Stateless; off by default pending per-network calibration.
 +
@@ -176,7 +175,7 @@ index 0000000..6f72b70
 +             temporary identity (S-TMSI). A false base station pages a known IMSI to confirm a \
 +             target's presence; the main benign cause is MME failure/restoration. Reads only the \
 +             identity type, never the paged digits. Reported Medium because it cannot yet tell \
-+             whether the paged IMSI is this device's (T-OR-116). Off by default pending calibration.",
++             whether the paged IMSI is this device's own. Off by default pending calibration.",
 +        )
 +    }
 +
@@ -199,16 +198,19 @@ index 0000000..6f72b70
 +        let PCCH_MessageType::C1(PCCH_MessageType_c1::Paging(paging)) = &pcch.message else {
 +            return None;
 +        };
-+        let records = paging.paging_record_list.as_ref()?;
-+        let paged_by_imsi = records
-+            .0
++        let records = &paging.paging_record_list.as_ref()?.0;
++        let imsi_count = records
 +            .iter()
-+            .any(|r| matches!(r.ue_identity, PagingUE_Identity::Imsi(_)));
-+        paged_by_imsi.then(|| Event {
++            .filter(|r| matches!(r.ue_identity, PagingUE_Identity::Imsi(_)))
++            .count();
++        (imsi_count > 0).then(|| Event {
 +            event_type: EventType::Medium,
-+            message: "A UE was paged by its permanent IMSI on PCCH -- normal paging uses a \
-+                      temporary identity (S-TMSI); a benign cause is MME restoration"
-+                .to_string(),
++            message: format!(
++                "{imsi_count} of {} PCCH paging records addressed a UE by its permanent IMSI -- \
++                 normal paging uses a temporary identity (S-TMSI); a benign cause is MME \
++                 restoration",
++                records.len()
++            ),
 +        })
 +    }
 +}
