@@ -113,8 +113,7 @@ scripts/apply-patches.sh
       priorities + the per-MCC sunset policy table
 - [x] T-OR-058: measurement plumbing -- `Ml1Measurement` + a default-no-op `report_measurement`
   trait method + harness dispatch of 0xB17F/0xB180 (patch 0018; additive, no `InformationElement`/enum
-  change; RACH TA a future add);
-      upstream issue opened before the patch
+  change; RACH TA plumbing + the RSRP/TA outlier feature deferred to T-OR-117);
 - [ ] T-OR-059: recording-scoped cell identity consistency
 - [ ] T-OR-060: recording-level identity-exposure summary in the report
 

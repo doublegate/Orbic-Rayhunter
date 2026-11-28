@@ -1,4 +1,4 @@
-From 185ed290058d5f20313e292bb20eddf689fd9de2 Mon Sep 17 00:00:00 2001
+From b9c52014467ab7c67980ee3b253e9bcdda6a061a Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 04:06:04 -0500
 Subject: [PATCH] [UPSTREAM] analysis: plumb ML1 measurements to analyzers
@@ -10,32 +10,33 @@ GSMTAP-convertible, so analyze_qmdl_message reported them as skipped packets.
 
 Add an analyzer-facing `Ml1Measurement` (serving cell / neighbor cells,
 decoupled from the on-wire deku structs, carrying no subscriber identity) with
-`from_log_body`, a new default-no-op `Analyzer::report_measurement` trait
-method (mirroring report_skipped_packet, so existing analyzers are unaffected),
-a Harness fan-out, and an analyze_qmdl_message dispatch that surfaces the two
-ML1 log bodies (0xb17f serving, 0xb180 neighbor) before the GSMTAP path.
+`from_log_body`, a new `Analyzer::report_measurement` trait method, a Harness
+fan-out, and an analyze_qmdl_message dispatch that surfaces the two ML1 log
+bodies (0xb17f serving, 0xb180 neighbor) before the GSMTAP path.
 
-The ML1 branch also calls report_skipped_packet so time-based analyzers keep
-advancing their clock on these packets as they did before the branch existed
-(the measurement event takes each analyzer's slot, falling back to the time
-tick) -- otherwise a time-based detector would silently stop seeing ML1 packets.
+report_measurement's default delegates to report_skipped_packet, so a
+time-based analyzer that does not care about measurements keeps advancing its
+clock automatically, and an analyzer that overrides it handles each ML1 packet
+exactly once (no double dispatch). The measurement types are #[non_exhaustive]
+with constructors, and report_measurement carries packet_num, so future
+additions (RACH TA, RSRQ/RSSI) are not breaking changes.
 
 This is additive and backward-compatible -- no public enum changes -- and is
 the measurement input a cell-identity-consistency analyzer (T-OR-059) consumes.
-Tests: from_log_body matches the diag ml1 vectors (pci/earfcn/rsrp), a
-serving-cell log reaches report_measurement while a non-ML1 log does not, and
-ML1-only packets still make a time-based analyzer fire at its threshold.
+Tests: from_log_body matches the diag ml1 vectors (pci/earfcn/rsrp), serving
+and neighbor logs reach report_measurement, an overriding analyzer handles a
+packet once, and ML1-only packets still make a time-based analyzer fire.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ---
- lib/src/analysis/analyzer.rs    | 264 +++++++++++++++++++++++++++++++-
- lib/src/analysis/measurement.rs | 138 +++++++++++++++++
+ lib/src/analysis/analyzer.rs    | 253 +++++++++++++++++++++++++++++++-
+ lib/src/analysis/measurement.rs | 161 ++++++++++++++++++++
  lib/src/analysis/mod.rs         |   1 +
- 3 files changed, 398 insertions(+), 5 deletions(-)
+ 3 files changed, 409 insertions(+), 6 deletions(-)
  create mode 100644 lib/src/analysis/measurement.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
-index 547f936..66e9c69 100644
+index 547f936..d27638a 100644
 --- a/lib/src/analysis/analyzer.rs
 +++ b/lib/src/analysis/analyzer.rs
 @@ -15,11 +15,12 @@ use super::{
@@ -56,7 +57,7 @@ index 547f936..66e9c69 100644
  };
  
  /// A list of booleans which stores information about which analyzers are enabled
-@@ -185,6 +186,25 @@ pub trait Analyzer {
+@@ -185,6 +186,26 @@ pub trait Analyzer {
          None
      }
  
@@ -64,46 +65,39 @@ index 547f936..66e9c69 100644
 +    /// analyzer: PCI, EARFCN and RSRP, carrying no subscriber identity. These do
 +    /// not arrive as an [`InformationElement`] (they are not RRC/NAS), so an
 +    /// analyzer that correlates cell identity or signal strength over a recording
-+    /// consumes them here. The default implementation does nothing.
++    /// consumes them here.
 +    ///
-+    /// Note: [`Self::report_skipped_packet`] is ALSO called on the same ML1
-+    /// packet (so time-based analyzers keep advancing their clock). An analyzer
-+    /// implementing both hooks therefore sees both callbacks for one ML1 packet;
-+    /// the harness keeps the higher-severity of the two events for that packet.
++    /// The default implementation delegates to [`Self::report_skipped_packet`],
++    /// so a time-based analyzer that does not care about measurements keeps
++    /// advancing its clock on these packets with no extra work. An analyzer that
++    /// DOES override this handles the ML1 packet exactly once; if it also needs
++    /// the time tick it should call `self.report_skipped_packet(timestamp)`.
 +    fn report_measurement(
 +        &mut self,
 +        _measurement: &Ml1Measurement,
 +        _packet_num: usize,
-+        _timestamp: DateTime<FixedOffset>,
++        timestamp: DateTime<FixedOffset>,
 +    ) -> Option<Event> {
-+        None
++        self.report_skipped_packet(timestamp)
 +    }
 +
      /// Returns a version number for this Analyzer. This should only ever
      /// increase in value, and do so whenever substantial changes are made to
      /// the Analyzer's heuristic.
-@@ -529,6 +549,28 @@ impl Harness {
+@@ -529,6 +550,20 @@ impl Harness {
          };
          row.packet_timestamp = packet_timestamp;
  
 +        // Physical-layer ML1 measurement logs are not GSMTAP-convertible, so they
 +        // would otherwise be reported as skipped. Surface them to analyzers via
-+        // report_measurement before the GSMTAP path consumes the message. Still
-+        // call report_skipped_packet so time-based analyzers keep advancing their
-+        // clock on these packets (as they did before this branch existed); the
-+        // measurement event takes each analyzer's slot, falling back to any
-+        // event the time tick produced.
++        // report_measurement before the GSMTAP path consumes the message. An
++        // analyzer that does not override report_measurement advances its clock
++        // through the default (which delegates to report_skipped_packet).
 +        if let (Message::Log { body, .. }, Some(timestamp)) = (&qmdl_message, packet_timestamp)
 +            && let Some(measurement) = Ml1Measurement::from_log_body(body)
 +        {
 +            let packet_num = self.packet_num;
-+            let ticked = self.report_skipped_packet(timestamp);
-+            let measured = self.report_measurement(&measurement, packet_num, timestamp);
-+            row.events = measured
-+                .into_iter()
-+                .zip(ticked)
-+                .map(|(m, t)| higher_severity(m, t))
-+                .collect();
++            row.events = self.report_measurement(&measurement, packet_num, timestamp);
 +            self.assert_events_match_analyzers(&row.events);
 +            return row;
 +        }
@@ -111,7 +105,7 @@ index 547f936..66e9c69 100644
          let (timestamp, gsmtap_msg) = match gsmtap_parser::parse(qmdl_message) {
              Ok(Some((timestamp, msg))) => (timestamp.to_datetime(), msg),
              Ok(None) => {
-@@ -608,6 +650,26 @@ impl Harness {
+@@ -608,6 +643,26 @@ impl Harness {
              .collect()
      }
  
@@ -138,28 +132,24 @@ index 547f936..66e9c69 100644
      fn packet_suffix(&self) -> String {
          format!(" (packet {})", self.packet_num)
      }
-@@ -615,7 +677,20 @@ impl Harness {
+@@ -615,7 +670,6 @@ impl Harness {
      fn assert_events_match_analyzers(&self, events: &[Option<Event>]) {
          assert_eq!(events.len(), self.analyzers.len());
      }
-+}
-+
-+/// When one analyzer produces an event from both `report_measurement` and
-+/// `report_skipped_packet` on the same ML1 packet, keep the higher-severity one
-+/// (the single per-analyzer event slot can hold only one). Ties keep the
-+/// measurement event `a`.
-+fn higher_severity(a: Option<Event>, b: Option<Event>) -> Option<Event> {
-+    match (a, b) {
-+        (Some(a), Some(b)) => Some(if b.event_type > a.event_type { b } else { a }),
-+        (a, b) => a.or(b),
-+    }
-+}
- 
-+impl Harness {
+-
      pub fn get_metadata(&self) -> ReportMetadata {
          let mut analyzers = Vec::new();
          for analyzer in &self.analyzers {
-@@ -936,4 +1011,183 @@ mod tests {
+@@ -640,6 +694,8 @@ impl Harness {
+ mod tests {
+     use super::*;
+     use serde_json::json;
++    use std::sync::Arc;
++    use std::sync::atomic::{AtomicUsize, Ordering};
+ 
+     #[test]
+     fn analyzer_config_missing_keys_default_off() {
+@@ -936,4 +992,189 @@ mod tests {
          let event = row.events[0].as_ref().expect("expected a warning event");
          assert!(event.message.ends_with(" (packet 3)"));
      }
@@ -288,13 +278,15 @@ index 547f936..66e9c69 100644
 +        assert!(event.message.contains("1 neighbors"), "{}", event.message);
 +    }
 +
-+    // When one analyzer returns an event from both report_skipped_packet and
-+    // report_measurement on an ML1 packet, the harness must keep the
-+    // higher-severity one.
-+    struct TimeHighMeasLow;
-+    impl Analyzer for TimeHighMeasLow {
++    // An analyzer that OVERRIDES report_measurement handles the ML1 packet once;
++    // the default report_skipped_packet delegation does not also fire for it.
++    struct CountingMeasurement {
++        measurements: Arc<AtomicUsize>,
++        skips: Arc<AtomicUsize>,
++    }
++    impl Analyzer for CountingMeasurement {
 +        fn get_name(&self) -> Cow<'_, str> {
-+            Cow::from("time-high meas-low")
++            Cow::from("counting measurement")
 +        }
 +        fn get_description(&self) -> Cow<'_, str> {
 +            Cow::from("test analyzer")
@@ -311,10 +303,8 @@ index 547f936..66e9c69 100644
 +            None
 +        }
 +        fn report_skipped_packet(&mut self, _timestamp: DateTime<FixedOffset>) -> Option<Event> {
-+            Some(Event {
-+                event_type: EventType::High,
-+                message: "from skipped".to_string(),
-+            })
++            self.skips.fetch_add(1, Ordering::Relaxed);
++            None
 +        }
 +        fn report_measurement(
 +            &mut self,
@@ -322,33 +312,39 @@ index 547f936..66e9c69 100644
 +            _packet_num: usize,
 +            _timestamp: DateTime<FixedOffset>,
 +        ) -> Option<Event> {
-+            Some(Event {
-+                event_type: EventType::Low,
-+                message: "from measurement".to_string(),
-+            })
++            self.measurements.fetch_add(1, Ordering::Relaxed);
++            None
 +        }
 +    }
 +
 +    #[test]
-+    fn ml1_dispatch_keeps_higher_severity_event() {
++    fn overriding_report_measurement_handles_ml1_packet_once() {
++        let measurements = Arc::new(AtomicUsize::new(0));
++        let skips = Arc::new(AtomicUsize::new(0));
 +        let mut harness = Harness::new();
-+        harness.add_analyzer(Box::new(TimeHighMeasLow));
-+        let row = harness.analyze_qmdl_message(Ok(log_message(0, ml1_serving_body())));
-+        let event = row.events[0].as_ref().expect("an event");
-+        assert_eq!(event.event_type, EventType::High);
-+        assert!(
-+            event.message.starts_with("from skipped"),
-+            "{}",
-+            event.message
++        harness.add_analyzer(Box::new(CountingMeasurement {
++            measurements: measurements.clone(),
++            skips: skips.clone(),
++        }));
++        harness.analyze_qmdl_message(Ok(log_message(0, ml1_serving_body())));
++        assert_eq!(
++            measurements.load(Ordering::Relaxed),
++            1,
++            "measurement delivered once"
++        );
++        assert_eq!(
++            skips.load(Ordering::Relaxed),
++            0,
++            "overrider is not also told the packet was skipped"
 +        );
 +    }
  }
 diff --git a/lib/src/analysis/measurement.rs b/lib/src/analysis/measurement.rs
 new file mode 100644
-index 0000000..926fafe
+index 0000000..359beea
 --- /dev/null
 +++ b/lib/src/analysis/measurement.rs
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,161 @@
 +//! Physical-layer (ML1) measurement input for analyzers.
 +//!
 +//! RRC and NAS reach an analyzer as an [`InformationElement`]; physical-layer
@@ -387,6 +383,29 @@ index 0000000..926fafe
 +pub struct Ml1NeighborCell {
 +    pub pci: u16,
 +    pub rsrp_dbm: f32,
++}
++
++impl Ml1ServingCell {
++    /// Construct a serving-cell measurement. A constructor is provided because
++    /// the struct is `#[non_exhaustive]`, so callers in other crates (e.g. tests
++    /// of a custom [`Analyzer`]) cannot use a struct literal.
++    ///
++    /// [`Analyzer`]: super::analyzer::Analyzer
++    pub fn new(pci: u16, earfcn: u32, rsrp_dbm: f32) -> Self {
++        Self {
++            pci,
++            earfcn,
++            rsrp_dbm,
++        }
++    }
++}
++
++impl Ml1NeighborCell {
++    /// Construct a neighbor-cell measurement (see [`Ml1ServingCell::new`] for why
++    /// a constructor is provided).
++    pub fn new(pci: u16, rsrp_dbm: f32) -> Self {
++        Self { pci, rsrp_dbm }
++    }
 +}
 +
 +/// A decoded ML1 measurement report.
