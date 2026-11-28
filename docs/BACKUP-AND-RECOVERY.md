@@ -61,6 +61,13 @@ interactive `orbic-shell` is the same exploit plus a terminal. Do not use `orbic
 writes `/bin/rootshell` and changes the USB composition.
 
 ```sh
+scripts/orbic-open-shell.py     # reads the mode-600 password file, nothing in argv
+```
+
+The upstream installer does the same injection but takes the password as an argument, so it
+appears in the host process list:
+
+```sh
 read -rs ORX_ADMIN_PW            # bash; fish: read -s ORX_ADMIN_PW
 ./installer util orbic-start-telnet --admin-password "$ORX_ADMIN_PW"   # or: orbic-shell
 unset ORX_ADMIN_PW

@@ -86,6 +86,12 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   `lte_rrc`/`bcch_dl_sch`/`dl_dcch` builders that wrap raw RRC octets through the live `lte_rrc`
   decode path, seeded with identifier-free vectors captured from the device, so the RRC analyzers
   (which upstream ships untested) can finally be unit-tested. Unblocks T-OR-056/T-OR-057.
+- **`scripts/orbic-open-shell.py`** (T-OR-114): re-opens the non-persistent `:24` root shell after
+  a reboot without the admin password in argv. It runs the same `SetRemoteAccessCfg` injection as
+  upstream's `orbic-start-telnet` but reads the password from the mode-600 file through the
+  self-tested `orbic-ui-read.py` login path; `--selftest` asserts the payload still matches
+  upstream's exploit string. `docs/INSTALL.md` and `docs/BACKUP-AND-RECOVERY.md` now show it as the
+  secret-safe re-open.
 - **Mobile-identity decoding** (T-OR-110, `[UPSTREAM]` patch 0012): the EPS mobile identity
   (TS 24.301 9.9.3.12) and mobile identity (TS 24.008 10.5.1.4) IEs now decode to an identity type
   (IMSI, IMEI, IMEISV, GUTI, TMSI) plus digits / GUTI parts / TMSI, instead of empty structs that
