@@ -45,6 +45,7 @@ DETECTOR_NAMES = {
     "Inter-RAT downgrade command / sunset-RAT advertisement": "rat_downgrade",
     "IMSI paging": "imsi_paging",
     "RRC null integrity (EIA0)": "rrc_null_integrity",
+    "Cell identity consistency": "cell_consistency",
 }
 KEY_FROM_NAME = {v: k for k, v in DETECTOR_NAMES.items()}
 DET_KEYS = (
@@ -55,6 +56,7 @@ DET_KEYS = (
     "rat_downgrade",
     "imsi_paging",
     "rrc_null_integrity",
+    "cell_consistency",
 )
 
 WARN_SEVERITIES = {"Low", "Medium", "High"}
@@ -260,6 +262,7 @@ def selftest() -> int:
         },
         {"name": "IMSI paging", "version": 0},
         {"name": "RRC null integrity (EIA0)", "version": 0},
+        {"name": "Cell identity consistency", "version": 0},
         {"name": "Null Cipher", "version": 1},
     ]
 
