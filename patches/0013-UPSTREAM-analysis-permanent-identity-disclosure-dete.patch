@@ -1,8 +1,7 @@
-From 14ba08e7925fff250284c98598dd2a0e5cfcf835 Mon Sep 17 00:00:00 2001
+From 40f2a0b418364197adf99b141143f18ec96c66ed Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 01:26:04 -0500
-Subject: [PATCH] [UPSTREAM] analysis: permanent-identity disclosure detector
- (T-OR-054)
+Subject: [PATCH] [UPSTREAM] analysis: permanent-identity disclosure detector (T-OR-054)
 
 Upstream's imsi_requested analyzer watches the request side (the network
 asking for an identity, and the stateful request-without-auth sequence).
@@ -31,9 +30,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
  lib/src/analysis/analyzer.rs            |  42 ++++-
- lib/src/analysis/identity_disclosure.rs | 220 ++++++++++++++++++++++++
+ lib/src/analysis/identity_disclosure.rs | 221 ++++++++++++++++++++++++
  lib/src/analysis/mod.rs                 |   1 +
- 3 files changed, 258 insertions(+), 5 deletions(-)
+ 3 files changed, 259 insertions(+), 5 deletions(-)
  create mode 100644 lib/src/analysis/identity_disclosure.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -133,10 +132,10 @@ index db87e20..ad4b0c4 100644
          let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/identity_disclosure.rs b/lib/src/analysis/identity_disclosure.rs
 new file mode 100644
-index 0000000..79d17ad
+index 0000000..c5aba7d
 --- /dev/null
 +++ b/lib/src/analysis/identity_disclosure.rs
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,221 @@
 +//! Flags the UE disclosing a permanent subscriber or device identity in the
 +//! clear over NAS -- the other half of an IMSI-catcher's identification step.
 +//!
@@ -267,12 +266,14 @@ index 0000000..79d17ad
 +    const IMEISV: &str = "3355140216325406f1"; // 24.008 type 011, IMEISV
 +    const GUTI_IE: &str = "f600f11080010112345678"; // type 110, must not flag
 +
-+    // Full Attach Request bodies (after the 07/41 header `emm_message` prepends).
-+    // GUTI_ATTACH is the real device vector from the pycrate fork tests; its EPS
-+    // mobile identity is a GUTI. IMSI_ATTACH replaces only that identity's LV
-+    // (`0b` + 11-byte GUTI) with an 8-byte IMSI (`08` + IMSI), keeping the rest
-+    // of the message, so the two differ only in the identity type.
-+    const ATTACH_TAIL: &str = "05f07000001000360201d031d1272f8080211001000010810600000000830600000000000d00000300ff0003130184000100000c00000a00000500001000521301846a025c0a009011034f18a6f15d0103c1000000000000";
++    // Fully synthetic Attach Request bodies (after the 07/41 header), built with
++    // only the mandatory IEs -- EPS mobile identity, UE network capability
++    // (`02 e0e0`), ESM message container (`0003` + 3 bytes). Both carry the test
++    // PLMN 001/01 and synthetic values (no real carrier PLMN, GUTI or TAC); each
++    // round-trips exactly through the reference Python pycrate. They differ only
++    // in the EPS mobile identity: a synthetic GUTI vs. the test IMSI.
++    const GUTI_ATTACH: &str = "020bf600f1108001011234567802e0e00003010203";
++    const IMSI_ATTACH: &str = "0208091010103254769802e0e00003010203";
 +
 +    fn hex(s: &str) -> Vec<u8> {
 +        (0..s.len())
@@ -327,7 +328,7 @@ index 0000000..79d17ad
 +
 +    #[test]
 +    fn attach_request_with_imsi_is_low() {
-+        let events = attach_request(&format!("0208{IMSI}{ATTACH_TAIL}"));
++        let events = attach_request(IMSI_ATTACH);
 +        assert_eq!(events.len(), 1);
 +        assert_eq!(events[0].1.event_type, EventType::Low);
 +        assert!(events[0].1.message.contains("IMSI"));
@@ -335,9 +336,8 @@ index 0000000..79d17ad
 +
 +    #[test]
 +    fn attach_request_with_guti_is_ignored() {
-+        // The common case: the real device vector attaches with a GUTI.
-+        let guti_attach = format!("020bf6130184fa6ab2c05ff062{ATTACH_TAIL}");
-+        assert!(attach_request(&guti_attach).is_empty());
++        // The common case: attaching with a GUTI must not flag.
++        assert!(attach_request(GUTI_ATTACH).is_empty());
 +    }
 +
 +    #[test]
