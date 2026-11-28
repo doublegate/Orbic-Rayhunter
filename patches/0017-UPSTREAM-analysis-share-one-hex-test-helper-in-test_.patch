@@ -1,0 +1,219 @@
+From 3e44f34f1bb6a25323fa84ee007f5322a73a4d69 Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Sat, 28 Nov 2026 03:54:33 -0500
+Subject: [PATCH] [UPSTREAM] analysis: share one hex() test helper in test_util
+
+Every analyzer test module redefined its own `fn hex(&str) -> Vec<u8>`
+(four copies, three with an even-length assert and one without), and
+test_util had a separate `hex_literal_decode`. Consolidate them into a
+single `pub(crate) fn hex` in test_util (asserting an even length so a
+mistyped vector fails clearly) and use it everywhere. No behaviour change;
+all tests still pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ lib/src/analysis/identity_disclosure.rs |  9 +----
+ lib/src/analysis/imsi_paging.rs         | 10 +-----
+ lib/src/analysis/rat_downgrade.rs       | 10 +-----
+ lib/src/analysis/rrc_null_integrity.rs  | 10 +-----
+ lib/src/analysis/test_util.rs           | 46 ++++++++++++++-----------
+ 5 files changed, 29 insertions(+), 56 deletions(-)
+
+diff --git a/lib/src/analysis/identity_disclosure.rs b/lib/src/analysis/identity_disclosure.rs
+index c5aba7d..af43330 100644
+--- a/lib/src/analysis/identity_disclosure.rs
++++ b/lib/src/analysis/identity_disclosure.rs
+@@ -116,7 +116,7 @@ impl Analyzer for IdentityDisclosureAnalyzer {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::analysis::test_util::{collect_events, emm_message, packet_time};
++    use crate::analysis::test_util::{collect_events, emm_message, hex, packet_time};
+ 
+     // EMM message type identifiers (TS 24.301 table 9.8.1).
+     const ATTACH_REQUEST: u8 = 65;
+@@ -137,13 +137,6 @@ mod tests {
+     const GUTI_ATTACH: &str = "020bf600f1108001011234567802e0e00003010203";
+     const IMSI_ATTACH: &str = "0208091010103254769802e0e00003010203";
+ 
+-    fn hex(s: &str) -> Vec<u8> {
+-        (0..s.len())
+-            .step_by(2)
+-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+-            .collect()
+-    }
+-
+     /// An Identity Response (0x56) whose mobile identity is the LV `value`.
+     fn id_response(value_hex: &str) -> Vec<(usize, Event)> {
+         let v = hex(value_hex);
+diff --git a/lib/src/analysis/imsi_paging.rs b/lib/src/analysis/imsi_paging.rs
+index 36ff2c5..56cc0fb 100644
+--- a/lib/src/analysis/imsi_paging.rs
++++ b/lib/src/analysis/imsi_paging.rs
+@@ -84,17 +84,9 @@ impl Analyzer for ImsiPagingAnalyzer {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::analysis::test_util::{collect_events, lte_rrc, packet_time};
++    use crate::analysis::test_util::{collect_events, hex, lte_rrc, packet_time};
+     use crate::gsmtap::LteRrcSubtype;
+ 
+-    fn hex(s: &str) -> Vec<u8> {
+-        assert_eq!(s.len() % 2, 0, "odd-length hex vector");
+-        (0..s.len())
+-            .step_by(2)
+-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+-            .collect()
+-    }
+-
+     // PCCH Paging PDUs encoded with the reference Python pycrate (TS 36.331
+     // ASN.1) and decoded here through telcom_parser. All synthetic.
+     // One paging record, ue-Identity = imsi (test IMSI 001010123456789).
+diff --git a/lib/src/analysis/rat_downgrade.rs b/lib/src/analysis/rat_downgrade.rs
+index 099457f..9a6ce62 100644
+--- a/lib/src/analysis/rat_downgrade.rs
++++ b/lib/src/analysis/rat_downgrade.rs
+@@ -231,15 +231,7 @@ impl Analyzer for RatDowngradeAnalyzer {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::analysis::test_util::{bcch_dl_sch, collect_events, dl_dcch, packet_time};
+-
+-    fn hex(s: &str) -> Vec<u8> {
+-        assert_eq!(s.len() % 2, 0, "odd-length hex vector");
+-        (0..s.len())
+-            .step_by(2)
+-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+-            .collect()
+-    }
++    use crate::analysis::test_util::{bcch_dl_sch, collect_events, dl_dcch, hex, packet_time};
+ 
+     // Vectors encoded with the reference Python pycrate (TS 36.331 ASN.1) and
+     // decoded here through telcom_parser -- two independent implementations.
+diff --git a/lib/src/analysis/rrc_null_integrity.rs b/lib/src/analysis/rrc_null_integrity.rs
+index 90a5e8d..4f245fa 100644
+--- a/lib/src/analysis/rrc_null_integrity.rs
++++ b/lib/src/analysis/rrc_null_integrity.rs
+@@ -133,15 +133,7 @@ impl Analyzer for RrcNullIntegrityAnalyzer {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::analysis::test_util::{collect_events, dl_dcch, packet_time};
+-
+-    fn hex(s: &str) -> Vec<u8> {
+-        assert_eq!(s.len() % 2, 0, "odd-length hex vector");
+-        (0..s.len())
+-            .step_by(2)
+-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+-            .collect()
+-    }
++    use crate::analysis::test_util::{collect_events, dl_dcch, hex, packet_time};
+ 
+     // DL-DCCH PDUs encoded with the reference Python pycrate (TS 36.331) and
+     // decoded here through telcom_parser.
+diff --git a/lib/src/analysis/test_util.rs b/lib/src/analysis/test_util.rs
+index cbbcd84..6eca907 100644
+--- a/lib/src/analysis/test_util.rs
++++ b/lib/src/analysis/test_util.rs
+@@ -10,6 +10,17 @@ use crate::analysis::analyzer::{Analyzer, Event};
+ use crate::analysis::information_element::InformationElement;
+ use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, LteNasSubtype, LteRrcSubtype};
+ 
++/// Decode a hex string into bytes, for synthetic PDU test vectors. Asserts an
++/// even length so a mistyped vector fails clearly rather than panicking in the
++/// slice. Shared by every analyzer's tests.
++pub(crate) fn hex(s: &str) -> Vec<u8> {
++    assert_eq!(s.len() % 2, 0, "odd-length hex vector");
++    (0..s.len())
++        .step_by(2)
++        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
++        .collect()
++}
++
+ /// A fixed, deterministic base time plus `seconds`, for sequencing packets
+ /// within a test without depending on the wall clock.
+ pub(crate) fn packet_time(seconds: i64) -> DateTime<FixedOffset> {
+@@ -137,13 +148,6 @@ mod tests {
+         "00025b30542fdb28c44605a28158000c032073bd156124000c026dd096af81c6892003c00310030000";
+     const REAL_DL_INFORMATION_TRANSFER: &str = "0a00183a2040074408";
+ 
+-    fn hex_literal_decode(s: &str) -> Vec<u8> {
+-        (0..s.len())
+-            .step_by(2)
+-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+-            .collect()
+-    }
+-
+     fn lte_variant(b: &LteInformationElement) -> &'static str {
+         match b {
+             LteInformationElement::BcchDlSch(_) => "BcchDlSch",
+@@ -158,7 +162,7 @@ mod tests {
+         // The builder wraps raw device RRC bytes and decodes them through the
+         // live `lte_rrc` path into the BcchDlSch variant -- the seam the SIB and
+         // downgrade analyzers need (T-OR-112).
+-        let ie = bcch_dl_sch(&hex_literal_decode(REAL_SYSTEM_INFORMATION));
++        let ie = bcch_dl_sch(&hex(REAL_SYSTEM_INFORMATION));
+         let InformationElement::LTE(lte) = ie else {
+             panic!("expected an LTE information element");
+         };
+@@ -167,7 +171,7 @@ mod tests {
+ 
+     #[test]
+     fn dl_dcch_decodes_a_real_dl_information_transfer() {
+-        let ie = dl_dcch(&hex_literal_decode(REAL_DL_INFORMATION_TRANSFER));
++        let ie = dl_dcch(&hex(REAL_DL_INFORMATION_TRANSFER));
+         let InformationElement::LTE(lte) = ie else {
+             panic!("expected an LTE information element");
+         };
+@@ -181,7 +185,7 @@ mod tests {
+         // SystemInformation it simply does not fire -- the point is that the build
+         // + decode + analyze path works without hand-encoding UPER.
+         use crate::analysis::incomplete_sib::IncompleteSibAnalyzer;
+-        let ie = bcch_dl_sch(&hex_literal_decode(REAL_SYSTEM_INFORMATION));
++        let ie = bcch_dl_sch(&hex(REAL_SYSTEM_INFORMATION));
+         let mut analyzer = IncompleteSibAnalyzer {};
+         let events = collect_events(&mut analyzer, &[(ie, packet_time(0))]);
+         // Benign system information -> no event; asserting the call returns at all
+@@ -315,11 +319,11 @@ mod tests {
+                 &["deadbeef", "DEADBEEF", "3735928559"],
+             ),
+         ];
+-        for (hex, ty, digits, forbidden) in id_cases {
+-            let (id, msg) = identity_response_id(&hex_literal_decode(hex)).expect(hex);
+-            assert_eq!(id.identity_type(), *ty, "{hex}");
+-            assert!(id.is_well_formed(), "{hex}");
+-            assert_eq!(id.digit_string().as_deref(), *digits, "{hex}");
++        for (v_hex, ty, digits, forbidden) in id_cases {
++            let (id, msg) = identity_response_id(&hex(v_hex)).expect(v_hex);
++            assert_eq!(id.identity_type(), *ty, "{v_hex}");
++            assert!(id.is_well_formed(), "{v_hex}");
++            assert_eq!(id.digit_string().as_deref(), *digits, "{v_hex}");
+             let out = rendered(&id, &msg);
+             assert_not_leaked(&out, forbidden);
+             assert!(out.contains(&format!("{ty:?}")), "type missing: {out}");
+@@ -345,15 +349,15 @@ mod tests {
+                 &["12345678", "305419896"],
+             ),
+         ];
+-        for (hex, ty, digits, forbidden) in eps_cases {
+-            let (id, msg) = tau_request_epsid(&hex_literal_decode(hex)).expect(hex);
+-            assert_eq!(id.identity_type(), *ty, "{hex}");
+-            assert!(id.is_well_formed(), "{hex}");
+-            assert_eq!(id.digit_string().as_deref(), *digits, "{hex}");
++        for (v_hex, ty, digits, forbidden) in eps_cases {
++            let (id, msg) = tau_request_epsid(&hex(v_hex)).expect(v_hex);
++            assert_eq!(id.identity_type(), *ty, "{v_hex}");
++            assert!(id.is_well_formed(), "{v_hex}");
++            assert_eq!(id.digit_string().as_deref(), *digits, "{v_hex}");
+             assert_not_leaked(&rendered(&id, &msg), forbidden);
+         }
+         // the GUTI's network part is exposed (it names the network, not the UE)
+-        let (guti, _) = tau_request_epsid(&hex_literal_decode("f600f11080010112345678")).unwrap();
++        let (guti, _) = tau_request_epsid(&hex("f600f11080010112345678")).unwrap();
+         let g = guti.guti().expect("GUTI");
+         assert_eq!(
+             (g.mcc(), g.mnc(), g.mme_group_id(), g.mme_code()),
+-- 
+2.56.1
+
