@@ -1,4 +1,4 @@
-From d171b1d97c1e9a20929dd386b0f5ed869e9cac7b Mon Sep 17 00:00:00 2001
+From c310ab312cfe6931e581166c52f5135196c1710b Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 01:54:32 -0500
 Subject: [PATCH] [UPSTREAM] analysis: inter-RAT downgrade detector (T-OR-057)
@@ -25,10 +25,10 @@ a benign RRCConnectionReconfiguration that must not fire.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- lib/src/analysis/analyzer.rs      |  34 ++++-
+ lib/src/analysis/analyzer.rs      |  34 +++-
  lib/src/analysis/mod.rs           |   1 +
- lib/src/analysis/rat_downgrade.rs | 203 ++++++++++++++++++++++++++++++
- 3 files changed, 237 insertions(+), 1 deletion(-)
+ lib/src/analysis/rat_downgrade.rs | 308 ++++++++++++++++++++++++++++++
+ 3 files changed, 342 insertions(+), 1 deletion(-)
  create mode 100644 lib/src/analysis/rat_downgrade.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -132,10 +132,10 @@ index 219122f..45b40ee 100644
  pub(crate) mod test_util;
 diff --git a/lib/src/analysis/rat_downgrade.rs b/lib/src/analysis/rat_downgrade.rs
 new file mode 100644
-index 0000000..91f4d67
+index 0000000..ece7355
 --- /dev/null
 +++ b/lib/src/analysis/rat_downgrade.rs
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,308 @@
 +//! Flags network-directed moves off LTE toward a legacy or sunset radio access
 +//! technology -- the "push the UE down to a weaker RAT" step of a downgrade
 +//! attack, complementing the broadcast-reselection analyzers
@@ -143,26 +143,29 @@ index 0000000..91f4d67
 +//! RRC Connection Release redirect).
 +//!
 +//! - A **MobilityFromEUTRACommand** is an explicit, per-UE command to leave LTE.
-+//!   Its `CellChangeOrder` purpose moves the UE to GERAN (2G) -- a directed 2G
-+//!   downgrade, which a false base station uses to drop the UE onto a weaker,
-+//!   more interceptable RAT (High). Its `Handover` purpose is an inter-RAT
-+//!   handover (to UTRA/CDMA2000); legitimate handovers exist, so that is
-+//!   reported Informational.
-+//! - **SIB8** carries CDMA2000 reselection parameters. CDMA2000 is decommissioned
-+//!   across the US (and much of the world), so an LTE cell still advertising it
-+//!   is anomalous -- Low, since in a market that still runs CDMA2000 it is
-+//!   legitimate (a per-MCC sunset policy would raise it; that is future work).
++//!   Both its `CellChangeOrder` (always to GERAN in TS 36.331) and its
++//!   `Handover` purpose can direct the UE to 2G/GERAN -- a directed downgrade
++//!   onto a weaker, more interceptable RAT (High). A `Handover` to 3G/UTRA or
++//!   CDMA2000, and an `e-CSFB` to CDMA2000, are lesser moves off LTE that can be
++//!   legitimate (Informational). A handover to NR (5G) or back to E-UTRA is not
++//!   a downgrade and is ignored.
++//! - **SIB8** is broadcast by a cell that supports CDMA2000 interworking.
++//!   CDMA2000 is decommissioned across the US (and much of the world), so a cell
++//!   still broadcasting SIB8 is anomalous -- Low, since where CDMA2000 still runs
++//!   it is legitimate (a per-MCC sunset policy to raise it is tracked as
++//!   T-OR-115). SIB8 repeats on BCCH, so with this detector enabled in a market
++//!   that still broadcasts it, expect a Low event per SIB8 repetition.
 +//!
 +//! Stateless: keys on the message/IE presence alone. Off by default pending
-+//! per-market calibration (a genuine inter-RAT handover is a Handover command;
-+//! SIB8 is legitimate where CDMA2000 still runs).
++//! per-market calibration (a genuine inter-RAT handover is a Handover command,
++//! and SIB8 is legitimate where CDMA2000 still runs).
 +
 +use std::borrow::Cow;
 +
 +use chrono::{DateTime, FixedOffset};
 +use telcom_parser::lte_rrc::{
 +    BCCH_DL_SCH_MessageType, BCCH_DL_SCH_MessageType_c1, DL_DCCH_MessageType,
-+    DL_DCCH_MessageType_c1, MobilityFromEUTRACommand_r8_IEsPurpose,
++    DL_DCCH_MessageType_c1, HandoverTargetRAT_Type, MobilityFromEUTRACommand_r8_IEsPurpose,
 +    MobilityFromEUTRACommand_r9_IEsPurpose, MobilityFromEUTRACommandCriticalExtensions,
 +    MobilityFromEUTRACommandCriticalExtensions_c1, SystemInformation_r8_IEsSib_TypeAndInfo_Entry,
 +    SystemInformationCriticalExtensions,
@@ -173,24 +176,66 @@ index 0000000..91f4d67
 +
 +pub struct RatDowngradeAnalyzer;
 +
-+/// Classify a MobilityFromEUTRACommand by its purpose, independent of r8/r9.
++/// What a MobilityFromEUTRACommand directs the UE to do, normalized across the
++/// r8/r9 purpose choices.
 +enum Purpose {
-+    CellChangeOrder,
-+    Handover,
++    /// CellChangeOrder: always to GERAN (2G) in TS 36.331.
++    CellChangeOrderToGeran,
++    /// Handover, carrying the target RAT enumeration value.
++    Handover(u8),
++    /// e-CSFB (r9): fallback onto CDMA2000 1xRTT/HRPD.
++    ECsfb,
++    /// Anything this analyzer does not act on.
 +    Other,
++}
++
++fn name_target_rat(target: u8) -> &'static str {
++    match target {
++        HandoverTargetRAT_Type::UTRA => "3G/UTRA",
++        HandoverTargetRAT_Type::GERAN => "2G/GERAN",
++        HandoverTargetRAT_Type::CDMA2000_1XRTT => "CDMA2000 1xRTT",
++        HandoverTargetRAT_Type::CDMA2000_HRPD => "CDMA2000 HRPD",
++        HandoverTargetRAT_Type::NR => "5G/NR",
++        HandoverTargetRAT_Type::EUTRA => "E-UTRA",
++        _ => "an unknown RAT",
++    }
 +}
 +
 +fn purpose_event(p: Purpose) -> Option<Event> {
 +    match p {
-+        Purpose::CellChangeOrder => Some(Event {
++        Purpose::CellChangeOrderToGeran => Some(Event {
 +            event_type: EventType::High,
 +            message: "Network ordered a cell change to 2G/GERAN (MobilityFromEUTRACommand \
 +                      CellChangeOrder) -- a directed downgrade off LTE"
 +                .to_string(),
 +        }),
-+        Purpose::Handover => Some(Event {
++        Purpose::Handover(target) => match target {
++            // A handover command that targets 2G is a directed downgrade.
++            HandoverTargetRAT_Type::GERAN => Some(Event {
++                event_type: EventType::High,
++                message: "Network commanded a handover to 2G/GERAN (MobilityFromEUTRACommand \
++                          Handover) -- a directed downgrade off LTE"
++                    .to_string(),
++            }),
++            // 3G/UTRA and CDMA2000 handovers are lesser moves off LTE that can be
++            // legitimate.
++            HandoverTargetRAT_Type::UTRA
++            | HandoverTargetRAT_Type::CDMA2000_1XRTT
++            | HandoverTargetRAT_Type::CDMA2000_HRPD => Some(Event {
++                event_type: EventType::Informational,
++                message: format!(
++                    "Network commanded an inter-RAT handover off LTE to {} \
++                     (MobilityFromEUTRACommand Handover)",
++                    name_target_rat(target)
++                ),
++            }),
++            // NR (5G) and E-UTRA are not downgrades; anything else is unknown.
++            _ => None,
++        },
++        Purpose::ECsfb => Some(Event {
 +            event_type: EventType::Informational,
-+            message: "Network commanded an inter-RAT handover off LTE (MobilityFromEUTRACommand)"
++            message: "Network directed an e-CSFB to CDMA2000 (MobilityFromEUTRACommand) -- a \
++                      fallback off LTE"
 +                .to_string(),
 +        }),
 +        Purpose::Other => None,
@@ -205,11 +250,14 @@ index 0000000..91f4d67
 +    fn get_description(&self) -> Cow<'_, str> {
 +        Cow::from(
 +            "Flags a network-directed move off LTE toward a legacy RAT: a MobilityFromEUTRACommand \
-+             with a CellChangeOrder to 2G/GERAN (High) or an inter-RAT Handover (Informational), or \
-+             an LTE cell advertising CDMA2000 reselection via SIB8 (Low, anomalous in markets where \
-+             CDMA2000 is decommissioned). Complements the broadcast-reselection analyzers \
++             with a CellChangeOrder or a Handover to 2G/GERAN (High), a Handover or e-CSFB to \
++             3G/UTRA or CDMA2000 (Informational), or an LTE cell broadcasting CDMA2000 interworking \
++             (SIB8, Low -- anomalous where CDMA2000 is decommissioned). A handover to NR (5G) or \
++             E-UTRA is ignored. Complements the broadcast-reselection analyzers \
 +             (priority_2g_downgrade for SIB6/7, connection_redirect_downgrade for a Connection \
-+             Release redirect). Stateless; off by default pending per-market calibration.",
++             Release redirect). Stateless; SIB8 repeats on BCCH, so enabling it in a CDMA2000 \
++             market yields a Low event per repetition. Off by default pending per-market \
++             calibration.",
 +        )
 +    }
 +
@@ -242,18 +290,22 @@ index 0000000..91f4d67
 +                        r8,
 +                    ) => match &r8.purpose {
 +                        MobilityFromEUTRACommand_r8_IEsPurpose::CellChangeOrder(_) => {
-+                            Purpose::CellChangeOrder
++                            Purpose::CellChangeOrderToGeran
 +                        }
-+                        MobilityFromEUTRACommand_r8_IEsPurpose::Handover(_) => Purpose::Handover,
++                        MobilityFromEUTRACommand_r8_IEsPurpose::Handover(h) => {
++                            Purpose::Handover(h.target_rat_type.0)
++                        }
 +                    },
 +                    MobilityFromEUTRACommandCriticalExtensions_c1::MobilityFromEUTRACommand_r9(
 +                        r9,
 +                    ) => match &r9.purpose {
 +                        MobilityFromEUTRACommand_r9_IEsPurpose::CellChangeOrder(_) => {
-+                            Purpose::CellChangeOrder
++                            Purpose::CellChangeOrderToGeran
 +                        }
-+                        MobilityFromEUTRACommand_r9_IEsPurpose::Handover(_) => Purpose::Handover,
-+                        MobilityFromEUTRACommand_r9_IEsPurpose::E_CSFB_r9(_) => Purpose::Other,
++                        MobilityFromEUTRACommand_r9_IEsPurpose::Handover(h) => {
++                            Purpose::Handover(h.target_rat_type.0)
++                        }
++                        MobilityFromEUTRACommand_r9_IEsPurpose::E_CSFB_r9(_) => Purpose::ECsfb,
 +                    },
 +                    _ => Purpose::Other,
 +                };
@@ -276,7 +328,7 @@ index 0000000..91f4d67
 +                    });
 +                has_sib8.then(|| Event {
 +                    event_type: EventType::Low,
-+                    message: "LTE cell advertises CDMA2000 reselection (SIB8) -- anomalous where \
++                    message: "LTE cell broadcasts CDMA2000 interworking (SIB8) -- anomalous where \
 +                              CDMA2000 is decommissioned"
 +                        .to_string(),
 +                })
@@ -292,6 +344,7 @@ index 0000000..91f4d67
 +    use crate::analysis::test_util::{bcch_dl_sch, collect_events, dl_dcch, packet_time};
 +
 +    fn hex(s: &str) -> Vec<u8> {
++        assert_eq!(s.len() % 2, 0, "odd-length hex vector");
 +        (0..s.len())
 +            .step_by(2)
 +            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
@@ -300,37 +353,89 @@ index 0000000..91f4d67
 +
 +    // Vectors encoded with the reference Python pycrate (TS 36.331 ASN.1) and
 +    // decoded here through telcom_parser -- two independent implementations.
-+    // DL-DCCH MobilityFromEUTRACommand, CellChangeOrder -> GERAN.
-+    const MOBILITY_GERAN: &str = "1808000140";
++    // DL-DCCH MobilityFromEUTRACommand, r8 CellChangeOrder -> GERAN.
++    const CELL_CHANGE_GERAN: &str = "1808000140";
++    // r8 Handover -> GERAN (2) / UTRA (0) / NR (4).
++    const HANDOVER_GERAN: &str = "1800202000";
++    const HANDOVER_UTRA: &str = "1800002000";
++    const HANDOVER_NR: &str = "1800802000";
++    // r9 CellChangeOrder -> GERAN, and r9 e-CSFB.
++    const CELL_CHANGE_R9_GERAN: &str = "1842000050";
++    const ECSFB_R9: &str = "184400";
 +    // BCCH-DL-SCH SystemInformation carrying SIB8.
 +    const SIB8_BCCH: &str = "001880";
++    // A real BCCH-DL-SCH SystemInformation with SIBs but no SIB8 (the T-OR-112
++    // identifier-free vector): must not fire.
++    const BCCH_NO_SIB8: &str =
++        "00025b30542fdb28c44605a28158000c032073bd156124000c026dd096af81c6892003c00310030000";
 +    // DL-DCCH RRCConnectionReconfiguration (benign, not a mobility command).
 +    const BENIGN_DLDCCH: &str = "200200";
 +
++    fn run_dl(v: &str) -> Vec<(usize, Event)> {
++        let mut a = RatDowngradeAnalyzer;
++        collect_events(&mut a, &[(dl_dcch(&hex(v)), packet_time(0))])
++    }
++    fn run_bcch(v: &str) -> Vec<(usize, Event)> {
++        let mut a = RatDowngradeAnalyzer;
++        collect_events(&mut a, &[(bcch_dl_sch(&hex(v)), packet_time(0))])
++    }
++
 +    #[test]
 +    fn cell_change_order_to_geran_is_high() {
-+        let mut a = RatDowngradeAnalyzer;
-+        let events = collect_events(&mut a, &[(dl_dcch(&hex(MOBILITY_GERAN)), packet_time(0))]);
++        for v in [CELL_CHANGE_GERAN, CELL_CHANGE_R9_GERAN] {
++            let events = run_dl(v);
++            assert_eq!(events.len(), 1, "{v}");
++            assert_eq!(events[0].1.event_type, EventType::High, "{v}");
++            assert!(events[0].1.message.contains("GERAN"), "{v}");
++        }
++    }
++
++    #[test]
++    fn handover_to_geran_is_high() {
++        let events = run_dl(HANDOVER_GERAN);
 +        assert_eq!(events.len(), 1);
 +        assert_eq!(events[0].1.event_type, EventType::High);
 +        assert!(events[0].1.message.contains("GERAN"));
 +    }
 +
 +    #[test]
++    fn handover_to_utra_is_informational() {
++        let events = run_dl(HANDOVER_UTRA);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Informational);
++        assert!(events[0].1.message.contains("UTRA"));
++    }
++
++    #[test]
++    fn handover_to_nr_is_ignored() {
++        // A handover to 5G is not a downgrade.
++        assert!(run_dl(HANDOVER_NR).is_empty());
++    }
++
++    #[test]
++    fn ecsfb_is_informational() {
++        let events = run_dl(ECSFB_R9);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Informational);
++        assert!(events[0].1.message.contains("CDMA2000"));
++    }
++
++    #[test]
 +    fn sib8_advertisement_is_low() {
-+        let mut a = RatDowngradeAnalyzer;
-+        let events = collect_events(&mut a, &[(bcch_dl_sch(&hex(SIB8_BCCH)), packet_time(0))]);
++        let events = run_bcch(SIB8_BCCH);
 +        assert_eq!(events.len(), 1);
 +        assert_eq!(events[0].1.event_type, EventType::Low);
 +        assert!(events[0].1.message.contains("SIB8"));
 +    }
 +
 +    #[test]
++    fn bcch_without_sib8_is_ignored() {
++        assert!(run_bcch(BCCH_NO_SIB8).is_empty());
++    }
++
++    #[test]
 +    fn benign_dl_dcch_is_ignored() {
-+        let mut a = RatDowngradeAnalyzer;
-+        assert!(
-+            collect_events(&mut a, &[(dl_dcch(&hex(BENIGN_DLDCCH)), packet_time(0))]).is_empty()
-+        );
++        assert!(run_dl(BENIGN_DLDCCH).is_empty());
 +    }
 +
 +    #[test]

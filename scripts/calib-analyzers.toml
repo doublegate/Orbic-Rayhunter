@@ -20,7 +20,9 @@ incomplete_sib = true
 diagnostic_analyzer = true
 test_analyzer = false
 no_nas_messages = false
-# The three v1.2.0 detectors under calibration (off in the shipped config):
+# The v1.2.0 detectors under calibration (all off in the shipped config):
 nas_reject_identity = true
 auth_failure = true
 null_integrity = true
+identity_disclosure = true
+rat_downgrade = true

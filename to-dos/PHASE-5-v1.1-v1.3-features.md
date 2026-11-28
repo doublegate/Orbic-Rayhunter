@@ -109,7 +109,7 @@ scripts/apply-patches.sh
       (AT, T-OR-061) and a synthetic paging vector with a test identity
 - [x] T-OR-057: inter-RAT downgrade (patch 0014, `rat_downgrade`) -- `MobilityFromEUTRACommand`
       CellChangeOrder->GERAN (High) / Handover (Informational), SIB8 advertisement (Low); vectors
-      pycrate-encoded + telcom_parser-decoded. Follow-up: `idleModeMobilityControlInfo` dedicated
+      pycrate-encoded + telcom_parser-decoded. Follow-up T-OR-115: `idleModeMobilityControlInfo` dedicated
       priorities + the per-MCC sunset policy table
 - [ ] T-OR-058: measurement plumbing (new `InformationElement` input for ML1 and RACH TA);
       upstream issue opened before the patch
