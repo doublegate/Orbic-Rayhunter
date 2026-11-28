@@ -140,7 +140,7 @@ The loop:
 
 2. **Measure.** `scripts/calib-run.sh [<captures-dir>]` pulls the recordings (`orx pull-logs`) and
    re-scores every message offline with `rayhunter-check --config scripts/calib-analyzers.toml`
-   (**T-OR-113**, which enables the default-off detectors), then prints a per-detector
+   (**T-OR-113**, which enables all five v1.2.0 default-off detectors), then prints a per-detector
    false-positive table (`scripts/calib-snapshot.py`). It needs the patched tree staged
    (`scripts/apply-patches.sh`).
 
