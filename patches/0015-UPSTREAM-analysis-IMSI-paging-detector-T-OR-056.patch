@@ -1,33 +1,32 @@
-From 2d0062800c1312d9d30583e4fb754f4848b6f18b Mon Sep 17 00:00:00 2001
+From 631d10b921c4ff93407c1dfcca9c2919b47b267d Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 02:48:46 -0500
 Subject: [PATCH] [UPSTREAM] analysis: IMSI paging detector (T-OR-056)
 
 ImsiPagingAnalyzer (default off) flags a PCCH paging record that addresses
-a UE by its permanent IMSI rather than a temporary identity (S-TMSI). A
-legitimate network holds the subscriber's temporary identity and has no
-reason to page by IMSI; a false base station pages a known IMSI to confirm
-the target's presence in the area without completing an attach. High and
-low-false-positive.
+a UE by its permanent IMSI rather than a temporary S-TMSI. A false base
+station pages a known IMSI to confirm a target's presence without an attach.
+
+Reported Medium, not High: normal paging uses the S-TMSI, but MME
+failure/restoration can legitimately fall back to paging by IMSI (TS 23.401
+5.3.4.3, TS 23.007 20), and this analyzer cannot yet tell whether the paged
+IMSI is this device's -- that salted-hash compare (needing the device IMSI
+over AT) is follow-up T-OR-116 and would raise a confirmed self-page.
 
 Reads only the identity type, never the paged digits (the in-memory
-identity contract in docs/ANALYZERS.md). Flags any IMSI paging record;
-comparing the paged identity to the device's own IMSI, held as a salted
-in-memory hash, needs the device IMSI over AT and is tracked as T-OR-116.
-
-Stateless; off by default pending per-network calibration. Test vectors are
-PCCH Paging PDUs encoded with the reference Python pycrate and decoded here
-through telcom_parser (two independent ASN.1 implementations): paging by
-IMSI (fires High, digits never in the event), paging by S-TMSI (ignored),
-and a Paging with no records (ignored).
+identity contract in docs/ANALYZERS.md). Stateless; off by default pending
+per-network calibration. Test vectors are PCCH Paging PDUs encoded with the
+reference Python pycrate and decoded through telcom_parser: paging by IMSI
+(fires Medium, digits never in the event), an IMSI record after an S-TMSI
+record (exercises the multi-record path), paging by S-TMSI (ignored), a
+Paging with no records (ignored), and a non-PCCH LTE message (ignored).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- lib/src/analysis/analyzer.rs    |  44 ++++++++--
- lib/src/analysis/imsi_paging.rs | 139 ++++++++++++++++++++++++++++++++
+ lib/src/analysis/analyzer.rs    |  44 +++++++--
+ lib/src/analysis/imsi_paging.rs | 160 ++++++++++++++++++++++++++++++++
  lib/src/analysis/mod.rs         |   1 +
- 3 files changed, 178 insertions(+), 6 deletions(-)
+ 3 files changed, 199 insertions(+), 6 deletions(-)
  create mode 100644 lib/src/analysis/imsi_paging.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -129,10 +128,10 @@ index 3567f0f..0e6371a 100644
          let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/imsi_paging.rs b/lib/src/analysis/imsi_paging.rs
 new file mode 100644
-index 0000000..332cfe2
+index 0000000..6f72b70
 --- /dev/null
 +++ b/lib/src/analysis/imsi_paging.rs
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,160 @@
 +//! Flags a network paging a UE by its permanent IMSI on PCCH.
 +//!
 +//! A network normally pages a UE by a temporary identity (an S-TMSI derived
@@ -174,11 +173,10 @@ index 0000000..332cfe2
 +    fn get_description(&self) -> Cow<'_, str> {
 +        Cow::from(
 +            "Flags a PCCH paging record that addresses a UE by its permanent IMSI rather than a \
-+             temporary identity (S-TMSI). A legitimate network holds the subscriber's temporary \
-+             identity and has no reason to page by IMSI; a false base station pages a known IMSI to \
-+             confirm the target's presence. High and low-false-positive. Reads only the identity \
-+             type, never the paged digits. Flags any IMSI paging; comparing it to the device's own \
-+             IMSI (T-OR-116) is a later refinement. Off by default pending calibration.",
++             temporary identity (S-TMSI). A false base station pages a known IMSI to confirm a \
++             target's presence; the main benign cause is MME failure/restoration. Reads only the \
++             identity type, never the paged digits. Reported Medium because it cannot yet tell \
++             whether the paged IMSI is this device's (T-OR-116). Off by default pending calibration.",
 +        )
 +    }
 +
@@ -207,9 +205,9 @@ index 0000000..332cfe2
 +            .iter()
 +            .any(|r| matches!(r.ue_identity, PagingUE_Identity::Imsi(_)));
 +        paged_by_imsi.then(|| Event {
-+            event_type: EventType::High,
-+            message: "Network paged a UE by its permanent IMSI on PCCH -- normal paging uses a \
-+                      temporary identity (S-TMSI)"
++            event_type: EventType::Medium,
++            message: "A UE was paged by its permanent IMSI on PCCH -- normal paging uses a \
++                      temporary identity (S-TMSI); a benign cause is MME restoration"
 +                .to_string(),
 +        })
 +    }
@@ -237,6 +235,8 @@ index 0000000..332cfe2
 +    const PAGING_STMSI: &str = "40001123456780";
 +    // A Paging message with no paging records (e.g. a bare SI-modification page).
 +    const PAGING_EMPTY: &str = "00";
++    // Two records: an S-TMSI then an IMSI (the IMSI is not the first record).
++    const PAGING_STMSI_THEN_IMSI: &str = "40801123456781900101012345678900";
 +
 +    fn run(v: &str) -> Vec<(usize, Event)> {
 +        let mut a = ImsiPagingAnalyzer;
@@ -247,13 +247,21 @@ index 0000000..332cfe2
 +    }
 +
 +    #[test]
-+    fn paging_by_imsi_is_high() {
++    fn paging_by_imsi_is_medium() {
 +        let events = run(PAGING_IMSI);
 +        assert_eq!(events.len(), 1);
-+        assert_eq!(events[0].1.event_type, EventType::High);
++        assert_eq!(events[0].1.event_type, EventType::Medium);
 +        assert!(events[0].1.message.contains("IMSI"));
 +        // never the digits
 +        assert!(!events[0].1.message.contains("001010123456789"));
++    }
++
++    #[test]
++    fn imsi_record_after_an_s_tmsi_record_still_fires() {
++        // Exercises `.any(..)` beyond the first record.
++        let events = run(PAGING_STMSI_THEN_IMSI);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Medium);
 +    }
 +
 +    #[test]
@@ -264,6 +272,18 @@ index 0000000..332cfe2
 +    #[test]
 +    fn paging_with_no_records_is_ignored() {
 +        assert!(run(PAGING_EMPTY).is_empty());
++    }
++
++    #[test]
++    fn non_pcch_lte_message_is_ignored() {
++        // A BCCH SystemInformation is an LTE IE but not PCCH: exercises the
++        // inner LteInformationElement::PCCH guard (the outer LTE check passes).
++        use crate::analysis::test_util::bcch_dl_sch;
++        let sysinfo = hex(
++            "00025b30542fdb28c44605a28158000c032073bd156124000c026dd096af81c6892003c00310030000",
++        );
++        let mut a = ImsiPagingAnalyzer;
++        assert!(collect_events(&mut a, &[(bcch_dl_sch(&sysinfo), packet_time(0))]).is_empty());
 +    }
 +
 +    #[test]

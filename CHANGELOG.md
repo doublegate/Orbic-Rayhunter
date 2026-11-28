@@ -93,8 +93,8 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   upstream's exploit string. `docs/INSTALL.md` and `docs/BACKUP-AND-RECOVERY.md` now show it as the
   secret-safe re-open.
 - **IMSI paging detector** (T-OR-056, `[UPSTREAM]` patch 0015): flags a PCCH paging record that
-  addresses a UE by its permanent IMSI instead of a temporary S-TMSI (High) -- a known IMSI-catcher
-  technique to confirm a target's presence. Reads only the identity type, never the paged digits.
+  addresses a UE by its permanent IMSI instead of a temporary S-TMSI (Medium) -- a known
+  IMSI-catcher technique to confirm a target's presence (MME restoration is a benign cause). Reads only the identity type, never the paged digits.
   Off by default (`imsi_paging`); comparing the paged IMSI to the device's own is T-OR-116.
 - **Inter-RAT downgrade detector** (T-OR-057, `[UPSTREAM]` patch 0014): flags a network-directed
   move off LTE toward a legacy RAT -- a `MobilityFromEUTRACommand` CellChangeOrder or Handover to 2G/GERAN
