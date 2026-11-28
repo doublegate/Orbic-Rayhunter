@@ -1,0 +1,344 @@
+From d171b1d97c1e9a20929dd386b0f5ed869e9cac7b Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Sat, 28 Nov 2026 01:54:32 -0500
+Subject: [PATCH] [UPSTREAM] analysis: inter-RAT downgrade detector (T-OR-057)
+
+RatDowngradeAnalyzer (default off) flags a network-directed move off LTE
+toward a legacy/sunset RAT, complementing the broadcast-reselection
+analyzers (priority_2g_downgrade for SIB6/7, connection_redirect_downgrade
+for a Connection Release redirect):
+
+- MobilityFromEUTRACommand with a CellChangeOrder to 2G/GERAN -> High
+  (an explicit, per-UE directed downgrade off LTE).
+- MobilityFromEUTRACommand with a Handover purpose -> Informational
+  (legitimate inter-RAT handovers exist).
+- An LTE cell advertising CDMA2000 reselection via SIB8 -> Low (anomalous
+  in markets where CDMA2000 is decommissioned; legitimate where it runs,
+  so a per-MCC sunset policy to raise it is future work).
+
+Stateless; keys on the message/IE alone. Off by default pending per-market
+calibration. Tests use TS 36.331 vectors encoded with the reference Python
+pycrate and decoded here through telcom_parser (two independent ASN.1
+implementations): a CellChangeOrder-to-GERAN command, a SIB8 broadcast, and
+a benign RRCConnectionReconfiguration that must not fire.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ lib/src/analysis/analyzer.rs      |  34 ++++-
+ lib/src/analysis/mod.rs           |   1 +
+ lib/src/analysis/rat_downgrade.rs | 203 ++++++++++++++++++++++++++++++
+ 3 files changed, 237 insertions(+), 1 deletion(-)
+ create mode 100644 lib/src/analysis/rat_downgrade.rs
+
+diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
+index ad4b0c4..3567f0f 100644
+--- a/lib/src/analysis/analyzer.rs
++++ b/lib/src/analysis/analyzer.rs
+@@ -18,7 +18,7 @@ use super::{
+     nas_null_cipher::NasNullCipherAnalyzer, nas_reject::NasRejectAnalyzer,
+     no_nas_messages::NoNasMessagesAnalyzer, null_cipher::NullCipherAnalyzer,
+     null_integrity::NullIntegrityAnalyzer, priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
+-    test_analyzer::TestAnalyzer,
++    rat_downgrade::RatDowngradeAnalyzer, test_analyzer::TestAnalyzer,
+ };
+ 
+ /// A list of booleans which stores information about which analyzers are enabled
+@@ -39,6 +39,7 @@ pub struct AnalyzerConfig {
+     pub auth_failure: bool,
+     pub null_integrity: bool,
+     pub identity_disclosure: bool,
++    pub rat_downgrade: bool,
+ }
+ 
+ impl Default for AnalyzerConfig {
+@@ -66,6 +67,10 @@ impl Default for AnalyzerConfig {
+             // Off by default: a UE with no stored GUTI discloses its IMSI on a
+             // genuine first attach, so the severity needs per-network calibration.
+             identity_disclosure: false,
++            // Off by default: a genuine inter-RAT handover is a Handover command,
++            // and SIB8 is legitimate where CDMA2000 still runs, so this needs
++            // per-market calibration.
++            rat_downgrade: false,
+         }
+     }
+ }
+@@ -423,6 +428,10 @@ impl Harness {
+             harness.add_analyzer(Box::new(IdentityDisclosureAnalyzer))
+         }
+ 
++        if analyzer_config.rat_downgrade {
++            harness.add_analyzer(Box::new(RatDowngradeAnalyzer))
++        }
++
+         if analyzer_config.diagnostic_analyzer {
+             harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
+         }
+@@ -624,6 +633,7 @@ mod tests {
+         assert!(!config.auth_failure);
+         assert!(!config.null_integrity);
+         assert!(!config.identity_disclosure);
++        assert!(!config.rat_downgrade);
+         // A config that sets an existing key keeps the rest at their defaults.
+         let config: AnalyzerConfig =
+             serde_json::from_value(json!({ "imsi_requested": true })).unwrap();
+@@ -632,6 +642,7 @@ mod tests {
+         assert!(!config.auth_failure);
+         assert!(!config.null_integrity);
+         assert!(!config.identity_disclosure);
++        assert!(!config.rat_downgrade);
+     }
+ 
+     #[test]
+@@ -717,6 +728,27 @@ mod tests {
+         }));
+     }
+ 
++    #[test]
++    fn new_with_config_wires_rat_downgrade_only_when_enabled() {
++        let metadata = DeviceMetadata::default();
++        let expected = RatDowngradeAnalyzer.get_name().into_owned();
++        let has = |config: &AnalyzerConfig| {
++            Harness::new_with_config(config, &metadata)
++                .get_metadata()
++                .analyzers
++                .iter()
++                .any(|a| a.name == expected)
++        };
++        assert!(has(&AnalyzerConfig {
++            rat_downgrade: true,
++            ..Default::default()
++        }));
++        assert!(!has(&AnalyzerConfig {
++            rat_downgrade: false,
++            ..Default::default()
++        }));
++    }
++
+     #[test]
+     fn test_analysis_row_deserialize_old_format() {
+         let row: AnalysisRow = serde_json::from_value(json!({
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index 219122f..45b40ee 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -12,6 +12,7 @@ pub mod no_nas_messages;
+ pub mod null_cipher;
+ pub mod null_integrity;
+ pub mod priority_2g_downgrade;
++pub mod rat_downgrade;
+ pub mod test_analyzer;
+ #[cfg(test)]
+ pub(crate) mod test_util;
+diff --git a/lib/src/analysis/rat_downgrade.rs b/lib/src/analysis/rat_downgrade.rs
+new file mode 100644
+index 0000000..91f4d67
+--- /dev/null
++++ b/lib/src/analysis/rat_downgrade.rs
+@@ -0,0 +1,203 @@
++//! Flags network-directed moves off LTE toward a legacy or sunset radio access
++//! technology -- the "push the UE down to a weaker RAT" step of a downgrade
++//! attack, complementing the broadcast-reselection analyzers
++//! (`priority_2g_downgrade` for SIB6/7, `connection_redirect_downgrade` for an
++//! RRC Connection Release redirect).
++//!
++//! - A **MobilityFromEUTRACommand** is an explicit, per-UE command to leave LTE.
++//!   Its `CellChangeOrder` purpose moves the UE to GERAN (2G) -- a directed 2G
++//!   downgrade, which a false base station uses to drop the UE onto a weaker,
++//!   more interceptable RAT (High). Its `Handover` purpose is an inter-RAT
++//!   handover (to UTRA/CDMA2000); legitimate handovers exist, so that is
++//!   reported Informational.
++//! - **SIB8** carries CDMA2000 reselection parameters. CDMA2000 is decommissioned
++//!   across the US (and much of the world), so an LTE cell still advertising it
++//!   is anomalous -- Low, since in a market that still runs CDMA2000 it is
++//!   legitimate (a per-MCC sunset policy would raise it; that is future work).
++//!
++//! Stateless: keys on the message/IE presence alone. Off by default pending
++//! per-market calibration (a genuine inter-RAT handover is a Handover command;
++//! SIB8 is legitimate where CDMA2000 still runs).
++
++use std::borrow::Cow;
++
++use chrono::{DateTime, FixedOffset};
++use telcom_parser::lte_rrc::{
++    BCCH_DL_SCH_MessageType, BCCH_DL_SCH_MessageType_c1, DL_DCCH_MessageType,
++    DL_DCCH_MessageType_c1, MobilityFromEUTRACommand_r8_IEsPurpose,
++    MobilityFromEUTRACommand_r9_IEsPurpose, MobilityFromEUTRACommandCriticalExtensions,
++    MobilityFromEUTRACommandCriticalExtensions_c1, SystemInformation_r8_IEsSib_TypeAndInfo_Entry,
++    SystemInformationCriticalExtensions,
++};
++
++use super::analyzer::{Analyzer, Event, EventType};
++use super::information_element::{InformationElement, LteInformationElement};
++
++pub struct RatDowngradeAnalyzer;
++
++/// Classify a MobilityFromEUTRACommand by its purpose, independent of r8/r9.
++enum Purpose {
++    CellChangeOrder,
++    Handover,
++    Other,
++}
++
++fn purpose_event(p: Purpose) -> Option<Event> {
++    match p {
++        Purpose::CellChangeOrder => Some(Event {
++            event_type: EventType::High,
++            message: "Network ordered a cell change to 2G/GERAN (MobilityFromEUTRACommand \
++                      CellChangeOrder) -- a directed downgrade off LTE"
++                .to_string(),
++        }),
++        Purpose::Handover => Some(Event {
++            event_type: EventType::Informational,
++            message: "Network commanded an inter-RAT handover off LTE (MobilityFromEUTRACommand)"
++                .to_string(),
++        }),
++        Purpose::Other => None,
++    }
++}
++
++impl Analyzer for RatDowngradeAnalyzer {
++    fn get_name(&self) -> Cow<'_, str> {
++        Cow::from("Inter-RAT downgrade command / sunset-RAT advertisement")
++    }
++
++    fn get_description(&self) -> Cow<'_, str> {
++        Cow::from(
++            "Flags a network-directed move off LTE toward a legacy RAT: a MobilityFromEUTRACommand \
++             with a CellChangeOrder to 2G/GERAN (High) or an inter-RAT Handover (Informational), or \
++             an LTE cell advertising CDMA2000 reselection via SIB8 (Low, anomalous in markets where \
++             CDMA2000 is decommissioned). Complements the broadcast-reselection analyzers \
++             (priority_2g_downgrade for SIB6/7, connection_redirect_downgrade for a Connection \
++             Release redirect). Stateless; off by default pending per-market calibration.",
++        )
++    }
++
++    fn get_version(&self) -> u32 {
++        0
++    }
++
++    fn analyze_information_element(
++        &mut self,
++        ie: &InformationElement,
++        _packet_num: usize,
++        _timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        let InformationElement::LTE(lte) = ie else {
++            return None;
++        };
++        match lte.as_ref() {
++            LteInformationElement::DlDcch(msg) => {
++                let DL_DCCH_MessageType::C1(DL_DCCH_MessageType_c1::MobilityFromEUTRACommand(cmd)) =
++                    &msg.message
++                else {
++                    return None;
++                };
++                let MobilityFromEUTRACommandCriticalExtensions::C1(c1) = &cmd.critical_extensions
++                else {
++                    return None;
++                };
++                let purpose = match c1 {
++                    MobilityFromEUTRACommandCriticalExtensions_c1::MobilityFromEUTRACommand_r8(
++                        r8,
++                    ) => match &r8.purpose {
++                        MobilityFromEUTRACommand_r8_IEsPurpose::CellChangeOrder(_) => {
++                            Purpose::CellChangeOrder
++                        }
++                        MobilityFromEUTRACommand_r8_IEsPurpose::Handover(_) => Purpose::Handover,
++                    },
++                    MobilityFromEUTRACommandCriticalExtensions_c1::MobilityFromEUTRACommand_r9(
++                        r9,
++                    ) => match &r9.purpose {
++                        MobilityFromEUTRACommand_r9_IEsPurpose::CellChangeOrder(_) => {
++                            Purpose::CellChangeOrder
++                        }
++                        MobilityFromEUTRACommand_r9_IEsPurpose::Handover(_) => Purpose::Handover,
++                        MobilityFromEUTRACommand_r9_IEsPurpose::E_CSFB_r9(_) => Purpose::Other,
++                    },
++                    _ => Purpose::Other,
++                };
++                purpose_event(purpose)
++            }
++            LteInformationElement::BcchDlSch(msg) => {
++                let BCCH_DL_SCH_MessageType::C1(BCCH_DL_SCH_MessageType_c1::SystemInformation(si)) =
++                    &msg.message
++                else {
++                    return None;
++                };
++                let SystemInformationCriticalExtensions::SystemInformation_r8(sib) =
++                    &si.critical_extensions
++                else {
++                    return None;
++                };
++                let has_sib8 =
++                    sib.sib_type_and_info.0.iter().any(|e| {
++                        matches!(e, SystemInformation_r8_IEsSib_TypeAndInfo_Entry::Sib8(_))
++                    });
++                has_sib8.then(|| Event {
++                    event_type: EventType::Low,
++                    message: "LTE cell advertises CDMA2000 reselection (SIB8) -- anomalous where \
++                              CDMA2000 is decommissioned"
++                        .to_string(),
++                })
++            }
++            _ => None,
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::test_util::{bcch_dl_sch, collect_events, dl_dcch, packet_time};
++
++    fn hex(s: &str) -> Vec<u8> {
++        (0..s.len())
++            .step_by(2)
++            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
++            .collect()
++    }
++
++    // Vectors encoded with the reference Python pycrate (TS 36.331 ASN.1) and
++    // decoded here through telcom_parser -- two independent implementations.
++    // DL-DCCH MobilityFromEUTRACommand, CellChangeOrder -> GERAN.
++    const MOBILITY_GERAN: &str = "1808000140";
++    // BCCH-DL-SCH SystemInformation carrying SIB8.
++    const SIB8_BCCH: &str = "001880";
++    // DL-DCCH RRCConnectionReconfiguration (benign, not a mobility command).
++    const BENIGN_DLDCCH: &str = "200200";
++
++    #[test]
++    fn cell_change_order_to_geran_is_high() {
++        let mut a = RatDowngradeAnalyzer;
++        let events = collect_events(&mut a, &[(dl_dcch(&hex(MOBILITY_GERAN)), packet_time(0))]);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::High);
++        assert!(events[0].1.message.contains("GERAN"));
++    }
++
++    #[test]
++    fn sib8_advertisement_is_low() {
++        let mut a = RatDowngradeAnalyzer;
++        let events = collect_events(&mut a, &[(bcch_dl_sch(&hex(SIB8_BCCH)), packet_time(0))]);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Low);
++        assert!(events[0].1.message.contains("SIB8"));
++    }
++
++    #[test]
++    fn benign_dl_dcch_is_ignored() {
++        let mut a = RatDowngradeAnalyzer;
++        assert!(
++            collect_events(&mut a, &[(dl_dcch(&hex(BENIGN_DLDCCH)), packet_time(0))]).is_empty()
++        );
++    }
++
++    #[test]
++    fn non_lte_information_element_is_ignored() {
++        let mut a = RatDowngradeAnalyzer;
++        assert!(collect_events(&mut a, &[(InformationElement::GSM, packet_time(0))]).is_empty());
++    }
++}
+-- 
+2.56.1
+

@@ -92,6 +92,11 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   self-tested `orbic-ui-read.py` login path; `--selftest` asserts the payload still matches
   upstream's exploit string. `docs/INSTALL.md` and `docs/BACKUP-AND-RECOVERY.md` now show it as the
   secret-safe re-open.
+- **Inter-RAT downgrade detector** (T-OR-057, `[UPSTREAM]` patch 0014): flags a network-directed
+  move off LTE toward a legacy RAT -- a `MobilityFromEUTRACommand` CellChangeOrder to 2G/GERAN
+  (High) or inter-RAT Handover (Informational), or an LTE cell advertising CDMA2000 reselection via
+  SIB8 (Low). Complements the broadcast-reselection analyzers. Off by default (`rat_downgrade`).
+  Vectors are TS 36.331 PDUs encoded with Python pycrate and decoded through telcom_parser.
 - **Permanent-identity disclosure detector** (T-OR-054, `[UPSTREAM]` patch 0013): flags the UE
   disclosing a permanent identity over NAS -- an Identity Response carrying the IMSI (Medium) or the
   IMEI/IMEISV device identity (High), or an Attach Request using an IMSI as its EPS mobile identity
