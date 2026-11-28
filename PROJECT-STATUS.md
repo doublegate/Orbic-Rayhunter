@@ -3,7 +3,7 @@
 Single source of truth for the current state of Orbic-Rayhunter. Other files point here instead
 of restating status. Updated at every sprint and phase boundary.
 
-- Last updated: 2026-11-26 (v1.2.0 WIP -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity detectors, patches 0001-0011; T-OR-054 blocked on parser; T-OR-061 device session started -- patched daemon installed (patches 0001-0009), detectors live; host tooling adds rayhunter-check --config (T-OR-113, patch 0010) + RRC golden-vector harness (T-OR-112, patch 0011); reproducible 0-FP baseline over ~614k real messages, but these captures are RRC-heavy with sparse NAS so the NAS detectors need a NAS-rich capture to calibrate meaningfully)
+- Last updated: 2026-11-26 (v1.2.0 WIP -- sinks + hardening + harness + NAS-Reject + auth-failure + null-integrity detectors, patches 0001-0011; T-OR-054 blocked on parser; T-OR-061 device session started -- patched daemon installed (patches 0001-0009), detectors live; host tooling adds rayhunter-check --config (T-OR-113, patch 0010) + RRC golden-vector harness (T-OR-112, patch 0011); reproducible 0-FP baseline over ~614k messages, but the built-in Verizon SIM is not activated, so this is broadcast-only traffic (every attach refused with EMM cause #7; no Auth/SMC/Identity NAS) and the NAS detectors need an active SIM to calibrate meaningfully)
 - Version: 1.1.1 (`Cargo.toml` `workspace.package.version = "1.1.1"`)
 - Upstream pin: EFForg/rayhunter v0.13.0 (cd462a1)
 - Target: Orbic RC400L, `ORB400L_V1.2.0_BVZRT`
@@ -110,16 +110,21 @@ is in progress** (user present):
   checksummed backup; all 3 detectors enabled on-device and live in the capture pipeline.
 - DONE: calibration tooling (`scripts/calib-run.sh`, `scripts/calib-snapshot.py`,
   `scripts/calib-analyzers.toml`) + `rayhunter-check --config` (T-OR-113, patch 0010) -> a
-  **reproducible** baseline from committed code: 0 detector firings over ~614k messages of real
-  Verizon traffic (every message re-scored offline with the detectors enabled; real per-message
-  denominator). Continue the soak to widen the sample.
+  **reproducible** baseline from committed code: 0 detector firings over ~614k messages (every
+  message re-scored offline with the detectors enabled; real per-message denominator). Caveat: the
+  built-in Verizon SIM is not activated ([docs/DEVICE-PROFILE.md](docs/DEVICE-PROFILE.md)), so the
+  traffic is broadcast-only -- real SIBs and paging, but the only NAS is one Attach Request ->
+  Attach Reject (#7) per boot. That is a valid negative baseline for `nas_reject_identity` (#7 is
+  correctly ignored) and for the RRC detectors, but says little about `auth_failure` or
+  `null_integrity`, which never see an authentication or Security Mode Command here.
 - DONE: RRC golden-vector harness (T-OR-112, patch 0011) seeded from the RRC-rich captures --
   unblocks the RRC detectors T-OR-056/057 and the RRC half of T-OR-111.
-- Remaining: get a NAS-rich capture (force re-attaches: reboot / radio cycle) so the NAS detectors
-  can be calibrated and the T-OR-055 EIA0 path verified -- the current captures are RRC-heavy with
-  only Attach Request/Reject NAS; write T-OR-110 (mobile-identity parsing) to unblock T-OR-054,
-  validated against real identity IEs from that NAS capture; build T-OR-056/057 on the T-OR-112
-  harness; read the device IMSI (AT) for T-OR-056; decide each detector's default on/off.
+- Remaining: write T-OR-110 (mobile-identity parsing) against synthetic TS 24.301 vectors to
+  unblock T-OR-054; build T-OR-056/057 on the T-OR-112 harness; decide each detector's default
+  on/off. NAS-detector calibration, T-OR-055 EIA0-path verification, and real-capture validation of
+  T-OR-110 need an **active SIM** (activate the built-in one, use another carrier's SIM if the unit
+  is unlocked, or a shielded/cabled lab eNB) -- no radio cycle or reboot can produce an attach
+  exchange on an inactive SIM.
 - Then the v1.2.0 release ceremony (tag + GitHub release + on-device install validated).
 
 ## Readiness checklist (v0.1.0)
