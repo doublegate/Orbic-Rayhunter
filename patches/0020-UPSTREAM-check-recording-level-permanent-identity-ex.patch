@@ -1,4 +1,4 @@
-From 72f301246a90cf1d112a6b63ace5110bafc61a2c Mon Sep 17 00:00:00 2001
+From 4af8ae0c82ab941e1dc1c2053c10a94bc63f01cf Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 05:34:54 -0500
 Subject: [PATCH] [UPSTREAM] check: recording-level permanent-identity-exposure
@@ -7,25 +7,32 @@ Subject: [PATCH] [UPSTREAM] check: recording-level permanent-identity-exposure
 rayhunter-check now tallies, per recording, how often the network obtained or
 targeted a UE's permanent identity (IMSI/IMEI): events from the identity
 disclosure, IMSI-requested and IMSI-paging analyzers, grouped by analyzer. The
-count appears in the stdout summary and as an `identity_exposure` map in the
-JSON report (empty when nothing exposed an identity), so an operator can gauge
-a recording's exposure without grepping every event.
+count appears in the summary log and as an `identity_exposure` map in the JSON
+report, so an operator can gauge a recording's exposure without grepping every
+event.
+
+A `0` entry is seeded for each identity-exposure analyzer that is ENABLED in the
+run, so an enabled-but-clean recording (explicit 0) is distinguishable from one
+where those analyzers were never active (the key absent). The tally counts an
+event from a listed analyzer at any severity (they emit warning-level events,
+but the count is not gated on severity like `warnings`).
 
 This is a report-side aggregate over events the harness already produces -- no
 analyzer-trait or analysis change. Also moves the check test module to the end
 of the file so the crate is clippy-clean (items-after-test-module).
 
-Test: the tally counts only the identity-exposure analyzers (a non-identity
-analyzer does not contribute) and groups repeats per analyzer.
+Tests: the tally counts only the identity-exposure analyzers; a guard test
+asserts every IDENTITY_EXPOSURE_ANALYZERS name matches a real Analyzer::get_name
+in a harness with those analyzers enabled (so a rename cannot silently zero the
+count); seeding and an Informational-severity case are covered.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- check/src/main.rs | 135 +++++++++++++++++++++++++++++++++++-----------
- 1 file changed, 104 insertions(+), 31 deletions(-)
+ check/src/main.rs | 201 +++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 170 insertions(+), 31 deletions(-)
 
 diff --git a/check/src/main.rs b/check/src/main.rs
-index 94c3429..2f88a27 100644
+index 94c3429..83b8065 100644
 --- a/check/src/main.rs
 +++ b/check/src/main.rs
 @@ -10,7 +10,10 @@ use rayhunter::{
@@ -67,7 +74,26 @@ index 94c3429..2f88a27 100644
      file_path: String,
  }
  
-@@ -103,6 +119,9 @@ impl Report {
+@@ -75,6 +91,18 @@ impl Report {
+         }
+     }
+ 
++    /// Seed a `0` identity-exposure entry for each identity-exposure analyzer
++    /// that is actually ENABLED in this run, so an enabled-but-clean recording
++    /// (explicit `0`) is distinguishable from one where the exposure analyzers
++    /// were never active (the key absent).
++    fn seed_identity_exposure(&mut self, analyzer_names: &[String]) {
++        for name in analyzer_names {
++            if IDENTITY_EXPOSURE_ANALYZERS.contains(&name.as_str()) {
++                self.identity_exposure.entry(name.clone()).or_insert(0);
++            }
++        }
++    }
++
+     fn process_row(&mut self, row: AnalysisRow, analyzer_names: &[String]) {
+         self.total_messages += 1;
+         if let Some(reason) = row.skipped_message_reason {
+@@ -103,6 +131,9 @@ impl Report {
                      self.warnings += 1;
                  }
              }
@@ -77,7 +103,7 @@ index 94c3429..2f88a27 100644
              self.events.push(EventWithTimestamp {
                  timestamp,
                  analyzer,
-@@ -122,36 +141,20 @@ impl Report {
+@@ -122,36 +153,23 @@ impl Report {
              "{}: {} messages analyzed, {} warnings, {} messages skipped",
              self.file_path, self.total_messages, self.warnings, self.skipped
          );
@@ -119,8 +145,11 @@ index 94c3429..2f88a27 100644
 +                .map(|(name, count)| format!("{name}: {count}"))
 +                .collect::<Vec<_>>()
 +                .join(", ");
++            // The map holds a key for every ENABLED exposure analyzer (seeded to
++            // 0), so a total of 0 means "monitored, none seen" rather than
++            // "not monitored".
 +            info!(
-+                "{}: permanent-identity exposure: {total} event(s) across {} analyzer(s) ({breakdown})",
++                "{}: permanent-identity exposure: {total} event(s) from {} active identity analyzer(s) ({breakdown})",
 +                self.file_path,
 +                self.identity_exposure.len()
 +            );
@@ -128,7 +157,23 @@ index 94c3429..2f88a27 100644
      }
  }
  
-@@ -377,3 +380,73 @@ async fn main() {
+@@ -209,6 +227,7 @@ async fn analyze_pcap(
+         .await
+         .expect("failed to read PCAP file");
+     let mut report = Report::new(pcap_path);
++    report.seed_identity_exposure(&analyzer_names);
+     while let Some(Ok(block)) = pcap_reader.next_block().await {
+         let row = match block {
+             Block::EnhancedPacket(packet) => harness.analyze_pcap_packet(packet),
+@@ -241,6 +260,7 @@ async fn analyze_qmdl(
+         .await
+         .expect("failed to open QmdlReader");
+     let mut report = Report::new(qmdl_path);
++    report.seed_identity_exposure(&analyzer_names);
+     while let Some(maybe_message) = qmdl_reader
+         .get_next_message()
+         .await
+@@ -377,3 +397,122 @@ async fn main() {
              .expect("failed to finish writing to JSON file");
      }
  }
@@ -200,6 +245,55 @@ index 94c3429..2f88a27 100644
 +        assert_eq!(report.identity_exposure["IMSI paging"], 1);
 +        assert_eq!(report.identity_exposure.len(), 2);
 +        assert!(!report.identity_exposure.contains_key("Inter-RAT downgrade"));
++    }
++
++    #[test]
++    fn identity_exposure_names_match_real_analyzer_names() {
++        // Guard against a typo or an upstream rename silently zeroing the tally:
++        // every name in IDENTITY_EXPOSURE_ANALYZERS must be a real analyzer name
++        // in a harness with those analyzers enabled. (AnalyzerConfig, Harness and
++        // DeviceMetadata come from `use super::*`.)
++        let config = AnalyzerConfig {
++            imsi_requested: true,
++            identity_disclosure: true,
++            imsi_paging: true,
++            ..Default::default()
++        };
++        let harness = Harness::new_with_config(&config, &DeviceMetadata::default());
++        let names = analyzer_names(&harness);
++        for expected in IDENTITY_EXPOSURE_ANALYZERS {
++            assert!(
++                names.iter().any(|n| n == expected),
++                "IDENTITY_EXPOSURE_ANALYZERS entry {expected:?} does not match any analyzer name; \
++                 an analyzer was renamed",
++            );
++        }
++    }
++
++    #[test]
++    fn identity_exposure_seeds_zero_for_enabled_analyzers() {
++        // An enabled-but-clean recording keeps explicit 0 entries (distinct from
++        // an unmonitored recording, where the keys are absent).
++        let mut report = Report::new("test");
++        report.seed_identity_exposure(&[
++            "IMSI paging".to_string(),
++            "Inter-RAT downgrade".to_string(),
++        ]);
++        assert_eq!(report.identity_exposure.get("IMSI paging"), Some(&0));
++        assert!(!report.identity_exposure.contains_key("Inter-RAT downgrade"));
++    }
++
++    #[test]
++    fn identity_exposure_counts_informational_events_too() {
++        // The tally counts any event from an exposure analyzer, regardless of
++        // severity (these analyzers emit warning-level events, but the count is
++        // not gated on severity, unlike `warnings`).
++        let mut report = Report::new("test");
++        let mut row = id_row("2025-01-01T00:00:00+00:00", "info exposure");
++        row.events[0].as_mut().unwrap().event_type = EventType::Informational;
++        report.process_row(row, &["IMSI paging".to_string()]);
++        assert_eq!(report.identity_exposure["IMSI paging"], 1);
++        assert_eq!(report.warnings, 0, "Informational is not a warning");
 +    }
 +}
 -- 
