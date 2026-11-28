@@ -55,13 +55,21 @@ dependency, and a patch repoints `Cargo.toml` at it. Rules:
 - Before pinning, audit the fork against the commit upstream had locked: only the intended
   commits, no `build.rs`, proc-macros, `unsafe`, network/filesystem/process use, or new runtime
   dependencies unless the change needs them. Record the result in the patch or PR description.
+- Keep the pinned commit reachable: tag it in the fork (`orbic-rayhunter-pin-<ticket>`) and never
+  delete that tag. The branch may be rebased for an upstream submission; the tag keeps old
+  builds working.
 - The pin is temporary. Once the change merges upstream, point back at the upstream repository.
+- Tagging: a fork-pin patch is still `[UPSTREAM]` when the dependency change itself is meant for
+  the EFForg repository. What gets submitted to EFForg/rayhunter is the same patch with the
+  `Cargo.toml` URL and `Cargo.lock` source pointed at the merged EFForg commit; the fork URL is
+  never sent upstream. This keeps later `[UPSTREAM]` patches that build on it (T-OR-054) from
+  depending on a `[LOCAL]` one.
 
 Current forks:
 
-| Dependency | Fork commit | Patch | Ticket | Upstream status |
-|---|---|---|---|---|
-| `pycrate-rs` | `doublegate/pycrate-rs@77b1cc8` (branch `mobile-identity`; upstream pin `9e72e40` plus EFF's README commit `9ca5f54` and the change) | 0012 | T-OR-110 | not yet submitted |
+| Dependency | Fork commit | Tag | Patch | Ticket | Upstream status |
+|---|---|---|---|---|---|
+| `pycrate-rs` | `doublegate/pycrate-rs@77b1cc8236a6d4a7c0de571c9e550a58e13cb00a` (branch `mobile-identity`: upstream pin `9e72e40` plus EFF's README commit `9ca5f54` and the change) | `orbic-rayhunter-pin-t-or-110` | 0012 | T-OR-110 | not yet submitted |
 
 ## Upstreaming
 
