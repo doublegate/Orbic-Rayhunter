@@ -1,4 +1,4 @@
-From c23f463f86cc63ce234a9369dd667126a3e0fd50 Mon Sep 17 00:00:00 2001
+From 7ef3704007eaf91dd5dfafebf3343bd68ce29972 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 03:22:21 -0500
 Subject: [PATCH] [UPSTREAM] analysis: RRC null integrity (EIA0) detector
@@ -30,10 +30,10 @@ High), the same with EIA2 and a reconfiguration without securityConfigHO
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- lib/src/analysis/analyzer.rs           |  34 ++++-
+ lib/src/analysis/analyzer.rs           |  34 +++-
  lib/src/analysis/mod.rs                |   1 +
- lib/src/analysis/rrc_null_integrity.rs | 204 +++++++++++++++++++++++++
- 3 files changed, 238 insertions(+), 1 deletion(-)
+ lib/src/analysis/rrc_null_integrity.rs | 213 +++++++++++++++++++++++++
+ 3 files changed, 247 insertions(+), 1 deletion(-)
  create mode 100644 lib/src/analysis/rrc_null_integrity.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -137,10 +137,10 @@ index 1cf848c..67145de 100644
  pub(crate) mod test_util;
 diff --git a/lib/src/analysis/rrc_null_integrity.rs b/lib/src/analysis/rrc_null_integrity.rs
 new file mode 100644
-index 0000000..e01d7ea
+index 0000000..90a5e8d
 --- /dev/null
 +++ b/lib/src/analysis/rrc_null_integrity.rs
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,213 @@
 +//! Flags an RRC configuration that selects the null integrity algorithm (EIA0)
 +//! for access-stratum signalling.
 +//!
@@ -256,15 +256,17 @@ index 0000000..e01d7ea
 +                else {
 +                    return None;
 +                };
-+                let algo = match &r8.security_config_ho.as_ref()?.handover_type {
-+                    SecurityConfigHOHandoverType::IntraLTE(intra) => {
-+                        intra.security_algorithm_config.as_ref()?
-+                    }
-+                    SecurityConfigHOHandoverType::InterRAT(inter) => {
-+                        &inter.security_algorithm_config
-+                    }
++                let (algo, source) = match &r8.security_config_ho.as_ref()?.handover_type {
++                    SecurityConfigHOHandoverType::IntraLTE(intra) => (
++                        intra.security_algorithm_config.as_ref()?,
++                        "RRC intra-LTE handover reconfiguration",
++                    ),
++                    SecurityConfigHOHandoverType::InterRAT(inter) => (
++                        &inter.security_algorithm_config,
++                        "RRC inter-RAT handover reconfiguration",
++                    ),
 +                };
-+                selects_eia0(algo).then(|| event("RRC handover reconfiguration"))
++                selects_eia0(algo).then(|| event(source))
 +            }
 +            _ => None,
 +        }
@@ -295,6 +297,7 @@ index 0000000..e01d7ea
 +    const RECONF_HO_INTRA_EIA0: &str = "20011000";
 +    const RECONF_HO_INTER_EIA0: &str = "20012000000000000000";
 +    const RECONF_HO_INTRA_EIA2: &str = "20011020";
++    const RECONF_HO_INTER_EIA2: &str = "20012040000000000000";
 +    const RECONF_NO_HO: &str = "200000";
 +    // A benign DL-DCCH DLInformationTransfer (the T-OR-112 real vector).
 +    const BENIGN_DLDCCH: &str = "0a00183a2040074408";
@@ -315,18 +318,24 @@ index 0000000..e01d7ea
 +
 +    #[test]
 +    fn handover_reconfiguration_with_eia0_is_high() {
-+        for v in [RECONF_HO_INTRA_EIA0, RECONF_HO_INTER_EIA0] {
++        for (v, kind) in [
++            (RECONF_HO_INTRA_EIA0, "intra-LTE"),
++            (RECONF_HO_INTER_EIA0, "inter-RAT"),
++        ] {
 +            let events = run(v);
 +            assert_eq!(events.len(), 1, "{v}");
 +            assert_eq!(events[0].1.event_type, EventType::High, "{v}");
-+            assert!(events[0].1.message.contains("handover"), "{v}");
++            assert!(events[0].1.message.contains(kind), "{v}");
 +        }
 +    }
 +
 +    #[test]
 +    fn a_real_integrity_algorithm_is_ignored() {
-+        assert!(run(SMC_EIA2).is_empty());
-+        assert!(run(RECONF_HO_INTRA_EIA2).is_empty());
++        // SMC, intra-LTE handover, and inter-RAT handover all with a real
++        // integrity algorithm (EIA2) must not fire.
++        for v in [SMC_EIA2, RECONF_HO_INTRA_EIA2, RECONF_HO_INTER_EIA2] {
++            assert!(run(v).is_empty(), "{v}");
++        }
 +    }
 +
 +    #[test]
