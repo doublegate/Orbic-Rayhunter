@@ -93,7 +93,7 @@ commercial cell-site simulator, and upstreamability.
 | 3 | T-OR-054 | **Landed** (patch 0013, `identity_disclosure`) | UE `IdentityResponse` with IMSI (Medium) or IMEI/IMEISV (High); `AttachRequest` using an IMSI as its EPS mobile identity (Low) | yes -- `EPSID`/`ID` decode since T-OR-110 (patch 0012) | IMSI response Medium / IMEI response High / IMSI attach Low (stateless; home-PLMN/no-auth escalation stays in stateful `imsi_requested`) | low | [UPSTREAM] (request side already covered by upstream `imsi_requested`) |
 | 4 | T-OR-055 | **NAS half landed** (patch 0009, key `null_integrity`) | NAS Security Mode Command with EIA0 (RRC SMC and DRB-before-SMC deferred, T-OR-111) | yes (NAS) | **High** EIA0 in NAS SMC | low (emergency attach uses EIA0) | [UPSTREAM] |
 | 5 | T-OR-056 | IMSI paging (`imsi_paging`) | PCCH `PagingRecord` with `ue-Identity` = imsi, compared with the SIM IMSI by salted hash | yes (PCCH); IMSI via AT | High if ours; Low if another IMSI | low | [UPSTREAM] |
-| 6 | T-OR-057 | Dedicated-priority and sunset-RAT downgrade (`legacy_rat_downgrade`) | `idleModeMobilityControlInfo` favoring legacy RATs; redirect to UTRA/CDMA2000 where decommissioned; `MobilityFromEUTRACommand`; SIB8 priorities | yes (RRC) | High in sunset markets (MCC policy table); Informational elsewhere | low in US | [UPSTREAM] |
+| 6 | T-OR-057 | **Landed** (patch 0014, `rat_downgrade`) | `MobilityFromEUTRACommand` CellChangeOrder or Handover to GERAN (High); Handover to UTRA (Informational); Handover/e-CSFB to CDMA2000 (Low); NR/E-UTRA ignored; SIB8 broadcast (Low) | yes (RRC) | GERAN move High / UTRA move Informational / CDMA2000 move + SIB8 Low | low in US | [UPSTREAM] (dedicated-priority + per-MCC sunset policy table = T-OR-115) |
 | 7 | T-OR-059 | Cell identity consistency (`cell_consistency`) | same ECGI with different TAC or PCI; TAC change while GPS is stationary; MCC mismatch; short-lived cells, all within one recording | partial (PCI needs T-OR-058) | Low alone; raises 1-6 on the same cell | medium-high | [UPSTREAM] (partially) |
 | 8 | T-OR-058 | Measurement plumbing plus RSRP/TA outlier feature | 0xB17F/0xB180 RSRP per PCI; RACH TA near 0 on a new, strongest cell | no (parsed, not plumbed) | Informational / corroborative | high alone | [UPSTREAM] (open an issue first: changes a public enum) |
 | 9 | T-OR-062 | SIB reselection-parameter anomalies (stretch) | SIB3 priority 7 with empty SIB5, low `q-RxLevMin`, small `q-Hyst`, missing SIB4/SIB5 | yes | Informational / corroborative | high | [UPSTREAM] (maybe) |
@@ -140,7 +140,7 @@ The loop:
 
 2. **Measure.** `scripts/calib-run.sh [<captures-dir>]` pulls the recordings (`orx pull-logs`) and
    re-scores every message offline with `rayhunter-check --config scripts/calib-analyzers.toml`
-   (**T-OR-113**, which enables the default-off detectors), then prints a per-detector
+   (**T-OR-113**, which enables all five v1.2.0 default-off detectors), then prints a per-detector
    false-positive table (`scripts/calib-snapshot.py`). It needs the patched tree staged
    (`scripts/apply-patches.sh`).
 

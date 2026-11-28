@@ -41,9 +41,17 @@ DETECTOR_NAMES = {
     "NAS Reject with identity-forcing cause": "nas_reject_identity",
     "Authentication failure or reject": "auth_failure",
     "Null integrity (EIA0) requested": "null_integrity",
+    "Permanent identity disclosure": "identity_disclosure",
+    "Inter-RAT downgrade command / sunset-RAT advertisement": "rat_downgrade",
 }
 KEY_FROM_NAME = {v: k for k, v in DETECTOR_NAMES.items()}
-DET_KEYS = ("nas_reject_identity", "auth_failure", "null_integrity")
+DET_KEYS = (
+    "nas_reject_identity",
+    "auth_failure",
+    "null_integrity",
+    "identity_disclosure",
+    "rat_downgrade",
+)
 
 WARN_SEVERITIES = {"Low", "Medium", "High"}
 VALID_SEVERITIES = WARN_SEVERITIES | {"Informational"}
@@ -241,6 +249,11 @@ def selftest() -> int:
         {"name": "NAS Reject with identity-forcing cause", "version": 0},
         {"name": "Authentication failure or reject", "version": 0},
         {"name": "Null integrity (EIA0) requested", "version": 0},
+        {"name": "Permanent identity disclosure", "version": 0},
+        {
+            "name": "Inter-RAT downgrade command / sunset-RAT advertisement",
+            "version": 0,
+        },
         {"name": "Null Cipher", "version": 1},
     ]
 

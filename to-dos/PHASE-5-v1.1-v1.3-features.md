@@ -107,8 +107,10 @@ scripts/apply-patches.sh
 - [ ] T-OR-056: IMSI paging analyzer; IMSI read from the SIM via AT and held only as a salted
       in-memory hash -- harness ready (T-OR-112); still needs the detector impl + the device IMSI
       (AT, T-OR-061) and a synthetic paging vector with a test identity
-- [ ] T-OR-057: dedicated-priority and sunset-RAT downgrade, SIB8; MCC policy table as config --
-      harness ready (T-OR-112); needs the detector impl + SIB vectors (SIB1/SIB6/7/8 are safe)
+- [x] T-OR-057: inter-RAT downgrade (patch 0014, `rat_downgrade`) -- `MobilityFromEUTRACommand`
+      CellChangeOrder/Handover to GERAN (High), Handover to UTRA (Informational), Handover/e-CSFB to CDMA2000 (Low), NR/E-UTRA ignored, SIB8 broadcast (Low); vectors
+      pycrate-encoded + telcom_parser-decoded. Follow-up T-OR-115: `idleModeMobilityControlInfo` dedicated
+      priorities + the per-MCC sunset policy table
 - [ ] T-OR-058: measurement plumbing (new `InformationElement` input for ML1 and RACH TA);
       upstream issue opened before the patch
 - [ ] T-OR-059: recording-scoped cell identity consistency
