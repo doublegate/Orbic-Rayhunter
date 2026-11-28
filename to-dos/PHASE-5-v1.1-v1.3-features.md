@@ -104,9 +104,9 @@ scripts/apply-patches.sh
       `dl_dcch` builders wrap raw RRC octets through the live `lte_rrc` decode path, seeded with
       identifier-free T-OR-061 vectors (BCCH-DL-SCH SystemInformation + DL-DCCH DLInformationTransfer;
       real PCCH paging carries an S-TMSI so T-OR-056 builds synthetic paging via `lte_rrc(PCCH, ..)`)
-- [ ] T-OR-056: IMSI paging analyzer; IMSI read from the SIM via AT and held only as a salted
-      in-memory hash -- harness ready (T-OR-112); still needs the detector impl + the device IMSI
-      (AT, T-OR-061) and a synthetic paging vector with a test identity
+- [x] T-OR-056: IMSI paging analyzer (patch 0015, `imsi_paging`) -- flags any PCCH paging record
+      addressing a UE by IMSI (High); synthetic pycrate-encoded vectors. The salted-hash compare to
+      the device's own IMSI (needs the device IMSI over AT) is follow-up T-OR-116
 - [x] T-OR-057: inter-RAT downgrade (patch 0014, `rat_downgrade`) -- `MobilityFromEUTRACommand`
       CellChangeOrder/Handover to GERAN (High), Handover to UTRA (Informational), Handover/e-CSFB to CDMA2000 (Low), NR/E-UTRA ignored, SIB8 broadcast (Low); vectors
       pycrate-encoded + telcom_parser-decoded. Follow-up T-OR-115: `idleModeMobilityControlInfo` dedicated

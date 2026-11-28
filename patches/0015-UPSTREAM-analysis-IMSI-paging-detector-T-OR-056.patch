@@ -1,0 +1,311 @@
+From 6d3694bd2ead7a31855f1aec535cefc3654147f5 Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Sat, 28 Nov 2026 02:48:46 -0500
+Subject: [PATCH] [UPSTREAM] analysis: IMSI paging detector (T-OR-056)
+
+ImsiPagingAnalyzer (default off) flags a PCCH paging record that addresses
+a UE by its permanent IMSI rather than a temporary S-TMSI. A false base
+station pages a known IMSI to confirm a target's presence without an attach.
+
+Reported Medium, not High: a legitimate core can fall back to paging by IMSI
+during MME failure/restoration to recover UE context (TS 23.401 5.3.4.3,
+TS 23.007 20), and the analyzer cannot tell whether the paged IMSI is the
+monitoring device's own. The event reports how many of the PCCH records were
+IMSI records (helps triage an MME-restoration burst), and reads only the
+identity type, never the paged digits.
+
+Stateless; off by default pending per-network calibration. Test vectors are
+PCCH Paging PDUs encoded with the reference Python pycrate and decoded
+through telcom_parser: paging by IMSI (fires Medium, digits never in the
+event), an IMSI record after an S-TMSI record (multi-record path), paging by
+S-TMSI (ignored), a Paging with no records (ignored), and a non-PCCH LTE
+message (ignored).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/src/analysis/analyzer.rs    |  44 +++++++--
+ lib/src/analysis/imsi_paging.rs | 162 ++++++++++++++++++++++++++++++++
+ lib/src/analysis/mod.rs         |   1 +
+ 3 files changed, 201 insertions(+), 6 deletions(-)
+ create mode 100644 lib/src/analysis/imsi_paging.rs
+
+diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
+index 3567f0f..0e6371a 100644
+--- a/lib/src/analysis/analyzer.rs
++++ b/lib/src/analysis/analyzer.rs
+@@ -13,12 +13,13 @@ use crate::util::RuntimeMetadata;
+ use super::{
+     auth_failure::AuthFailureAnalyzer,
+     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
+-    identity_disclosure::IdentityDisclosureAnalyzer, imsi_requested::ImsiRequestedAnalyzer,
+-    incomplete_sib::IncompleteSibAnalyzer, information_element::InformationElement,
+-    nas_null_cipher::NasNullCipherAnalyzer, nas_reject::NasRejectAnalyzer,
+-    no_nas_messages::NoNasMessagesAnalyzer, null_cipher::NullCipherAnalyzer,
+-    null_integrity::NullIntegrityAnalyzer, priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
+-    rat_downgrade::RatDowngradeAnalyzer, test_analyzer::TestAnalyzer,
++    identity_disclosure::IdentityDisclosureAnalyzer, imsi_paging::ImsiPagingAnalyzer,
++    imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
++    information_element::InformationElement, nas_null_cipher::NasNullCipherAnalyzer,
++    nas_reject::NasRejectAnalyzer, no_nas_messages::NoNasMessagesAnalyzer,
++    null_cipher::NullCipherAnalyzer, null_integrity::NullIntegrityAnalyzer,
++    priority_2g_downgrade::LteSib6And7DowngradeAnalyzer, rat_downgrade::RatDowngradeAnalyzer,
++    test_analyzer::TestAnalyzer,
+ };
+ 
+ /// A list of booleans which stores information about which analyzers are enabled
+@@ -40,6 +41,7 @@ pub struct AnalyzerConfig {
+     pub null_integrity: bool,
+     pub identity_disclosure: bool,
+     pub rat_downgrade: bool,
++    pub imsi_paging: bool,
+ }
+ 
+ impl Default for AnalyzerConfig {
+@@ -71,6 +73,9 @@ impl Default for AnalyzerConfig {
+             // and SIB8 is legitimate where CDMA2000 still runs, so this needs
+             // per-market calibration.
+             rat_downgrade: false,
++            // Off by default: paging by IMSI is a strong signal but needs
++            // per-network false-positive calibration before enabling.
++            imsi_paging: false,
+         }
+     }
+ }
+@@ -432,6 +437,10 @@ impl Harness {
+             harness.add_analyzer(Box::new(RatDowngradeAnalyzer))
+         }
+ 
++        if analyzer_config.imsi_paging {
++            harness.add_analyzer(Box::new(ImsiPagingAnalyzer))
++        }
++
+         if analyzer_config.diagnostic_analyzer {
+             harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
+         }
+@@ -634,6 +643,7 @@ mod tests {
+         assert!(!config.null_integrity);
+         assert!(!config.identity_disclosure);
+         assert!(!config.rat_downgrade);
++        assert!(!config.imsi_paging);
+         // A config that sets an existing key keeps the rest at their defaults.
+         let config: AnalyzerConfig =
+             serde_json::from_value(json!({ "imsi_requested": true })).unwrap();
+@@ -643,6 +653,7 @@ mod tests {
+         assert!(!config.null_integrity);
+         assert!(!config.identity_disclosure);
+         assert!(!config.rat_downgrade);
++        assert!(!config.imsi_paging);
+     }
+ 
+     #[test]
+@@ -749,6 +760,27 @@ mod tests {
+         }));
+     }
+ 
++    #[test]
++    fn new_with_config_wires_imsi_paging_only_when_enabled() {
++        let metadata = DeviceMetadata::default();
++        let expected = ImsiPagingAnalyzer.get_name().into_owned();
++        let has = |config: &AnalyzerConfig| {
++            Harness::new_with_config(config, &metadata)
++                .get_metadata()
++                .analyzers
++                .iter()
++                .any(|a| a.name == expected)
++        };
++        assert!(has(&AnalyzerConfig {
++            imsi_paging: true,
++            ..Default::default()
++        }));
++        assert!(!has(&AnalyzerConfig {
++            imsi_paging: false,
++            ..Default::default()
++        }));
++    }
++
+     #[test]
+     fn test_analysis_row_deserialize_old_format() {
+         let row: AnalysisRow = serde_json::from_value(json!({
+diff --git a/lib/src/analysis/imsi_paging.rs b/lib/src/analysis/imsi_paging.rs
+new file mode 100644
+index 0000000..36ff2c5
+--- /dev/null
++++ b/lib/src/analysis/imsi_paging.rs
+@@ -0,0 +1,162 @@
++//! Flags a network paging a UE by its permanent IMSI on PCCH.
++//!
++//! A network normally pages a UE by a temporary identity (an S-TMSI derived
++//! from the GUTI it assigned at attach). Paging by the permanent IMSI is a
++//! known IMSI-catcher technique: the operator of a false base station that has
++//! learned a target's IMSI pages that IMSI to make the target's UE respond,
++//! confirming the subscriber's presence in the area without completing an
++//! attach.
++//!
++//! It is reported Medium rather than High because a legitimate core can fall
++//! back to paging by IMSI during MME failure/restoration to recover UE context
++//! (3GPP TS 23.401 5.3.4.3, TS 23.007 20), and this analyzer cannot tell whether
++//! the paged IMSI is the monitoring device's own. Comparing the paged identity
++//! to the device's IMSI (held only as a salted in-memory hash) would let a
++//! confirmed self-page be raised, but needs the device's own IMSI and is a
++//! future refinement.
++//!
++//! Privacy: the analyzer reads only the identity type (IMSI vs. a temporary
++//! identity), never the paged digits, so no IMSI value reaches the event.
++//!
++//! Stateless; off by default pending per-network calibration.
++
++use std::borrow::Cow;
++
++use chrono::{DateTime, FixedOffset};
++use telcom_parser::lte_rrc::{PCCH_MessageType, PCCH_MessageType_c1, PagingUE_Identity};
++
++use super::analyzer::{Analyzer, Event, EventType};
++use super::information_element::{InformationElement, LteInformationElement};
++
++pub struct ImsiPagingAnalyzer;
++
++impl Analyzer for ImsiPagingAnalyzer {
++    fn get_name(&self) -> Cow<'_, str> {
++        Cow::from("IMSI paging")
++    }
++
++    fn get_description(&self) -> Cow<'_, str> {
++        Cow::from(
++            "Flags a PCCH paging record that addresses a UE by its permanent IMSI rather than a \
++             temporary identity (S-TMSI). A false base station pages a known IMSI to confirm a \
++             target's presence; the main benign cause is MME failure/restoration. Reads only the \
++             identity type, never the paged digits. Reported Medium because it cannot yet tell \
++             whether the paged IMSI is this device's own. Off by default pending calibration.",
++        )
++    }
++
++    fn get_version(&self) -> u32 {
++        0
++    }
++
++    fn analyze_information_element(
++        &mut self,
++        ie: &InformationElement,
++        _packet_num: usize,
++        _timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        let InformationElement::LTE(lte) = ie else {
++            return None;
++        };
++        let LteInformationElement::PCCH(pcch) = lte.as_ref() else {
++            return None;
++        };
++        let PCCH_MessageType::C1(PCCH_MessageType_c1::Paging(paging)) = &pcch.message else {
++            return None;
++        };
++        let records = &paging.paging_record_list.as_ref()?.0;
++        let imsi_count = records
++            .iter()
++            .filter(|r| matches!(r.ue_identity, PagingUE_Identity::Imsi(_)))
++            .count();
++        (imsi_count > 0).then(|| Event {
++            event_type: EventType::Medium,
++            message: format!(
++                "{imsi_count} of {} PCCH paging records addressed a UE by its permanent IMSI -- \
++                 normal paging uses a temporary identity (S-TMSI); a benign cause is MME \
++                 restoration",
++                records.len()
++            ),
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::test_util::{collect_events, lte_rrc, packet_time};
++    use crate::gsmtap::LteRrcSubtype;
++
++    fn hex(s: &str) -> Vec<u8> {
++        assert_eq!(s.len() % 2, 0, "odd-length hex vector");
++        (0..s.len())
++            .step_by(2)
++            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
++            .collect()
++    }
++
++    // PCCH Paging PDUs encoded with the reference Python pycrate (TS 36.331
++    // ASN.1) and decoded here through telcom_parser. All synthetic.
++    // One paging record, ue-Identity = imsi (test IMSI 001010123456789).
++    const PAGING_IMSI: &str = "40190010101234567890";
++    // One paging record, ue-Identity = s-TMSI (the normal case).
++    const PAGING_STMSI: &str = "40001123456780";
++    // A Paging message with no paging records (e.g. a bare SI-modification page).
++    const PAGING_EMPTY: &str = "00";
++    // Two records: an S-TMSI then an IMSI (the IMSI is not the first record).
++    const PAGING_STMSI_THEN_IMSI: &str = "40801123456781900101012345678900";
++
++    fn run(v: &str) -> Vec<(usize, Event)> {
++        let mut a = ImsiPagingAnalyzer;
++        collect_events(
++            &mut a,
++            &[(lte_rrc(LteRrcSubtype::PCCH, &hex(v)), packet_time(0))],
++        )
++    }
++
++    #[test]
++    fn paging_by_imsi_is_medium() {
++        let events = run(PAGING_IMSI);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Medium);
++        assert!(events[0].1.message.contains("IMSI"));
++        // never the digits
++        assert!(!events[0].1.message.contains("001010123456789"));
++    }
++
++    #[test]
++    fn imsi_record_after_an_s_tmsi_record_still_fires() {
++        // Exercises `.any(..)` beyond the first record.
++        let events = run(PAGING_STMSI_THEN_IMSI);
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].1.event_type, EventType::Medium);
++    }
++
++    #[test]
++    fn paging_by_s_tmsi_is_ignored() {
++        assert!(run(PAGING_STMSI).is_empty());
++    }
++
++    #[test]
++    fn paging_with_no_records_is_ignored() {
++        assert!(run(PAGING_EMPTY).is_empty());
++    }
++
++    #[test]
++    fn non_pcch_lte_message_is_ignored() {
++        // A BCCH SystemInformation is an LTE IE but not PCCH: exercises the
++        // inner LteInformationElement::PCCH guard (the outer LTE check passes).
++        use crate::analysis::test_util::bcch_dl_sch;
++        let sysinfo = hex(
++            "00025b30542fdb28c44605a28158000c032073bd156124000c026dd096af81c6892003c00310030000",
++        );
++        let mut a = ImsiPagingAnalyzer;
++        assert!(collect_events(&mut a, &[(bcch_dl_sch(&sysinfo), packet_time(0))]).is_empty());
++    }
++
++    #[test]
++    fn non_lte_information_element_is_ignored() {
++        let mut a = ImsiPagingAnalyzer;
++        assert!(collect_events(&mut a, &[(InformationElement::GSM, packet_time(0))]).is_empty());
++    }
++}
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index 45b40ee..1cf848c 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -3,6 +3,7 @@ pub mod auth_failure;
+ pub mod connection_redirect_downgrade;
+ pub mod diagnostic;
+ pub mod identity_disclosure;
++pub mod imsi_paging;
+ pub mod imsi_requested;
+ pub mod incomplete_sib;
+ pub mod information_element;
+-- 
+2.56.1
+

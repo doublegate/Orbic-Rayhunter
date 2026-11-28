@@ -43,6 +43,7 @@ DETECTOR_NAMES = {
     "Null integrity (EIA0) requested": "null_integrity",
     "Permanent identity disclosure": "identity_disclosure",
     "Inter-RAT downgrade command / sunset-RAT advertisement": "rat_downgrade",
+    "IMSI paging": "imsi_paging",
 }
 KEY_FROM_NAME = {v: k for k, v in DETECTOR_NAMES.items()}
 DET_KEYS = (
@@ -51,6 +52,7 @@ DET_KEYS = (
     "null_integrity",
     "identity_disclosure",
     "rat_downgrade",
+    "imsi_paging",
 )
 
 WARN_SEVERITIES = {"Low", "Medium", "High"}
@@ -254,6 +256,7 @@ def selftest() -> int:
             "name": "Inter-RAT downgrade command / sunset-RAT advertisement",
             "version": 0,
         },
+        {"name": "IMSI paging", "version": 0},
         {"name": "Null Cipher", "version": 1},
     ]
 
