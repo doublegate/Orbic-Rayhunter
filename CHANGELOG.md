@@ -92,6 +92,12 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   self-tested `orbic-ui-read.py` login path; `--selftest` asserts the payload still matches
   upstream's exploit string. `docs/INSTALL.md` and `docs/BACKUP-AND-RECOVERY.md` now show it as the
   secret-safe re-open.
+- **Cell identity consistency detector** (T-OR-059, `[UPSTREAM]` patch 0019): flags a cell
+  inconsistent with itself across one recording -- the same E-UTRAN cell identity (from SIB1) with
+  two tracking area codes, or (correlating the serving SIB1 with an ML1 serving measurement, T-OR-058)
+  on two physical cell ids. Corroborative, Low, off by default (`cell_consistency`); compares
+  identifiers but never logs them. The idle-mode PCI half uses the RRC_IDLE ML1 log; connected-mode
+  PCI, GPS-stationary TAC change, MCC mismatch and short-lived cells are deferred to T-OR-118.
 - **ML1 measurement plumbing** (T-OR-058, `[UPSTREAM]` patch 0018): physical-layer serving/neighbor
   cell measurements (PCI, EARFCN, RSRP) now reach analyzers through a new
   `Analyzer::report_measurement` trait method (whose default delegates to `report_skipped_packet`,

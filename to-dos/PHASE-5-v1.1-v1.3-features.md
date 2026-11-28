@@ -114,7 +114,9 @@ scripts/apply-patches.sh
 - [x] T-OR-058: measurement plumbing -- `Ml1Measurement` + a `report_measurement` (default delegates to `report_skipped_packet`)
   trait method + harness dispatch of 0xB17F/0xB180 (patch 0018; additive, no `InformationElement`/enum
   change; RACH TA plumbing + the RSRP/TA outlier feature deferred to T-OR-117);
-- [ ] T-OR-059: recording-scoped cell identity consistency
+- [x] T-OR-059: recording-scoped cell identity consistency (patch 0019, `cell_consistency`:
+  SIB1 ECGI<->TAC + idle-mode ECGI<->PCI via T-OR-058; Low, off by default; connected-mode PCI /
+  GPS-stationary TAC / MCC mismatch / short-lived cells deferred to T-OR-118)
 - [ ] T-OR-060: recording-level identity-exposure summary in the report
 
 Acceptance criteria: as Sprint 5.2; T-OR-058 merged or agreed upstream before T-OR-059 depends on

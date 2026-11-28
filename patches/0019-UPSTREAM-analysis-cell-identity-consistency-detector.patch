@@ -1,0 +1,379 @@
+From 9838ea7a478cea71f4ea2ab53eb5101f5f62d177 Mon Sep 17 00:00:00 2001
+From: DoubleGate <parobek@gmail.com>
+Date: Sat, 28 Nov 2026 04:53:40 -0500
+Subject: [PATCH] [UPSTREAM] analysis: cell identity consistency detector
+ (T-OR-059)
+
+CellConsistencyAnalyzer (default off) flags a cell inconsistent with itself
+across one recording: the same E-UTRAN cell identity (from SIB1) advertised
+with two different tracking area codes, or -- correlating the most recent
+serving SIB1 with an ML1 serving measurement (T-OR-058) -- measured on two
+different physical cell ids. A real cell has one fixed (identity, TAC, PCI);
+a mismatch can be identifier cloning or rotation by a false base station.
+
+Corroborative and Low, off by default pending T-OR-061 calibration. State is
+per recording (first value seen per cell identity). The PCI half uses the
+RRC_IDLE ML1 serving log, so it covers idle-mode; connected-mode PCI is T-OR-117.
+
+Privacy: compares cell-identity / TAC bit patterns and PCI values but never
+puts any identifier in an event -- it reports only that a mismatch occurred.
+
+Test vectors are SIB1 PDUs encoded with the reference Python pycrate and
+decoded through telcom_parser: same cell identity with two TACs (fires), with
+one TAC (quiet), two different cell identities (quiet); and ML1 serving
+measurements giving the same cell identity two PCIs (fires) / one PCI (quiet),
+plus a measurement before any SIB1 (quiet).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: DoubleGate <parobek@gmail.com>
+---
+ lib/src/analysis/analyzer.rs         |  31 +++-
+ lib/src/analysis/cell_consistency.rs | 240 +++++++++++++++++++++++++++
+ lib/src/analysis/mod.rs              |   1 +
+ 3 files changed, 271 insertions(+), 1 deletion(-)
+ create mode 100644 lib/src/analysis/cell_consistency.rs
+
+diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
+index dfffd00..e79709c 100644
+--- a/lib/src/analysis/analyzer.rs
++++ b/lib/src/analysis/analyzer.rs
+@@ -11,7 +11,7 @@ use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, parser as gsmtap_pa
+ use crate::util::RuntimeMetadata;
+ 
+ use super::{
+-    auth_failure::AuthFailureAnalyzer,
++    auth_failure::AuthFailureAnalyzer, cell_consistency::CellConsistencyAnalyzer,
+     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
+     identity_disclosure::IdentityDisclosureAnalyzer, imsi_paging::ImsiPagingAnalyzer,
+     imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
+@@ -44,6 +44,7 @@ pub struct AnalyzerConfig {
+     pub rat_downgrade: bool,
+     pub imsi_paging: bool,
+     pub rrc_null_integrity: bool,
++    pub cell_consistency: bool,
+ }
+ 
+ impl Default for AnalyzerConfig {
+@@ -82,6 +83,7 @@ impl Default for AnalyzerConfig {
+             // emergency call, so it needs per-network calibration and
+             // emergency-case suppression.
+             rrc_null_integrity: false,
++            cell_consistency: false,
+         }
+     }
+ }
+@@ -474,6 +476,10 @@ impl Harness {
+             harness.add_analyzer(Box::new(RrcNullIntegrityAnalyzer))
+         }
+ 
++        if analyzer_config.cell_consistency {
++            harness.add_analyzer(Box::new(CellConsistencyAnalyzer::default()))
++        }
++
+         if analyzer_config.diagnostic_analyzer {
+             harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
+         }
+@@ -712,6 +718,7 @@ mod tests {
+         assert!(!config.rat_downgrade);
+         assert!(!config.imsi_paging);
+         assert!(!config.rrc_null_integrity);
++        assert!(!config.cell_consistency);
+         // A config that sets an existing key keeps the rest at their defaults.
+         let config: AnalyzerConfig =
+             serde_json::from_value(json!({ "imsi_requested": true })).unwrap();
+@@ -723,6 +730,7 @@ mod tests {
+         assert!(!config.rat_downgrade);
+         assert!(!config.imsi_paging);
+         assert!(!config.rrc_null_integrity);
++        assert!(!config.cell_consistency);
+     }
+ 
+     #[test]
+@@ -871,6 +879,27 @@ mod tests {
+         }));
+     }
+ 
++    #[test]
++    fn new_with_config_wires_cell_consistency_only_when_enabled() {
++        let metadata = DeviceMetadata::default();
++        let expected = CellConsistencyAnalyzer::default().get_name().into_owned();
++        let has = |config: &AnalyzerConfig| {
++            Harness::new_with_config(config, &metadata)
++                .get_metadata()
++                .analyzers
++                .iter()
++                .any(|a| a.name == expected)
++        };
++        assert!(has(&AnalyzerConfig {
++            cell_consistency: true,
++            ..Default::default()
++        }));
++        assert!(!has(&AnalyzerConfig {
++            cell_consistency: false,
++            ..Default::default()
++        }));
++    }
++
+     #[test]
+     fn test_analysis_row_deserialize_old_format() {
+         let row: AnalysisRow = serde_json::from_value(json!({
+diff --git a/lib/src/analysis/cell_consistency.rs b/lib/src/analysis/cell_consistency.rs
+new file mode 100644
+index 0000000..80e6150
+--- /dev/null
++++ b/lib/src/analysis/cell_consistency.rs
+@@ -0,0 +1,240 @@
++//! Flags a cell that is inconsistent with itself across one recording: the same
++//! E-UTRAN cell identity advertised with two different tracking area codes, or
++//! the same cell identity measured on two different physical cell ids (PCI).
++//!
++//! A real eNB cell has one fixed (cell identity, TAC, PCI). A false base station
++//! that clones a legitimate cell's identity, or rotates identifiers to evade
++//! correlation, produces a mismatch within a single recording. This is a weak
++//! signal on its own -- it corroborates the NAS/RRC detectors on the same cell
++//! -- so it is Low and off by default pending T-OR-061 calibration.
++//!
++//! State is per recording and holds only the FIRST value seen per cell identity;
++//! it is reset implicitly by starting a new recording (a new analyzer instance).
++//!
++//! Inputs:
++//! - RRC SIB1 (`BcchDlSch` -> `SystemInformationBlockType1`) gives the serving
++//!   cell's `cellIdentity` and `trackingAreaCode`.
++//! - ML1 serving measurements (via [`Analyzer::report_measurement`], T-OR-058)
++//!   give the serving cell's PCI, correlated with the most recent SIB1's cell
++//!   identity. These are RRC_IDLE logs, so the PCI check covers idle mode.
++//!
++//! Privacy: the analyzer compares cell-identity / TAC bit patterns and PCI
++//! values but never puts any of them in an event; it reports only that a
++//! mismatch occurred, not the identifiers involved.
++
++use std::borrow::Cow;
++use std::collections::HashMap;
++
++use chrono::{DateTime, FixedOffset};
++use telcom_parser::lte_rrc::{BCCH_DL_SCH_MessageType, BCCH_DL_SCH_MessageType_c1};
++
++use super::analyzer::{Analyzer, Event, EventType};
++use super::information_element::{InformationElement, LteInformationElement};
++use super::measurement::Ml1Measurement;
++
++/// A cell identity / tracking area code reduced to its raw bytes, for comparison
++/// as a map key. Equal bit patterns yield equal bytes; the values are never
++/// logged.
++type Bits = Vec<u8>;
++
++#[derive(Default)]
++pub struct CellConsistencyAnalyzer {
++    /// cell identity -> the first tracking area code seen with it.
++    tac_by_cell: HashMap<Bits, Bits>,
++    /// cell identity -> the first serving PCI seen with it.
++    pci_by_cell: HashMap<Bits, u16>,
++    /// The cell identity of the most recently decoded serving SIB1, used to
++    /// attribute a serving-cell PCI measurement to a cell identity.
++    last_serving_cell: Option<Bits>,
++}
++
++impl CellConsistencyAnalyzer {
++    fn event(detail: &str) -> Event {
++        Event {
++            event_type: EventType::Low,
++            message: format!(
++                "A cell was inconsistent with itself within one recording: {detail}. A real cell \
++                 has one fixed identity, tracking area and physical cell id; a mismatch can be \
++                 identifier cloning or rotation by a false base station"
++            ),
++        }
++    }
++}
++
++impl Analyzer for CellConsistencyAnalyzer {
++    fn get_name(&self) -> Cow<'_, str> {
++        Cow::from("Cell identity consistency")
++    }
++
++    fn get_description(&self) -> Cow<'_, str> {
++        Cow::from(
++            "Flags a cell inconsistent with itself across one recording: the same E-UTRAN cell \
++             identity (from SIB1) advertised with two different tracking area codes, or measured \
++             (idle-mode ML1) on two different physical cell ids. Corroborative and Low; off by \
++             default pending calibration. Compares identifiers but never reports their values.",
++        )
++    }
++
++    fn get_version(&self) -> u32 {
++        0
++    }
++
++    fn analyze_information_element(
++        &mut self,
++        ie: &InformationElement,
++        _packet_num: usize,
++        _timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        let InformationElement::LTE(lte) = ie else {
++            return None;
++        };
++        let LteInformationElement::BcchDlSch(sch) = lte.as_ref() else {
++            return None;
++        };
++        let BCCH_DL_SCH_MessageType::C1(BCCH_DL_SCH_MessageType_c1::SystemInformationBlockType1(
++            sib1,
++        )) = &sch.message
++        else {
++            return None;
++        };
++        let cari = &sib1.cell_access_related_info;
++        let cell = cari.cell_identity.0.clone().into_vec();
++        let tac = cari.tracking_area_code.0.clone().into_vec();
++        self.last_serving_cell = Some(cell.clone());
++
++        match self.tac_by_cell.get(&cell) {
++            Some(seen) if *seen != tac => Some(Self::event(
++                "the same cell identity was announced with two tracking area codes",
++            )),
++            Some(_) => None,
++            None => {
++                self.tac_by_cell.insert(cell, tac);
++                None
++            }
++        }
++    }
++
++    fn report_measurement(
++        &mut self,
++        measurement: &Ml1Measurement,
++        _packet_num: usize,
++        _timestamp: DateTime<FixedOffset>,
++    ) -> Option<Event> {
++        let Ml1Measurement::ServingCell(serving) = measurement else {
++            return None;
++        };
++        let cell = self.last_serving_cell.clone()?;
++        match self.pci_by_cell.get(&cell) {
++            Some(seen) if *seen != serving.pci => Some(Self::event(
++                "the same cell identity appeared on two physical cell ids",
++            )),
++            Some(_) => None,
++            None => {
++                self.pci_by_cell.insert(cell, serving.pci);
++                None
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::analysis::measurement::Ml1ServingCell;
++    use crate::analysis::test_util::{bcch_dl_sch, hex, packet_time};
++
++    // SIB1 PDUs encoded with the reference Python pycrate (TS 36.331, PLMN
++    // 001/01) and decoded through telcom_parser.
++    // cellIdentity A=0x0ABCDEF; TAC 0x0001 / 0x0002. cellIdentity B=0x1234567.
++    const SIB1_A_TAC1: &str = "4040040300010ABCDEF8000080108280";
++    const SIB1_A_TAC2: &str = "4040040300020ABCDEF8000080108280";
++    const SIB1_B_TAC1: &str = "40400403000112345678000080108280";
++
++    fn sib1(v: &str) -> InformationElement {
++        bcch_dl_sch(&hex(v))
++    }
++
++    fn serving(pci: u16) -> Ml1Measurement {
++        Ml1Measurement::ServingCell(Ml1ServingCell::new(pci, 6300, -100.0))
++    }
++
++    #[test]
++    fn same_cell_identity_two_tacs_fires() {
++        let mut a = CellConsistencyAnalyzer::default();
++        assert!(
++            a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0))
++                .is_none()
++        );
++        let ev = a
++            .analyze_information_element(&sib1(SIB1_A_TAC2), 1, packet_time(1))
++            .expect("mismatch fires");
++        assert_eq!(ev.event_type, EventType::Low);
++        assert!(ev.message.contains("tracking area"));
++        // The event must not leak the identifiers.
++        assert!(!ev.message.contains("0001") && !ev.message.contains("0002"));
++    }
++
++    #[test]
++    fn same_cell_identity_same_tac_is_quiet() {
++        let mut a = CellConsistencyAnalyzer::default();
++        assert!(
++            a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0))
++                .is_none()
++        );
++        assert!(
++            a.analyze_information_element(&sib1(SIB1_A_TAC1), 1, packet_time(1))
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn different_cell_identities_are_quiet() {
++        let mut a = CellConsistencyAnalyzer::default();
++        assert!(
++            a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0))
++                .is_none()
++        );
++        assert!(
++            a.analyze_information_element(&sib1(SIB1_B_TAC1), 1, packet_time(1))
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn same_cell_identity_two_pcis_fires() {
++        let mut a = CellConsistencyAnalyzer::default();
++        a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0));
++        assert!(
++            a.report_measurement(&serving(214), 1, packet_time(1))
++                .is_none()
++        );
++        let ev = a
++            .report_measurement(&serving(425), 2, packet_time(2))
++            .expect("pci mismatch fires");
++        assert_eq!(ev.event_type, EventType::Low);
++        assert!(ev.message.contains("physical cell id"));
++    }
++
++    #[test]
++    fn same_cell_identity_same_pci_is_quiet() {
++        let mut a = CellConsistencyAnalyzer::default();
++        a.analyze_information_element(&sib1(SIB1_A_TAC1), 0, packet_time(0));
++        assert!(
++            a.report_measurement(&serving(214), 1, packet_time(1))
++                .is_none()
++        );
++        assert!(
++            a.report_measurement(&serving(214), 2, packet_time(2))
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn a_measurement_before_any_sib1_is_quiet() {
++        let mut a = CellConsistencyAnalyzer::default();
++        assert!(
++            a.report_measurement(&serving(214), 0, packet_time(0))
++                .is_none()
++        );
++    }
++}
+diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
+index cb9aed5..14152e8 100644
+--- a/lib/src/analysis/mod.rs
++++ b/lib/src/analysis/mod.rs
+@@ -1,5 +1,6 @@
+ pub mod analyzer;
+ pub mod auth_failure;
++pub mod cell_consistency;
+ pub mod connection_redirect_downgrade;
+ pub mod diagnostic;
+ pub mod identity_disclosure;
+-- 
+2.56.1
+
