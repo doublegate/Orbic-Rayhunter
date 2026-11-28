@@ -93,8 +93,8 @@ persistent retry queue (T-OR-050) are deferred. On-device validation is batched 
   upstream's exploit string. `docs/INSTALL.md` and `docs/BACKUP-AND-RECOVERY.md` now show it as the
   secret-safe re-open.
 - **RRC null integrity (EIA0) detector** (T-OR-111 part a, `[UPSTREAM]` patch 0016): flags an RRC
-  Security Mode Command selecting the null integrity algorithm (EIA0 -> High), leaving
-  access-stratum signalling unauthenticated -- the AS-layer counterpart to the NAS EIA0 that
+  configuration selecting the null integrity algorithm (EIA0 -> High) in a Security Mode Command or
+  a handover reconfiguration (`securityConfigHO`), leaving access-stratum signalling unauthenticated -- the AS-layer counterpart to the NAS EIA0 that
   `null_integrity` catches. Off by default (`rrc_null_integrity`); emergency-case suppression is the
   remaining stateful part of T-OR-111.
 - **IMSI paging detector** (T-OR-056, `[UPSTREAM]` patch 0015): flags a PCCH paging record that

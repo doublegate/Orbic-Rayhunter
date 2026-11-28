@@ -1,33 +1,39 @@
-From 9315df006ac010398c5185a6fa3f23209bd714fd Mon Sep 17 00:00:00 2001
+From c23f463f86cc63ce234a9369dd667126a3e0fd50 Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 03:22:21 -0500
 Subject: [PATCH] [UPSTREAM] analysis: RRC null integrity (EIA0) detector
  (T-OR-111 part a)
 
-RrcNullIntegrityAnalyzer (default off) flags an RRC Security Mode Command
-that selects the null integrity algorithm (EIA0), leaving access-stratum
-signalling unauthenticated -- the AS-layer counterpart to the NAS Security
-Mode Command EIA0 that the null_integrity analyzer already flags. A UE that
-accepts it will act on forged RRC (measurement config, reconfiguration,
-release/redirect), the foothold a false base station needs. High.
+RrcNullIntegrityAnalyzer (default off) flags an RRC configuration that
+selects the null integrity algorithm (EIA0), leaving access-stratum
+signalling unauthenticated -- the AS-layer counterpart to the NAS EIA0 that
+null_integrity catches. A UE that accepts it will act on forged RRC
+(measurement config, reconfiguration, release/redirect), the foothold a
+false base station needs. High.
+
+The AS can select the integrity algorithm in two places, and both are
+checked: a SecurityModeCommand (securityConfigSMC), and a handover
+RRCConnectionReconfiguration (securityConfigHO -- intra-LTE or inter-RAT),
+since a handover establishes AS algorithms without a separate Security Mode
+Command and a CSS could select EIA0 there too.
 
 The one legitimate use of EIA0 is an unauthenticated emergency call;
-suppressing that case (an EIA0 RRC SMC after an emergency attach) needs
-connection state and is the remaining stateful part of T-OR-111, so an
-emergency call is a known false positive until then -- hence off by default.
+suppressing that case needs connection state and is the remaining stateful
+part of T-OR-111, so an emergency call is a known false positive until then
+-- hence off by default.
 
-Test vectors are DL-DCCH SecurityModeCommand PDUs encoded with the reference
-Python pycrate and decoded through telcom_parser: a Security Mode Command
-selecting EIA0 (fires High), one selecting EIA2 (ignored), a benign
-RRCConnectionReconfiguration (ignored), and a non-LTE element (ignored).
+Test vectors are DL-DCCH PDUs encoded with the reference Python pycrate and
+decoded through telcom_parser: a Security Mode Command selecting EIA0, an
+intra-LTE and an inter-RAT handover reconfiguration selecting EIA0 (all fire
+High), the same with EIA2 and a reconfiguration without securityConfigHO
+(ignored), a DLInformationTransfer (ignored), and a non-LTE element.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Signed-off-by: DoubleGate <parobek@gmail.com>
 ---
- lib/src/analysis/analyzer.rs           |  34 +++++-
+ lib/src/analysis/analyzer.rs           |  34 ++++-
  lib/src/analysis/mod.rs                |   1 +
- lib/src/analysis/rrc_null_integrity.rs | 141 +++++++++++++++++++++++++
- 3 files changed, 175 insertions(+), 1 deletion(-)
+ lib/src/analysis/rrc_null_integrity.rs | 204 +++++++++++++++++++++++++
+ 3 files changed, 238 insertions(+), 1 deletion(-)
  create mode 100644 lib/src/analysis/rrc_null_integrity.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -131,12 +137,12 @@ index 1cf848c..67145de 100644
  pub(crate) mod test_util;
 diff --git a/lib/src/analysis/rrc_null_integrity.rs b/lib/src/analysis/rrc_null_integrity.rs
 new file mode 100644
-index 0000000..6f3c97b
+index 0000000..e01d7ea
 --- /dev/null
 +++ b/lib/src/analysis/rrc_null_integrity.rs
-@@ -0,0 +1,141 @@
-+//! Flags an RRC Security Mode Command that selects the null integrity algorithm
-+//! (EIA0) for access-stratum signalling.
+@@ -0,0 +1,204 @@
++//! Flags an RRC configuration that selects the null integrity algorithm (EIA0)
++//! for access-stratum signalling.
 +//!
 +//! EIA0 leaves RRC signalling integrity-unprotected: a UE that accepts it will
 +//! act on unauthenticated RRC messages (measurement config, reconfiguration,
@@ -145,21 +151,29 @@ index 0000000..6f3c97b
 +//! selecting EIA0 that the `null_integrity` analyzer already flags; a CSS can
 +//! drive either layer.
 +//!
++//! The access stratum can select the integrity algorithm in two places, and
++//! this analyzer checks both:
++//! - a `SecurityModeCommand` (`securityConfigSMC`), the normal case; and
++//! - an `RRCConnectionReconfiguration` carrying `securityConfigHO` -- a handover
++//!   (intra-LTE or inter-RAT to LTE) establishes AS algorithms without a
++//!   separate Security Mode Command, so a CSS could select EIA0 there too.
++//!
 +//! The one legitimate use of EIA0 is an unauthenticated emergency call, where
 +//! the network has no security context to integrity-protect with. The detector
 +//! is therefore stateless and High but off by default: suppressing the
-+//! emergency case (an EIA0 Security Mode Command that follows an emergency
-+//! attach) needs connection state and is a separate, stateful follow-up, so
-+//! until then an emergency call is a known false positive.
++//! emergency case needs connection state and is a separate, stateful follow-up,
++//! so until then an emergency call is a known false positive.
 +//!
 +//! Scope: operates on the RRC the Rayhunter DIAG pipeline delivers, matching the
-+//! decoded DL-DCCH SecurityModeCommand directly.
++//! decoded DL-DCCH message directly.
 +
 +use std::borrow::Cow;
 +
 +use chrono::{DateTime, FixedOffset};
 +use telcom_parser::lte_rrc::{
-+    DL_DCCH_MessageType, DL_DCCH_MessageType_c1, SecurityAlgorithmConfigIntegrityProtAlgorithm,
++    DL_DCCH_MessageType, DL_DCCH_MessageType_c1, RRCConnectionReconfigurationCriticalExtensions,
++    RRCConnectionReconfigurationCriticalExtensions_c1, SecurityAlgorithmConfig,
++    SecurityAlgorithmConfigIntegrityProtAlgorithm, SecurityConfigHOHandoverType,
 +    SecurityModeCommandCriticalExtensions, SecurityModeCommandCriticalExtensions_c1,
 +};
 +
@@ -168,6 +182,21 @@ index 0000000..6f3c97b
 +
 +pub struct RrcNullIntegrityAnalyzer;
 +
++/// True if the AS security algorithm config selects null integrity (EIA0).
++fn selects_eia0(algo: &SecurityAlgorithmConfig) -> bool {
++    algo.integrity_prot_algorithm.0 == SecurityAlgorithmConfigIntegrityProtAlgorithm::EIA0_V920
++}
++
++fn event(source: &str) -> Event {
++    Event {
++        event_type: EventType::High,
++        message: format!(
++            "{source} selected null integrity (EIA0) -- access-stratum signalling left \
++             unauthenticated"
++        ),
++    }
++}
++
 +impl Analyzer for RrcNullIntegrityAnalyzer {
 +    fn get_name(&self) -> Cow<'_, str> {
 +        Cow::from("RRC null integrity (EIA0)")
@@ -175,12 +204,15 @@ index 0000000..6f3c97b
 +
 +    fn get_description(&self) -> Cow<'_, str> {
 +        Cow::from(
-+            "Flags an RRC Security Mode Command that selects the null integrity algorithm (EIA0), \
-+             leaving access-stratum signalling unauthenticated -- the access-stratum counterpart to \
-+             a NAS Security Mode Command selecting EIA0. A false base station uses it so the UE will \
-+             act on forged RRC messages. High. The one legitimate use is an unauthenticated \
-+             emergency call, which a stateless detector cannot yet exclude, so it is off by default \
-+             pending calibration and emergency-case suppression.",
++            "Flags an RRC configuration that selects the null integrity algorithm (EIA0), leaving \
++             access-stratum signalling unauthenticated -- the access-stratum counterpart to a NAS \
++             Security Mode Command selecting EIA0. Checks both a Security Mode Command \
++             (securityConfigSMC) and a handover RRCConnectionReconfiguration (securityConfigHO, \
++             intra-LTE or inter-RAT), since a handover establishes AS algorithms without a separate \
++             Security Mode Command. A false base station uses EIA0 so the UE will act on forged RRC. \
++             High. The one legitimate use is an unauthenticated emergency call, which a stateless \
++             detector cannot yet exclude, so it is off by default pending calibration and \
++             emergency-case suppression.",
 +        )
 +    }
 +
@@ -200,28 +232,42 @@ index 0000000..6f3c97b
 +        let LteInformationElement::DlDcch(msg) = lte.as_ref() else {
 +            return None;
 +        };
-+        let DL_DCCH_MessageType::C1(DL_DCCH_MessageType_c1::SecurityModeCommand(smc)) =
-+            &msg.message
-+        else {
-+            return None;
-+        };
-+        let SecurityModeCommandCriticalExtensions::C1(
-+            SecurityModeCommandCriticalExtensions_c1::SecurityModeCommand_r8(r8),
-+        ) = &smc.critical_extensions
-+        else {
-+            return None;
-+        };
-+        let integ = r8
-+            .security_config_smc
-+            .security_algorithm_config
-+            .integrity_prot_algorithm
-+            .0;
-+        (integ == SecurityAlgorithmConfigIntegrityProtAlgorithm::EIA0_V920).then(|| Event {
-+            event_type: EventType::High,
-+            message: "RRC Security Mode Command selected null integrity (EIA0) -- access-stratum \
-+                      signalling left unauthenticated"
-+                .to_string(),
-+        })
++        match &msg.message {
++            // Security Mode Command: securityConfigSMC -> securityAlgorithmConfig.
++            DL_DCCH_MessageType::C1(DL_DCCH_MessageType_c1::SecurityModeCommand(smc)) => {
++                let SecurityModeCommandCriticalExtensions::C1(
++                    SecurityModeCommandCriticalExtensions_c1::SecurityModeCommand_r8(r8),
++                ) = &smc.critical_extensions
++                else {
++                    return None;
++                };
++                selects_eia0(&r8.security_config_smc.security_algorithm_config)
++                    .then(|| event("RRC Security Mode Command"))
++            }
++            // Handover reconfiguration: securityConfigHO -> handoverType ->
++            // securityAlgorithmConfig (present always for inter-RAT, optionally
++            // for intra-LTE).
++            DL_DCCH_MessageType::C1(DL_DCCH_MessageType_c1::RrcConnectionReconfiguration(
++                reconf,
++            )) => {
++                let RRCConnectionReconfigurationCriticalExtensions::C1(
++                    RRCConnectionReconfigurationCriticalExtensions_c1::RrcConnectionReconfiguration_r8(r8),
++                ) = &reconf.critical_extensions
++                else {
++                    return None;
++                };
++                let algo = match &r8.security_config_ho.as_ref()?.handover_type {
++                    SecurityConfigHOHandoverType::IntraLTE(intra) => {
++                        intra.security_algorithm_config.as_ref()?
++                    }
++                    SecurityConfigHOHandoverType::InterRAT(inter) => {
++                        &inter.security_algorithm_config
++                    }
++                };
++                selects_eia0(algo).then(|| event("RRC handover reconfiguration"))
++            }
++            _ => None,
++        }
 +    }
 +}
 +
@@ -238,14 +284,20 @@ index 0000000..6f3c97b
 +            .collect()
 +    }
 +
-+    // DL-DCCH SecurityModeCommand PDUs encoded with the reference Python pycrate
-+    // (TS 36.331) and decoded here through telcom_parser.
-+    // integrityProtAlgorithm = eia0-v920 (null integrity).
++    // DL-DCCH PDUs encoded with the reference Python pycrate (TS 36.331) and
++    // decoded here through telcom_parser.
++    // SecurityModeCommand: integrityProtAlgorithm = eia0 / eia2.
 +    const SMC_EIA0: &str = "300000";
-+    // integrityProtAlgorithm = eia2 (a real algorithm) -- benign.
 +    const SMC_EIA2: &str = "300020";
-+    // A benign DL-DCCH RRCConnectionReconfiguration (not a SecurityModeCommand).
-+    const BENIGN_DLDCCH: &str = "200200";
++    // RRCConnectionReconfiguration with securityConfigHO selecting EIA0:
++    // intra-LTE and inter-RAT handover; plus an intra-LTE EIA2 and a reconfig
++    // with no securityConfigHO (both benign).
++    const RECONF_HO_INTRA_EIA0: &str = "20011000";
++    const RECONF_HO_INTER_EIA0: &str = "20012000000000000000";
++    const RECONF_HO_INTRA_EIA2: &str = "20011020";
++    const RECONF_NO_HO: &str = "200000";
++    // A benign DL-DCCH DLInformationTransfer (the T-OR-112 real vector).
++    const BENIGN_DLDCCH: &str = "0a00183a2040074408";
 +
 +    fn run(v: &str) -> Vec<(usize, Event)> {
 +        let mut a = RrcNullIntegrityAnalyzer;
@@ -253,20 +305,37 @@ index 0000000..6f3c97b
 +    }
 +
 +    #[test]
-+    fn rrc_smc_with_eia0_is_high() {
++    fn security_mode_command_with_eia0_is_high() {
 +        let events = run(SMC_EIA0);
 +        assert_eq!(events.len(), 1);
 +        assert_eq!(events[0].1.event_type, EventType::High);
 +        assert!(events[0].1.message.contains("EIA0"));
++        assert!(events[0].1.message.contains("Security Mode Command"));
 +    }
 +
 +    #[test]
-+    fn rrc_smc_with_a_real_algorithm_is_ignored() {
++    fn handover_reconfiguration_with_eia0_is_high() {
++        for v in [RECONF_HO_INTRA_EIA0, RECONF_HO_INTER_EIA0] {
++            let events = run(v);
++            assert_eq!(events.len(), 1, "{v}");
++            assert_eq!(events[0].1.event_type, EventType::High, "{v}");
++            assert!(events[0].1.message.contains("handover"), "{v}");
++        }
++    }
++
++    #[test]
++    fn a_real_integrity_algorithm_is_ignored() {
 +        assert!(run(SMC_EIA2).is_empty());
++        assert!(run(RECONF_HO_INTRA_EIA2).is_empty());
 +    }
 +
 +    #[test]
-+    fn non_smc_dl_dcch_is_ignored() {
++    fn reconfiguration_without_security_config_ho_is_ignored() {
++        assert!(run(RECONF_NO_HO).is_empty());
++    }
++
++    #[test]
++    fn unrelated_dl_dcch_is_ignored() {
 +        assert!(run(BENIGN_DLDCCH).is_empty());
 +    }
 +
