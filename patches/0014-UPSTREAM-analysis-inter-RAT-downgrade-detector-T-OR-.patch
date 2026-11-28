@@ -1,4 +1,4 @@
-From fcd94de27cb9303cc94ab6b4ac5d46754f95a597 Mon Sep 17 00:00:00 2001
+From 28c311d897f0e4a40990f0aa67e6d5d4a203e43f Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 01:54:32 -0500
 Subject: [PATCH] [UPSTREAM] analysis: inter-RAT downgrade detector (T-OR-057)
@@ -35,8 +35,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  lib/src/analysis/analyzer.rs      |  34 ++-
  lib/src/analysis/mod.rs           |   1 +
- lib/src/analysis/rat_downgrade.rs | 383 ++++++++++++++++++++++++++++++
- 3 files changed, 417 insertions(+), 1 deletion(-)
+ lib/src/analysis/rat_downgrade.rs | 385 ++++++++++++++++++++++++++++++
+ 3 files changed, 419 insertions(+), 1 deletion(-)
  create mode 100644 lib/src/analysis/rat_downgrade.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -140,10 +140,10 @@ index 219122f..45b40ee 100644
  pub(crate) mod test_util;
 diff --git a/lib/src/analysis/rat_downgrade.rs b/lib/src/analysis/rat_downgrade.rs
 new file mode 100644
-index 0000000..cb4feb2
+index 0000000..099457f
 --- /dev/null
 +++ b/lib/src/analysis/rat_downgrade.rs
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,385 @@
 +//! Flags network-directed moves off LTE toward a legacy or sunset radio access
 +//! technology -- the "push the UE down to a weaker RAT" step of a downgrade
 +//! attack, complementing the broadcast-reselection analyzers
@@ -197,20 +197,23 @@ index 0000000..cb4feb2
 +    Other,
 +}
 +
-+/// Name the CDMA2000 variants the Low arm reports; GERAN and UTRA are handled
-+/// with their own literals, and NR/E-UTRA never reach here.
-+fn name_target_rat(target: u8) -> &'static str {
-+    match target {
-+        HandoverTargetRAT_Type::CDMA2000_HRPD => "CDMA2000 HRPD",
-+        _ => "CDMA2000 1xRTT",
-+    }
-+}
-+
 +/// A " (marked CS fallback)" suffix when the command set cs-FallbackIndicator,
 +/// which usually means a legitimate voice-call fallback rather than a forced
 +/// downgrade -- useful context during calibration.
 +fn csfb_suffix(csfb: bool) -> &'static str {
 +    if csfb { " (marked CS fallback)" } else { "" }
++}
++
++/// A Low event for a handover to a named CDMA2000 variant.
++fn cdma_handover_event(rat: &str, csfb: bool) -> Event {
++    Event {
++        event_type: EventType::Low,
++        message: format!(
++            "Network commanded an inter-RAT handover off LTE to {rat} \
++             (MobilityFromEUTRACommand Handover){}",
++            csfb_suffix(csfb)
++        ),
++    }
 +}
 +
 +fn purpose_event(p: Purpose, csfb: bool) -> Option<Event> {
@@ -245,16 +248,11 @@ index 0000000..cb4feb2
 +            }),
 +            // CDMA2000 is decommissioned across the US, so an active command onto
 +            // it is as anomalous as the passive SIB8 advert -- Low, not below it.
-+            HandoverTargetRAT_Type::CDMA2000_1XRTT | HandoverTargetRAT_Type::CDMA2000_HRPD => {
-+                Some(Event {
-+                    event_type: EventType::Low,
-+                    message: format!(
-+                        "Network commanded an inter-RAT handover off LTE to {} \
-+                         (MobilityFromEUTRACommand Handover){}",
-+                        name_target_rat(target),
-+                        csfb_suffix(csfb)
-+                    ),
-+                })
++            HandoverTargetRAT_Type::CDMA2000_1XRTT => {
++                Some(cdma_handover_event("CDMA2000 1xRTT", csfb))
++            }
++            HandoverTargetRAT_Type::CDMA2000_HRPD => {
++                Some(cdma_handover_event("CDMA2000 HRPD", csfb))
 +            }
 +            // NR (5G) and E-UTRA are not downgrades; any other (spare/unknown)
 +            // code is left alone rather than guessed at.
@@ -281,10 +279,11 @@ index 0000000..cb4feb2
 +    fn get_description(&self) -> Cow<'_, str> {
 +        Cow::from(
 +            "Flags a network-directed move off LTE toward a legacy RAT: a MobilityFromEUTRACommand \
-+             with a CellChangeOrder or a Handover to 2G/GERAN (High), a Handover or e-CSFB to \
-+             3G/UTRA or CDMA2000 (Informational), or an LTE cell broadcasting CDMA2000 interworking \
-+             (SIB8, Low -- anomalous where CDMA2000 is decommissioned). A handover to NR (5G) or \
-+             E-UTRA is ignored. Complements the broadcast-reselection analyzers \
++             with a CellChangeOrder or a Handover to 2G/GERAN (High), a Handover to 3G/UTRA \
++             (Informational), a Handover or e-CSFB to CDMA2000 (Low), or an LTE cell broadcasting \
++             CDMA2000 interworking (SIB8, Low) -- CDMA2000 is anomalous where it is decommissioned. \
++             A handover to NR (5G) or E-UTRA is ignored. Complements the broadcast-reselection \
++             analyzers \
 +             (priority_2g_downgrade for SIB6/7, connection_redirect_downgrade for a Connection \
 +             Release redirect). Stateless; SIB8 repeats on BCCH, so enabling it in a CDMA2000 \
 +             market yields a Low event per repetition. Off by default pending per-market \
@@ -399,6 +398,7 @@ index 0000000..cb4feb2
 +    const HANDOVER_EUTRA: &str = "1800a02000";
 +    // r8 Handover -> CDMA2000 1xRTT (value 2), and GERAN with cs-FallbackIndicator set.
 +    const HANDOVER_CDMA: &str = "1800402000";
++    const HANDOVER_HRPD: &str = "1800602000";
 +    const HANDOVER_GERAN_CSFB: &str = "1810202000";
 +    // A SIB1 on BCCH-DL-SCH (a non-SystemInformation BCCH message): must not fire.
 +    const BCCH_SIB1: &str = "404004030001000000180000005000";
@@ -462,11 +462,13 @@ index 0000000..cb4feb2
 +    #[test]
 +    fn handover_to_cdma2000_is_low() {
 +        // Active command onto a decommissioned RAT: Low, matching the passive
-+        // SIB8 advert (never below it).
-+        let events = run_dl(HANDOVER_CDMA);
-+        assert_eq!(events.len(), 1);
-+        assert_eq!(events[0].1.event_type, EventType::Low);
-+        assert!(events[0].1.message.contains("CDMA2000"));
++        // SIB8 advert (never below it). Both 1xRTT and HRPD targets.
++        for (v, label) in [(HANDOVER_CDMA, "1xRTT"), (HANDOVER_HRPD, "HRPD")] {
++            let events = run_dl(v);
++            assert_eq!(events.len(), 1, "{label}");
++            assert_eq!(events[0].1.event_type, EventType::Low, "{label}");
++            assert!(events[0].1.message.contains(label), "{label}");
++        }
 +    }
 +
 +    #[test]
