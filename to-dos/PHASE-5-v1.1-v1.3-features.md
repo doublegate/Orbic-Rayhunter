@@ -111,7 +111,9 @@ scripts/apply-patches.sh
       CellChangeOrder/Handover to GERAN (High), Handover to UTRA (Informational), Handover/e-CSFB to CDMA2000 (Low), NR/E-UTRA ignored, SIB8 broadcast (Low); vectors
       pycrate-encoded + telcom_parser-decoded. Follow-up T-OR-115: `idleModeMobilityControlInfo` dedicated
       priorities + the per-MCC sunset policy table
-- [ ] T-OR-058: measurement plumbing (new `InformationElement` input for ML1 and RACH TA);
+- [x] T-OR-058: measurement plumbing -- `Ml1Measurement` + a default-no-op `report_measurement`
+  trait method + harness dispatch of 0xB17F/0xB180 (patch 0018; additive, no `InformationElement`/enum
+  change; RACH TA a future add);
       upstream issue opened before the patch
 - [ ] T-OR-059: recording-scoped cell identity consistency
 - [ ] T-OR-060: recording-level identity-exposure summary in the report
