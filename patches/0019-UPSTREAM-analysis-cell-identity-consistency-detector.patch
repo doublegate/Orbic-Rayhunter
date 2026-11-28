@@ -1,4 +1,4 @@
-From a2f4cecab809ba599870fdcb5f4bd30c2d9897b0 Mon Sep 17 00:00:00 2001
+From f0c0b3bde1adf7136efee265b94fc25af6009dfb Mon Sep 17 00:00:00 2001
 From: DoubleGate <parobek@gmail.com>
 Date: Sat, 28 Nov 2026 04:53:40 -0500
 Subject: [PATCH] [UPSTREAM] analysis: cell identity consistency detector
@@ -31,9 +31,9 @@ two different cellIdentities (quiet), and the same cellIdentity under two PLMNs
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  lib/src/analysis/analyzer.rs         |  31 ++-
- lib/src/analysis/cell_consistency.rs | 286 +++++++++++++++++++++++++++
+ lib/src/analysis/cell_consistency.rs | 357 +++++++++++++++++++++++++++
  lib/src/analysis/mod.rs              |   1 +
- 3 files changed, 317 insertions(+), 1 deletion(-)
+ 3 files changed, 388 insertions(+), 1 deletion(-)
  create mode 100644 lib/src/analysis/cell_consistency.rs
 
 diff --git a/lib/src/analysis/analyzer.rs b/lib/src/analysis/analyzer.rs
@@ -122,10 +122,10 @@ index dfffd00..e79709c 100644
          let row: AnalysisRow = serde_json::from_value(json!({
 diff --git a/lib/src/analysis/cell_consistency.rs b/lib/src/analysis/cell_consistency.rs
 new file mode 100644
-index 0000000..16a2a2d
+index 0000000..02e8d2a
 --- /dev/null
 +++ b/lib/src/analysis/cell_consistency.rs
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,357 @@
 +//! Flags an E-UTRAN cell that advertises the same cell identity (ECGI) with two
 +//! different tracking area codes within one recording.
 +//!
@@ -155,7 +155,8 @@ index 0000000..16a2a2d
 +//!   a clone that reorders the list would not match the original ECGI.
 +//! - Past `MAX_TRACKED_CELLS` distinct cells the analyzer stops tracking NEW
 +//!   cells for the rest of the recording (already-tracked cells still fire), so
-+//!   a pre-flood of bogus SIB1s can blind it; a diagnostic/eviction policy is
++//!   a pre-flood of bogus SIB1s can blind it. A one-shot Informational event
++//!   marks when the cap is hit so the blind spot is visible; bounded eviction is
 +//!   future work.
 +//!
 +//! Privacy: compares the ECGI and TAC but never puts either in an event; it
@@ -180,7 +181,7 @@ index 0000000..16a2a2d
 +/// A cell's global identity, as a small `Copy` key (no per-SIB1 heap churn).
 +/// MCC is 3 digits; MNC is 2 or 3, so `mnc_len` keeps `01` distinct from `001`.
 +/// Never logged.
-+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
++#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 +struct Ecgi {
 +    mcc: [u8; 3],
 +    mnc: [u8; 3],
@@ -226,6 +227,8 @@ index 0000000..16a2a2d
 +#[derive(Default)]
 +pub struct CellConsistencyAnalyzer {
 +    cells: HashMap<Ecgi, CellState>,
++    /// Set once the cap is hit, so the saturation diagnostic fires only once.
++    saturated_reported: bool,
 +}
 +
 +impl CellConsistencyAnalyzer {
@@ -237,6 +240,17 @@ index 0000000..16a2a2d
 +                      mismatch can be identity cloning or tracking-area rotation by a false base \
 +                      station"
 +                .to_string(),
++        }
++    }
++
++    fn saturation_event() -> Event {
++        Event {
++            event_type: EventType::Informational,
++            message: format!(
++                "Cell-identity tracking saturated at {MAX_TRACKED_CELLS} cells in this recording; \
++                 new cells are no longer checked for consistency (a long recording or a SIB1 \
++                 identity flood)"
++            ),
 +        }
 +    }
 +}
@@ -289,7 +303,7 @@ index 0000000..16a2a2d
 +            .tracking_area_code
 +            .0
 +            .iter()
-+            .fold(0u32, |acc, b| (acc << 1) | (*b as u32)) as u16;
++            .fold(0u16, |acc, b| (acc << 1) | u16::from(*b));
 +        let ecgi = Ecgi::new(&cari.plmn_identity_list.0.first()?.plmn_identity, eci)?;
 +
 +        match self.cells.get(&ecgi) {
@@ -301,11 +315,17 @@ index 0000000..16a2a2d
 +            Some(CellState::Seen(_)) => None,
 +            None => {
 +                // Bound memory: stop tracking NEW cells past the cap (already
-+                // tracked cells still fire).
++                // tracked cells still fire). Emit a one-shot diagnostic the first
++                // time the cap blocks a new cell, so the blind spot is visible.
 +                if self.cells.len() < MAX_TRACKED_CELLS {
 +                    self.cells.insert(ecgi, CellState::Seen(tac));
++                    None
++                } else if !self.saturated_reported {
++                    self.saturated_reported = true;
++                    Some(Self::saturation_event())
++                } else {
++                    None
 +                }
-+                None
 +            }
 +        }
 +    }
@@ -381,35 +401,86 @@ index 0000000..16a2a2d
 +        );
 +    }
 +
++    fn synthetic_ecgi(eci: u32) -> Ecgi {
++        Ecgi {
++            mcc: [9, 9, 9],
++            mnc: [9, 9, 0],
++            mnc_len: 2,
++            eci,
++        }
++    }
++
 +    #[test]
 +    fn the_cap_bounds_new_cells_but_tracked_cells_still_fire() {
-+        // Track cell A, then fill the map to the cap with synthetic distinct
-+        // ECGIs (encoding 4096 real SIB1 PDUs is impractical; the test module can
-+        // reach the private map directly).
++        // Fill the map to exactly MAX_TRACKED_CELLS - 1 synthetic cells, plus
++        // cell A, so len == MAX_TRACKED_CELLS (encoding that many real SIB1 PDUs
++        // is impractical; the test module can reach the private map directly).
 +        let mut a = CellConsistencyAnalyzer::default();
 +        run(&mut a, A_PLMN1_TAC1, 0); // cell A: Seen(TAC1)
-+        for eci in 0..MAX_TRACKED_CELLS as u32 {
-+            a.cells.insert(
-+                Ecgi {
-+                    mcc: [9, 9, 9],
-+                    mnc: [9, 9, 0],
-+                    mnc_len: 2,
-+                    eci,
-+                },
-+                CellState::Seen(1),
-+            );
++        for eci in 0..(MAX_TRACKED_CELLS as u32 - 1) {
++            a.cells.insert(synthetic_ecgi(eci), CellState::Seen(1));
 +        }
-+        assert!(a.cells.len() >= MAX_TRACKED_CELLS);
-+        // A brand-new cell past the cap is NOT tracked (map does not grow).
++        assert_eq!(a.cells.len(), MAX_TRACKED_CELLS, "exactly at the cap");
++
++        // A brand-new cell at the cap is NOT tracked, and the one-shot
++        // saturation diagnostic fires (Informational).
 +        let before = a.cells.len();
-+        assert!(run(&mut a, B_PLMN1_TAC1, 1).is_none());
++        let ev = run(&mut a, B_PLMN1_TAC1, 1).expect("saturation diagnostic");
++        assert_eq!(ev.event_type, EventType::Informational);
 +        assert_eq!(
 +            a.cells.len(),
 +            before,
 +            "new cell past the cap is not tracked"
 +        );
++        // The diagnostic fires only once.
++        assert!(run(&mut a, B_PLMN1_TAC2, 2).is_none());
 +        // Cell A, tracked before the cap, still fires on a different TAC.
++        assert!(run(&mut a, A_PLMN1_TAC2, 3).is_some());
++    }
++
++    #[test]
++    fn two_cells_fire_independently() {
++        let mut a = CellConsistencyAnalyzer::default();
++        assert!(run(&mut a, A_PLMN1_TAC1, 0).is_none());
++        assert!(run(&mut a, B_PLMN1_TAC1, 1).is_none());
++        // A's own TAC change fires; B is unaffected and still fires on its own.
 +        assert!(run(&mut a, A_PLMN1_TAC2, 2).is_some());
++        assert!(run(&mut a, B_PLMN1_TAC2, 3).is_some());
++    }
++
++    #[test]
++    fn same_cell_identity_two_vs_three_digit_mnc_is_quiet() {
++        // PLMN 001/01 then 001/010 (same cellIdentity, different MNC length) are
++        // distinct ECGIs: 01 != 010, so no inconsistency even on different TACs.
++        const A_PLMN_3DIGIT_MNC_TAC2: &str = "40400602100020ABCDEF80000801082800";
++        let mut a = CellConsistencyAnalyzer::default();
++        assert!(run(&mut a, A_PLMN1_TAC1, 0).is_none());
++        assert!(run(&mut a, A_PLMN_3DIGIT_MNC_TAC2, 1).is_none());
++    }
++
++    fn plmn(mcc: Option<&[u8]>, mnc: &[u8]) -> PLMN_Identity {
++        use telcom_parser::lte_rrc::{MCC, MNC};
++        PLMN_Identity {
++            mcc: mcc.map(|d| MCC(d.iter().map(|n| MCC_MNC_Digit(*n)).collect())),
++            mnc: MNC(mnc.iter().map(|n| MCC_MNC_Digit(*n)).collect()),
++        }
++    }
++
++    #[test]
++    fn ecgi_new_rejects_malformed_plmn() {
++        // Missing MCC (mandatory in the primary PLMN), wrong MCC length, and a
++        // bad MNC length all yield None rather than a partial key.
++        assert!(Ecgi::new(&plmn(None, &[0, 1]), 1).is_none());
++        assert!(Ecgi::new(&plmn(Some(&[0, 0]), &[0, 1]), 1).is_none());
++        assert!(Ecgi::new(&plmn(Some(&[0, 0, 1]), &[0]), 1).is_none());
++        assert!(Ecgi::new(&plmn(Some(&[0, 0, 1]), &[0, 1, 2, 3]), 1).is_none());
++    }
++
++    #[test]
++    fn ecgi_new_distinguishes_two_and_three_digit_mnc() {
++        let two = Ecgi::new(&plmn(Some(&[0, 0, 1]), &[0, 1]), 1).unwrap();
++        let three = Ecgi::new(&plmn(Some(&[0, 0, 1]), &[0, 1, 0]), 1).unwrap();
++        assert_ne!(two, three, "01 and 010 must be different ECGIs");
 +    }
 +}
 diff --git a/lib/src/analysis/mod.rs b/lib/src/analysis/mod.rs
